@@ -19,6 +19,7 @@ mod auth;
 mod pathfinding;
 mod reservations;
 mod security;
+mod site_config;
 mod state;
 mod users;
 mod ws;
@@ -27,7 +28,6 @@ use axum::{
     Router,
     extract::State,
     http::{HeaderMap, StatusCode},
-    response::{Html, IntoResponse, Redirect},
     routing::{get, post, put},
 };
 use sqlx::postgres::PgPoolOptions;
@@ -35,7 +35,6 @@ use state::{SharedState, init_state};
 use tokio::net::TcpListener;
 use tower_http::{
     cors::{Any, CorsLayer},
-    services::ServeDir,
     trace::TraceLayer,
 };
 
@@ -88,7 +87,12 @@ async fn main() {
         return;
     }
 
-    let parking_state: SharedState = init_state(pool, jwt_secret, plate_pepper, edge_api_key).await;
+    let site_data_dir = std::env::var("SITE_DATA_DIR")
+        .expect("SITE_DATA_DIR required: directory containing config.json and spots_3d.json");
+    let site = site_config::SiteConfig::load(site_data_dir)
+        .expect("Failed to load installation maps from SITE_DATA_DIR");
+    let parking_state: SharedState =
+        init_state(pool, jwt_secret, plate_pepper, edge_api_key, site).await;
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -97,10 +101,6 @@ async fn main() {
 
     let app = Router::new()
         .route("/health", get(health_check))
-        .route("/", get(serve_index))
-        .route("/app", get(serve_app))
-        .route("/login", get(serve_login))
-        .route("/dashboard", get(serve_dashboard))
         .route("/ws/edge", get(ws::ws_edge_handler))
         .route("/ws/app", get(ws::ws_app_handler))
         .route("/ws/dashboard", get(ws::ws_dashboard_handler))
@@ -128,8 +128,7 @@ async fn main() {
         .route("/config", post(save_config))
         .with_state(parking_state.clone())
         .layer(cors)
-        .layer(TraceLayer::new_for_http())
-        .fallback_service(ServeDir::new("../web"));
+        .layer(TraceLayer::new_for_http());
 
     let listener = TcpListener::bind("0.0.0.0:8000").await.unwrap();
     tracing::info!("Server listening on {}", listener.local_addr().unwrap());
@@ -192,123 +191,20 @@ async fn health_check() -> &'static str {
     "OK"
 }
 
-async fn serve_dashboard(
-    State(state): State<SharedState>,
-    headers: HeaderMap,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let mut is_admin = false;
-    if let Some(cookie) = headers.get(axum::http::header::COOKIE)
-        && let Ok(cookie_str) = cookie.to_str()
-        && let Some(token_part) = cookie_str
-            .split(';')
-            .find(|s| s.trim().starts_with("estaciona_token="))
-    {
-        let token = token_part.trim().trim_start_matches("estaciona_token=");
-        if let Ok(claims) = crate::security::verify_jwt(token, &state.jwt_secret)
-            && claims.role == "admin"
-        {
-            is_admin = true;
-        }
-    }
-
-    if is_admin {
-        match std::fs::read_to_string("../web/dashboard.html") {
-            Ok(content) => Ok(Html(content).into_response()),
-            Err(_) => Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "File not found".to_string(),
-            )),
-        }
-    } else {
-        let redirect = if headers.get(axum::http::header::COOKIE).is_some() {
-            "/app"
-        } else {
-            "/login"
-        };
-        Ok(Redirect::to(redirect).into_response())
-    }
-}
-
-async fn serve_app() -> Result<impl IntoResponse, (StatusCode, String)> {
-    match std::fs::read_to_string("../web/app.html") {
-        Ok(content) => Ok(Html(content).into_response()),
-        Err(_) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "File not found".to_string(),
-        )),
-    }
-}
-
-async fn serve_login() -> Result<impl IntoResponse, (StatusCode, String)> {
-    match std::fs::read_to_string("../web/login.html") {
-        Ok(content) => Ok(Html(content).into_response()),
-        Err(_) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "File not found".to_string(),
-        )),
-    }
-}
-
-async fn serve_index() -> Result<impl IntoResponse, (StatusCode, String)> {
-    match std::fs::read_to_string("../web/index.html") {
-        Ok(content) => Ok(Html(content).into_response()),
-        Err(_) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "File not found".to_string(),
-        )),
-    }
-}
-
 async fn save_config(
     State(state): State<SharedState>,
     headers: HeaderMap,
     axum::Json(payload): axum::Json<serde_json::Value>,
 ) -> Result<&'static str, (axum::http::StatusCode, String)> {
     crate::security::require_admin(&headers, &state.jwt_secret)?;
-    let lots = payload.as_array().ok_or((
-        StatusCode::BAD_REQUEST,
-        "Expected parking lots array".to_string(),
-    ))?;
-    if lots.is_empty()
-        || lots[0]
-            .get("path")
-            .and_then(|p| p.as_array())
-            .is_none_or(|p| p.len() < 2)
-    {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "First parking lot needs at least two path points".to_string(),
-        ));
-    }
-    for lot in lots {
-        let valid_name = lot
-            .get("name")
-            .and_then(|n| n.as_str())
-            .is_some_and(|name| {
-                !name.is_empty() && name.len() <= 100 && !name.contains(['<', '>', '&'])
-            });
-        let valid_path = lot
-            .get("path")
-            .and_then(|p| p.as_array())
-            .is_some_and(|path| {
-                path.iter().all(|point| {
-                    point.get("x").and_then(|v| v.as_f64()).is_some()
-                        && point.get("z").and_then(|v| v.as_f64()).is_some()
-                })
-            });
-        if !valid_name || !valid_path {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "Invalid parking lot configuration".to_string(),
-            ));
-        }
-    }
-    let path = std::path::Path::new("../web/data/config.json");
-    let content = serde_json::to_string_pretty(&payload)
-        .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e.to_string()))?;
-
-    std::fs::write(path, content)
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    site_config::save_parking_config(&state.site_data_dir, &payload).map_err(|error| {
+        let status = if error.kind() == std::io::ErrorKind::InvalidData {
+            StatusCode::BAD_REQUEST
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
+        (status, error.to_string())
+    })?;
 
     Ok(r#"{"status": "ok"}"#)
 }

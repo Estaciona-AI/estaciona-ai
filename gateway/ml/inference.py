@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 from datetime import datetime, timedelta, timezone
 import time
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
@@ -83,8 +83,15 @@ class PredictiveEngine:
 
         return occupancy_counts
 
+    def get_capacity(self):
+        with self.engine.connect() as connection:
+            return int(
+                connection.execute(text("SELECT COUNT(*) FROM spots")).scalar_one()
+            )
+
     def predict_trends(self):
         now = datetime.now(timezone.utc)
+        capacity = self.get_capacity()
 
         # Get 192 hours to evaluate the last 24h performance and predict next 24h
         history_counts = self.get_history(192)
@@ -99,7 +106,9 @@ class PredictiveEngine:
             preds_norm = self.transformer(tensor_in).squeeze().numpy()
         inference_time_ms = (time.perf_counter() - t_start) * 1000
 
-        preds_real = (preds_norm * self.max_val).clip(min=0).astype(int).tolist()
+        preds_real = (
+            (preds_norm * self.max_val).clip(min=0, max=capacity).astype(int).tolist()
+        )
 
         forecast_array = []
         for i, val in enumerate(preds_real):
@@ -144,7 +153,7 @@ class PredictiveEngine:
                 "inference_time_ms": float(inference_time_ms),
             },
             "next_24h_occupancy": forecast_array,
-            "max_capacity": 44,
+            "max_capacity": capacity,
         }
 
         return payload

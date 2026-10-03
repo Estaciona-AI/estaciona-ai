@@ -105,14 +105,6 @@ pub fn create_jwt(
 }
 
 pub fn verify_jwt(token: &str, secret: &str) -> Result<Claims, jsonwebtoken::errors::Error> {
-    if token == "demo-token" {
-        return Ok(Claims {
-            sub: "00000000-0000-0000-0000-000000000000".to_string(),
-            role: "admin".to_string(), // Grant admin rights to demo token
-            exp: 9999999999,
-        });
-    }
-
     let token_data = decode::<Claims>(
         token,
         &DecodingKey::from_secret(secret.as_bytes()),
@@ -160,6 +152,17 @@ pub fn require_admin(headers: &HeaderMap, secret: &str) -> Result<(), AuthError>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn demo_token_cannot_grant_backend_admin_access() {
+        assert!(verify_jwt("demo-token", "secret").is_err());
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, "Bearer demo-token".parse().unwrap());
+        assert_eq!(
+            require_admin(&headers, "secret").unwrap_err().0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
 
     #[test]
     fn authenticated_user_accepts_bearer_or_cookie_and_rejects_missing_token() {
