@@ -19,6 +19,7 @@ mod auth;
 mod pathfinding;
 mod reservations;
 mod security;
+mod site_config;
 mod state;
 mod users;
 mod ws;
@@ -88,7 +89,12 @@ async fn main() {
         return;
     }
 
-    let parking_state: SharedState = init_state(pool, jwt_secret, plate_pepper, edge_api_key).await;
+    let site_data_dir = std::env::var("SITE_DATA_DIR")
+        .expect("SITE_DATA_DIR required: directory containing config.json and spots_3d.json");
+    let site = site_config::SiteConfig::load(site_data_dir)
+        .expect("Failed to load installation maps from SITE_DATA_DIR");
+    let parking_state: SharedState =
+        init_state(pool, jwt_secret, plate_pepper, edge_api_key, site).await;
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -265,50 +271,14 @@ async fn save_config(
     axum::Json(payload): axum::Json<serde_json::Value>,
 ) -> Result<&'static str, (axum::http::StatusCode, String)> {
     crate::security::require_admin(&headers, &state.jwt_secret)?;
-    let lots = payload.as_array().ok_or((
-        StatusCode::BAD_REQUEST,
-        "Expected parking lots array".to_string(),
-    ))?;
-    if lots.is_empty()
-        || lots[0]
-            .get("path")
-            .and_then(|p| p.as_array())
-            .is_none_or(|p| p.len() < 2)
-    {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "First parking lot needs at least two path points".to_string(),
-        ));
-    }
-    for lot in lots {
-        let valid_name = lot
-            .get("name")
-            .and_then(|n| n.as_str())
-            .is_some_and(|name| {
-                !name.is_empty() && name.len() <= 100 && !name.contains(['<', '>', '&'])
-            });
-        let valid_path = lot
-            .get("path")
-            .and_then(|p| p.as_array())
-            .is_some_and(|path| {
-                path.iter().all(|point| {
-                    point.get("x").and_then(|v| v.as_f64()).is_some()
-                        && point.get("z").and_then(|v| v.as_f64()).is_some()
-                })
-            });
-        if !valid_name || !valid_path {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "Invalid parking lot configuration".to_string(),
-            ));
-        }
-    }
-    let path = std::path::Path::new("../web/data/config.json");
-    let content = serde_json::to_string_pretty(&payload)
-        .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e.to_string()))?;
-
-    std::fs::write(path, content)
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    site_config::save_parking_config(&state.site_data_dir, &payload).map_err(|error| {
+        let status = if error.kind() == std::io::ErrorKind::InvalidData {
+            StatusCode::BAD_REQUEST
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
+        (status, error.to_string())
+    })?;
 
     Ok(r#"{"status": "ok"}"#)
 }

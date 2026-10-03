@@ -28,9 +28,14 @@ services:
     env_file:
       - ../.env
     environment:
-      - RUST_LOG=info
-
+      RUST_LOG: info
+      SITE_DATA_DIR: /deployment
     volumes:
+      - type: bind
+        source: ${SITE_DATA_DIR:?Set SITE_DATA_DIR to an absolute installation maps directory}
+        target: /deployment
+        bind:
+          create_host_path: false
       - ../web:/web
     depends_on:
       db:
