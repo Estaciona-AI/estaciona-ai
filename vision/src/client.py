@@ -40,8 +40,9 @@ WS_URL = os.environ.get("LOCAL_WS_URL", "ws://localhost:8001/ws/edge")
 EDGE_API_KEY = os.environ.get("EDGE_API_KEY")
 
 MODEL_PATH = os.environ.get("VISION_MODEL_PATH", "yolo26x.pt")
-VIDEO_PATH = os.environ.get("VISION_STREAM_URL", "data/test_metade.mp4")
-SPOTS_PATH = "data/spots.json"
+VIDEO_PATH = os.environ.get("VISION_STREAM_URL")
+SPOTS_PATH = os.environ.get("VISION_SPOTS_PATH", "data/spots.json")
+CAMERA_ID = os.environ.get("VISION_CAMERA_ID", "cam_01")
 PENDING_UPDATES = deque()
 
 VEHICLE_CLASSES = [2, 7]
@@ -153,6 +154,10 @@ async def safe_send(ws, payload_str, headers):
 async def main():
     if not EDGE_API_KEY:
         raise RuntimeError("EDGE_API_KEY is required")
+    if not VIDEO_PATH:
+        raise RuntimeError(
+            "VISION_STREAM_URL is required: video file, directory or RTSP URL"
+        )
     spots_path = sys.argv[1] if len(sys.argv) > 1 else SPOTS_PATH
 
     headers = {"Authorization": f"Bearer {EDGE_API_KEY}"}
@@ -218,7 +223,7 @@ async def main():
                         "type": "SPOT_UPDATE",
                         "spot_id": spot_id,
                         "status": state["confirmed"],
-                        "camera_id": "cam_01",
+                        "camera_id": CAMERA_ID,
                         "confidence": 1.0,
                         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                         "edge_sent_at": datetime.datetime.now(datetime.UTC)
@@ -295,7 +300,7 @@ async def main():
                     "type": "SPOT_UPDATE",
                     "spot_id": spot_id,
                     "status": raw_status,
-                    "camera_id": "cam_01",
+                    "camera_id": CAMERA_ID,
                     "confidence": float(ratio) if raw_status == "occupied" else 1.0,
                     "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                     "edge_sent_at": datetime.datetime.now(datetime.UTC)
@@ -333,7 +338,7 @@ async def main():
                             "type": "SPOT_UPDATE",
                             "spot_id": spot_id,
                             "status": raw_status,
-                            "camera_id": "cam_01",
+                            "camera_id": CAMERA_ID,
                             "confidence": float(ratio)
                             if raw_status == "occupied"
                             else 1.0,
