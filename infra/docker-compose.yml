@@ -44,6 +44,8 @@ services:
 
   caddy:
     image: caddy:2-alpine
+    environment:
+      API_DOMAIN: ${API_DOMAIN:?Set API_DOMAIN to the public API hostname}
     container_name: estaciona_caddy
     restart: always
     ports:
