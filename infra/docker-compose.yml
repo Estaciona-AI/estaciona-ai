@@ -36,7 +36,6 @@ services:
         target: /deployment
         bind:
           create_host_path: false
-      - ../web:/web
     depends_on:
       db:
         condition: service_healthy
