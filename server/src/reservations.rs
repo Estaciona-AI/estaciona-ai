@@ -132,11 +132,6 @@ pub async fn create_reservation(
     Json(payload): Json<CreateReservation>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let user_id = crate::security::authenticated_user(&headers, &state.jwt_secret)?;
-    if user_id.to_string() == "00000000-0000-0000-0000-000000000000" {
-        let _ = sqlx::query("INSERT INTO users (id, name, email, password_hash, role) VALUES ($1, 'Visitante', 'demo@estaciona.tech', 'none', 'admin') ON CONFLICT DO NOTHING")
-            .bind(user_id)
-            .execute(&state.pool).await;
-    }
     let mut tx = state.pool.begin().await.map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,

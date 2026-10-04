@@ -2,7 +2,6 @@
 name = "gateway"
 version = "0.1.0"
 description = "Estaciona AI Gateway"
-readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "lightgbm>=4.6.0",

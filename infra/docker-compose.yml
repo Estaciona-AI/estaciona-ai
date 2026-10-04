@@ -28,10 +28,14 @@ services:
     env_file:
       - ../.env
     environment:
-      - RUST_LOG=info
-
+      RUST_LOG: info
+      SITE_DATA_DIR: /deployment
     volumes:
-      - ../web:/web
+      - type: bind
+        source: ${SITE_DATA_DIR:?Set SITE_DATA_DIR to an absolute installation maps directory}
+        target: /deployment
+        bind:
+          create_host_path: false
     depends_on:
       db:
         condition: service_healthy
@@ -40,6 +44,8 @@ services:
 
   caddy:
     image: caddy:2-alpine
+    environment:
+      API_DOMAIN: ${API_DOMAIN:?Set API_DOMAIN to the public API hostname}
     container_name: estaciona_caddy
     restart: always
     ports:

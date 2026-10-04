@@ -16,7 +16,6 @@
 // ==============================================================================
 
 use dashmap::DashMap;
-use serde::Deserialize;
 use sqlx::PgPool;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -24,6 +23,7 @@ use tokio::sync::{RwLock, broadcast, mpsc};
 use uuid::Uuid;
 
 use crate::pathfinding::ParkingGraph;
+use crate::site_config::SiteConfig;
 
 pub struct AppState {
     pub pool: PgPool,
@@ -34,6 +34,7 @@ pub struct AppState {
     pub plate_pepper: String,
     pub edge_api_key: String,
     pub last_trend_prediction: Mutex<Option<String>>,
+    pub site_data_dir: std::path::PathBuf,
 }
 
 pub type SharedState = Arc<AppState>;
@@ -43,26 +44,13 @@ pub async fn init_state(
     jwt_secret: String,
     plate_pepper: String,
     edge_api_key: String,
+    site: SiteConfig,
 ) -> SharedState {
     let (tx, _) = broadcast::channel(100);
 
     let mut graph = ParkingGraph::new();
 
-    #[derive(Deserialize)]
-    struct PathNode {
-        x: f64,
-        z: f64,
-    }
-
-    #[derive(Deserialize)]
-    struct ParkingLotConfig {
-        path: Vec<PathNode>,
-    }
-
-    let config_content =
-        std::fs::read_to_string("../web/data/config.json").expect("Falha ao ler config.json");
-    let parkings: Vec<ParkingLotConfig> =
-        serde_json::from_str(&config_content).expect("Falha no parse do config.json");
+    let parkings = site.parkings;
 
     let mut node_map = std::collections::HashMap::new();
     let mut config_nodes: Vec<(String, f64, f64)> = Vec::new();
@@ -115,24 +103,7 @@ pub async fn init_state(
         }
     }
 
-    #[derive(Deserialize)]
-    struct Coords3D {
-        x: f64,
-        y: f64,
-        z: f64,
-    }
-
-    #[derive(Deserialize)]
-    struct Spot3DDef {
-        id: String,
-        #[serde(rename = "center3D")]
-        center_3d: Coords3D,
-    }
-
-    let spots_3d_content =
-        std::fs::read_to_string("../web/data/spots_3d.json").expect("Falha ao ler spots_3d.json");
-    let spots_3d: Vec<Spot3DDef> =
-        serde_json::from_str(&spots_3d_content).expect("Falha no parse do spots_3d.json");
+    let spots_3d = site.spots;
 
     for spot in spots_3d {
         sqlx::query!(
@@ -183,5 +154,6 @@ pub async fn init_state(
         plate_pepper,
         edge_api_key,
         last_trend_prediction: Mutex::new(None),
+        site_data_dir: site.directory,
     })
 }

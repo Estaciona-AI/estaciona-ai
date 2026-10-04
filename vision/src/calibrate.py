@@ -130,8 +130,14 @@ class Calibrator:
 
 
 def main():
-    video_path = sys.argv[1] if len(sys.argv) > 1 else "data/test_metade.mp4"
-    output_path = "data/spots.json"
+    video_path = (
+        sys.argv[1] if len(sys.argv) > 1 else os.environ.get("VISION_STREAM_URL")
+    )
+    output_path = (
+        sys.argv[2] if len(sys.argv) > 2 else os.environ.get("VISION_SPOTS_PATH")
+    )
+    if not video_path or not output_path:
+        raise SystemExit("Usage: python src/calibrate.py <video> <output-spots.json>")
 
     frame = extract_first_name(video_path)
     cal = Calibrator(frame)

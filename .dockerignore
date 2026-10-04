@@ -1,0 +1,30 @@
+# Rust
+target/
+**/*.rs.bk
+
+# Python
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+**/.venv/
+**/venv/
+**/.env
+
+# Node
+**/node_modules/
+
+# Git
+.git/
+.gitignore
+
+# Data/Media
+**/data/*.mp4
+**/data/*.jpg
+**/data/*.png
+**/data/*.pt
+**/data/spots.json
+**/data/spots_3d.json
+**/data/config.json
+
+# Build/Docker
+infra/data/

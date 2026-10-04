@@ -24,7 +24,6 @@ Thumbs.db
 datasets/
 **/db/
 **/data/
-!web/data/
 # COLMAP
 reconstruction/photos/
 reconstruction/colmap/
@@ -40,3 +39,7 @@ reconstruction/colmap/
 # Experiments
 **/experiments/
 
+
+# Installation-specific visual outputs
+*.glb
+*.mp4
