@@ -26,7 +26,7 @@ use uuid::Uuid;
 
 use crate::reservation_store::{self, CreateError, FinishReason};
 use crate::state::SharedState;
-use crate::ws::messages::{EdgeToServerMsg, ServerToAppMsg};
+use crate::ws::messages::{EdgeToServerMsg, EdgeTransportMsg, ServerToAppMsg, ServerToEdgeMsg};
 
 pub(crate) async fn apply_occupied_observation(
     pool: &sqlx::PgPool,
@@ -76,11 +76,77 @@ pub async fn ws_edge_handler(
     ws.on_upgrade(|socket| handle_edge_socket(socket, state))
 }
 
-async fn handle_edge_socket(mut socket: WebSocket, state: SharedState) {
-    while let Some(Ok(msg)) = socket.next().await {
-        if let Message::Text(text) = msg
-            && let Ok(edge_msg) = serde_json::from_str::<EdgeToServerMsg>(&text)
+fn schedule_unconfirmed_occupancy(state: SharedState, reservation_id: Uuid) {
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+        if let Err(error) = reservation_store::finish(
+            &state.pool,
+            reservation_id,
+            FinishReason::UnconfirmedOccupancy,
+        )
+        .await
         {
+            tracing::error!(%error, %reservation_id, "Failed to finish unconfirmed occupancy");
+        }
+    });
+}
+
+async fn handle_edge_socket(mut socket: WebSocket, state: SharedState) {
+    let ready = ServerToEdgeMsg::Ready {
+        delivery_version: 1,
+    };
+    if let Ok(json) = serde_json::to_string(&ready)
+        && socket.send(Message::Text(json.into())).await.is_err()
+    {
+        return;
+    }
+    while let Some(Ok(msg)) = socket.next().await {
+        if let Message::Text(text) = msg {
+            if let Ok(EdgeTransportMsg::Event {
+                version,
+                event_id,
+                payload,
+            }) = serde_json::from_str::<EdgeTransportMsg>(&text)
+            {
+                if version != 1 {
+                    tracing::warn!(%event_id, version, "Unsupported edge delivery version");
+                    break;
+                }
+                let delivery =
+                    match crate::edge_delivery::apply(&state.pool, event_id, payload).await {
+                        Ok(delivery) => delivery,
+                        Err(error) => {
+                            tracing::error!(%error, %event_id, "Failed to persist edge event");
+                            break;
+                        }
+                    };
+                if let Some((spot_id, status)) = delivery.spot_update {
+                    let update = ServerToAppMsg::SpotUpdate { spot_id, status };
+                    if let Ok(json) = serde_json::to_string(&update) {
+                        let _ = state.tx.send(json);
+                    }
+                }
+                if let Some(id) = delivery.unconfirmed_reservation {
+                    schedule_unconfirmed_occupancy(state.clone(), id);
+                }
+                let ack = ServerToEdgeMsg::Ack {
+                    version: delivery.ack.version,
+                    event_id: delivery.ack.event_id,
+                    outcome: delivery.ack.outcome.as_str().to_owned(),
+                    reason: delivery.ack.reason,
+                    duplicate: delivery.ack.duplicate,
+                };
+                if let Ok(json) = serde_json::to_string(&ack)
+                    && socket.send(Message::Text(json.into())).await.is_err()
+                {
+                    break;
+                }
+                continue;
+            }
+            let Ok(edge_msg) = serde_json::from_str::<EdgeToServerMsg>(&text) else {
+                tracing::warn!("Invalid edge message ignored without ACK");
+                continue;
+            };
             match edge_msg {
                 EdgeToServerMsg::CarDetected {
                     plate, camera_id, ..
@@ -157,34 +223,7 @@ async fn handle_edge_socket(mut socket: WebSocket, state: SharedState) {
                     }
 
                     if let Some(reservation_id) = active_reservation {
-                        let state_clone = state.clone();
-                        tokio::spawn(async move {
-                            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-
-                            match reservation_store::finish(
-                                &state_clone.pool,
-                                reservation_id,
-                                FinishReason::UnconfirmedOccupancy,
-                            )
-                            .await
-                            {
-                                Ok(Some(transition)) => {
-                                    if let Some(status) = transition.spot_status {
-                                        let update_msg = ServerToAppMsg::SpotUpdate {
-                                            spot_id: transition.spot_id,
-                                            status: status.to_string(),
-                                        };
-                                        if let Ok(json_str) = serde_json::to_string(&update_msg) {
-                                            let _ = state_clone.tx.send(json_str);
-                                        }
-                                    }
-                                }
-                                Ok(None) => {}
-                                Err(error) => {
-                                    tracing::error!(%error, %reservation_id, "Failed to finish unconfirmed occupancy");
-                                }
-                            }
-                        });
+                        schedule_unconfirmed_occupancy(state.clone(), reservation_id);
                     }
                 }
                 EdgeToServerMsg::PathUpdate {

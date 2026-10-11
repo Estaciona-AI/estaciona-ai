@@ -77,6 +77,7 @@ def test_save_and_update_metrics(tmp_path):
         "2026-06-05T12:00:00Z",
         "2026-06-05T12:00:01Z",
         "2026-06-05T12:00:02Z",
+        event_uuid="metric-test-event",
     )
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
@@ -85,14 +86,16 @@ def test_save_and_update_metrics(tmp_path):
     assert row == ("cam_01", "A-01", "occupied", 0)
     conn.close()
 
-    update_metrics_forwarded_batch(db_path, [("2026-06-05T12:00:03Z", "A-01")])
+    update_metrics_forwarded_batch(
+        db_path, [("2026-06-05T12:00:03Z", "metric-test-event")]
+    )
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     cursor.execute(
         "SELECT gateway_forwarded_ts, cloud_ack FROM metrics WHERE spot_id='A-01'"
     )
     row = cursor.fetchone()
-    assert row == ("2026-06-05T12:00:03Z", 1)
+    assert row == ("2026-06-05T12:00:03Z", 0)
     conn.close()
 
 
@@ -117,7 +120,7 @@ def test_handler_auth_success(tmp_path):
         mock_ws.recv.side_effect = [
             json.dumps(
                 {
-                    "type": "SPOT_UDPATE",
+                    "type": "SPOT_UPDATE",
                     "spot_id": "A-01",
                     "status": "occupied",
                     "timestamp": "2026-06-05T12:00:00Z",
@@ -183,26 +186,48 @@ def test_sync_loop_sends_to_cloud(tmp_path):
         init_db(db_path)
         init_metrics_db(metrics_path)
 
+        payload = {
+            "type": "SPOT_UPDATE",
+            "spot_id": "A-01",
+            "status": "occupied",
+            "camera_id": "cam_01",
+            "confidence": 0.9,
+            "timestamp": "2026-06-05T12:00:00Z",
+            "edge_sent_ts": "2026-06-05T12:00:01Z",
+        }
+        event_uuid = save_event(db_path, json.dumps(payload))
         save_metric(
             metrics_path,
             "cam_01",
             "A-01",
             "occupied",
-            "2026-06-05T12:00:00Z",
-            "2026-06-05T12:00:01Z",
+            payload["timestamp"],
+            payload["edge_sent_ts"],
             "2026-06-05T12:00:02Z",
+            event_uuid=event_uuid,
         )
 
-        payload = {
-            "type": "SPOT_UPDATE",
-            "spot_id": "A-01",
-            "status": "occupied",
-            "timestamp": "2026-06-05T12:00:00Z",
-            "edge_sent_ts": "2026-06-05T12:00:01Z",
-        }
-        save_event(db_path, json.dumps(payload))
-
         mock_cloud_ws = AsyncMock()
+        responses = asyncio.Queue()
+        responses.put_nowait(json.dumps({"type": "EDGE_READY", "delivery_version": 1}))
+
+        async def send(frame):
+            event = json.loads(frame)
+            responses.put_nowait(
+                json.dumps(
+                    {
+                        "type": "EDGE_ACK",
+                        "version": 1,
+                        "event_id": event["event_id"],
+                        "outcome": "applied",
+                        "reason": None,
+                        "duplicate": False,
+                    }
+                )
+            )
+
+        mock_cloud_ws.send.side_effect = send
+        mock_cloud_ws.recv.side_effect = responses.get
         with patch("websockets.connect", new_callable=AsyncMock) as mock_connect:
             mock_connect.return_value = mock_cloud_ws
 
@@ -223,9 +248,11 @@ def test_sync_loop_sends_to_cloud(tmp_path):
             except asyncio.CancelledError:
                 pass
 
-            assert mock_cloud_ws.send.called
             sent_str = mock_cloud_ws.send.call_args[0][0]
             sent_payload = json.loads(sent_str)
+            assert sent_payload["type"] == "EDGE_EVENT"
+            assert sent_payload["event_id"] == event_uuid
+            assert sent_payload["payload"] == payload
             assert "gateway_forwarded_at" in sent_payload
 
             assert len(get_unsynced_events(db_path)) == 0
@@ -239,6 +266,62 @@ def test_sync_loop_sends_to_cloud(tmp_path):
             assert row[0] is not None
             assert row[1] == 1
             conn.close()
+
+    asyncio.run(run())
+
+
+def test_send_without_cloud_ack_preserves_pending_event(tmp_path):
+    async def run():
+        db_path = str(tmp_path / "fallback.db")
+        metrics_path = str(tmp_path / "metrics.db")
+        init_db(db_path)
+        init_metrics_db(metrics_path)
+        save_event(
+            db_path,
+            json.dumps(
+                {
+                    "type": "SPOT_UPDATE",
+                    "spot_id": "A-01",
+                    "status": "occupied",
+                    "camera_id": "cam_01",
+                    "confidence": 0.9,
+                    "timestamp": "2026-06-05T12:00:00Z",
+                }
+            ),
+        )
+        sent = asyncio.Event()
+        ready_sent = False
+
+        async def send(_message):
+            sent.set()
+
+        async def recv():
+            nonlocal ready_sent
+            if not ready_sent:
+                ready_sent = True
+                return json.dumps({"type": "EDGE_READY", "delivery_version": 1})
+            await asyncio.Future()
+
+        cloud = AsyncMock()
+        cloud.send.side_effect = send
+        cloud.recv.side_effect = recv
+        with patch("websockets.connect", new_callable=AsyncMock, return_value=cloud):
+            task = asyncio.create_task(
+                sync_loop(
+                    db_path, metrics_path, "wss://cloud/ws", "test", asyncio.Event()
+                )
+            )
+            try:
+                await asyncio.wait_for(sent.wait(), timeout=1)
+                await asyncio.sleep(0.01)
+            finally:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+        assert len(get_unsynced_events(db_path)) == 1
 
     asyncio.run(run())
 

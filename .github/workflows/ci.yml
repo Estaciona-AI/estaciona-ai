@@ -45,19 +45,58 @@ jobs:
         run: cargo fmt -- --check
 
       - name: Clippy Lint
-        run: cargo clippy --locked -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
       - name: Run Rust Tests
         run: cargo test --locked --all-features
 
+      - name: Build server for delivery integration
+        run: cargo build --locked
+
+      - name: Upload integration server
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: delivery-test-server
+          path: server/target/debug/estaciona-ai-rust-server
+          if-no-files-found: error
+          retention-days: 1
+
   gateway-ci:
     name: Python Gateway CI
+    needs: rust-ci
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-bookworm@sha256:bbbf67eadd2381a2738a4a2e36d4c3936c36edd82d80e7ef00411194385d3829
+        env:
+          POSTGRES_USER: estaciona_test
+          POSTGRES_PASSWORD: estaciona_test
+          POSTGRES_DB: estaciona_test
+        ports:
+          - 127.0.0.1:5432:5432
+        options: >-
+          --health-cmd "pg_isready -U estaciona_test -d estaciona_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://estaciona_test:estaciona_test@127.0.0.1:5432/estaciona_test
+      ESTACIONA_TEST_SERVER: ${{ github.workspace }}/test-server/estaciona-ai-rust-server
+      ESTACIONA_TEST_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
     defaults:
       run:
         working-directory: ./gateway
     steps:
       - uses: actions/checkout@v4
+
+      - name: Download integration server
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: delivery-test-server
+          path: test-server
+
+      - name: Make integration server executable
+        run: chmod +x "$ESTACIONA_TEST_SERVER"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -69,13 +108,13 @@ jobs:
         run: uv python install
 
       - name: Run Ruff Check
-        run: uv run ruff check
+        run: uv run --locked ruff check
 
       - name: Run Ruff Format Check
-        run: uv run ruff format --check
+        run: uv run --locked ruff format --check
 
       - name: Run Pytest
-        run: uv run pytest
+        run: uv run --locked pytest
 
   vision-ci:
     name: Python Vision CI
