@@ -16,6 +16,7 @@
 // ==============================================================================
 
 mod auth;
+mod edge_delivery;
 mod pathfinding;
 #[cfg(test)]
 mod postgres_tests;
