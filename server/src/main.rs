@@ -17,6 +17,8 @@
 
 mod auth;
 mod pathfinding;
+#[cfg(test)]
+mod postgres_tests;
 mod reservations;
 mod security;
 mod site_config;

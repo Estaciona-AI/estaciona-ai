@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [ "develop", "main", "feat/**", "feats/**", "refactor/**" ]
+    branches: [ "develop", "main", "feat/**", "feats/**", "fix/**", "refactor/**" ]
   pull_request:
     branches: [ "develop" ]
 
@@ -14,6 +14,22 @@ jobs:
   rust-ci:
     name: Rust CI
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-bookworm@sha256:bbbf67eadd2381a2738a4a2e36d4c3936c36edd82d80e7ef00411194385d3829
+        env:
+          POSTGRES_USER: estaciona_test
+          POSTGRES_PASSWORD: estaciona_test
+          POSTGRES_DB: estaciona_test
+        ports:
+          - 127.0.0.1:5432:5432
+        options: >-
+          --health-cmd "pg_isready -U estaciona_test -d estaciona_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://estaciona_test:estaciona_test@127.0.0.1:5432/estaciona_test
     defaults:
       run:
         working-directory: ./server
@@ -29,10 +45,10 @@ jobs:
         run: cargo fmt -- --check
 
       - name: Clippy Lint
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --locked -- -D warnings
 
       - name: Run Rust Tests
-        run: cargo test --all-features
+        run: cargo test --locked --all-features
 
   gateway-ci:
     name: Python Gateway CI
