@@ -25,6 +25,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::reservation_store::{self, CreateError, FinishReason};
 use crate::state::SharedState;
 use crate::ws::messages::ServerToAppMsg;
 
@@ -132,59 +133,19 @@ pub async fn create_reservation(
     Json(payload): Json<CreateReservation>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let user_id = crate::security::authenticated_user(&headers, &state.jwt_secret)?;
-    let mut tx = state.pool.begin().await.map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Database error".to_string(),
-        )
-    })?;
-    let updated_spot = sqlx::query!(
-        "UPDATE spots SET status = 'reserved', last_updated = NOW()
-        WHERE id = $1 AND status = 'free' RETURNING id",
-        payload.spot_id
-    )
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Database error".to_string(),
-        )
-    })?;
-
-    if updated_spot.is_none() {
-        return Err((StatusCode::CONFLICT, "Spot is not free".to_string()));
-    }
-
-    let new_id = Uuid::new_v4();
-
-    let record = sqlx::query!(
-        r#"
-        INSERT INTO reservations (id, user_id, spot_id, status, expires_at)
-        VALUES ($1, $2, $3, 'active', $4)
-        RETURNING id, user_id as "user_id!", spot_id, status, created_at as
-        "created_at?", expires_at as "expires_at?", completed_at as "completed_at?"
-        "#,
-        new_id,
-        user_id,
-        payload.spot_id,
-        payload.expires_at
-    )
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to create reservation".to_string(),
-        )
-    })?;
-
-    tx.commit().await.map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Database error".to_string(),
-        )
-    })?;
+    let record =
+        reservation_store::create(&state.pool, &payload.spot_id, user_id, payload.expires_at)
+            .await
+            .map_err(|error| match error {
+                CreateError::Unavailable => (StatusCode::CONFLICT, "Spot is not free".to_string()),
+                CreateError::Database(error) => {
+                    tracing::error!("Failed to create reservation: {}", error);
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Database error".to_string(),
+                    )
+                }
+            })?;
 
     let update_msg = ServerToAppMsg::SpotUpdate {
         spot_id: payload.spot_id.clone(),
@@ -244,59 +205,28 @@ pub async fn cancel_reservation(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     require_reservation_owner(&state, &headers, id).await?;
-    let mut tx = state.pool.begin().await.map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Database error".to_string(),
-        )
-    })?;
-    let result = sqlx::query!(
-        r#"
-        UPDATE reservations
-        SET status = 'cancelled'
-        WHERE id = $1 AND status = 'active'
-        RETURNING spot_id
-        "#,
-        id
-    )
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|e| {
-        tracing::error!("Database error: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to cancel reservation".to_string(),
-        )
-    })?;
-
-    match result {
-        Some(record) => {
-            let updated_spot = sqlx::query!(
-                "UPDATE spots SET status = 'free', last_updated = NOW() WHERE id = $1 AND status = 'reserved' RETURNING id",
-                record.spot_id
+    let user_id = crate::security::authenticated_user(&headers, &state.jwt_secret)?;
+    let transition = reservation_store::finish(&state.pool, id, FinishReason::Cancel { user_id })
+        .await
+        .map_err(|error| {
+            tracing::error!("Failed to cancel reservation: {}", error);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Database error".to_string(),
             )
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Database error".to_string()))?;
+        })?;
 
-            tx.commit().await.map_err(|_| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Database error".to_string(),
-                )
-            })?;
-
-            if updated_spot.is_some() {
+    match transition {
+        Some(transition) => {
+            if let Some(status) = transition.spot_status {
                 let update_msg = ServerToAppMsg::SpotUpdate {
-                    spot_id: record.spot_id.clone(),
-                    status: "free".to_string(),
+                    spot_id: transition.spot_id,
+                    status: status.to_string(),
                 };
-
-                if let Ok(json_str) = serde_json::to_string(&update_msg) {
-                    let _ = state.tx.send(json_str);
+                if let Ok(json) = serde_json::to_string(&update_msg) {
+                    let _ = state.tx.send(json);
                 }
             }
-
             Ok((StatusCode::OK, "Reservation cancelled.".to_string()))
         }
         None => Err((

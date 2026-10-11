@@ -33,6 +33,7 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+use crate::reservation_store::{self, CreateError, FinishReason};
 use crate::state::SharedState;
 use crate::ws::messages::{AppToServerMsg, ServerToAppMsg};
 
@@ -117,37 +118,13 @@ async fn handle_app_socket(socket: WebSocket, state: SharedState, user_id: Uuid)
             if let Ok(msg) = serde_json::from_str::<AppToServerMsg>(&text) {
                 match msg {
                     AppToServerMsg::ReserveSpot { spot_id, .. } => {
-                        let state_clone = value.clone();
-
-                        let Ok(mut tx) = state_clone.pool.begin().await else {
-                            continue;
-                        };
-
-                        let reserved_spot = sqlx::query!(
-                            "UPDATE spots SET status = 'reserved', last_updated = NOW() WHERE id = $1 AND status = 'free' RETURNING id",
-                            spot_id
-                        )
-                        .fetch_optional(&mut *tx)
-                        .await
-                        .unwrap_or(None);
-
-                        let reserved = reserved_spot.is_some();
-
-                        if reserved {
-                            let res_id = Uuid::new_v4();
-                            let expires = Utc::now() + Duration::minutes(15);
-
-                            let db_result = sqlx::query!(
-                                "INSERT INTO reservations (id, user_id, spot_id, status, expires_at)
-                                VALUES ($1, $2, $3, 'active', $4)",
-                                res_id, user_id, spot_id, expires
-                            )
-                            .execute(&mut *tx)
-                            .await;
-
-                            if db_result.is_ok() && tx.commit().await.is_ok() {
+                        let expires = Utc::now() + Duration::minutes(15);
+                        match reservation_store::create(&value.pool, &spot_id, user_id, expires)
+                            .await
+                        {
+                            Ok(reservation) => {
                                 let confirm = ServerToAppMsg::ReservationConfirmed {
-                                    reservation_id: res_id,
+                                    reservation_id: reservation.id,
                                     spot_id: spot_id.clone(),
                                     expires_at: expires,
                                 };
@@ -161,60 +138,45 @@ async fn handle_app_socket(socket: WebSocket, state: SharedState, user_id: Uuid)
                                     let _ = private_tx.send(json);
                                 }
                                 if let Ok(json) = serde_json::to_string(&update) {
-                                    let _ = state_clone.tx.send(json);
+                                    let _ = value.tx.send(json);
                                 }
                             }
-                        } else {
-                            let reject = ServerToAppMsg::ReservationRejected {
-                                spot_id,
-                                reason: "already_taken".to_string(),
-                            };
-                            if let Ok(json) = serde_json::to_string(&reject) {
-                                let _ = private_tx.send(json);
+                            Err(CreateError::Unavailable) => {
+                                let reject = ServerToAppMsg::ReservationRejected {
+                                    spot_id,
+                                    reason: "already_taken".to_string(),
+                                };
+                                if let Ok(json) = serde_json::to_string(&reject) {
+                                    let _ = private_tx.send(json);
+                                }
+                            }
+                            Err(CreateError::Database(error)) => {
+                                tracing::error!(%error, %spot_id, "Failed to create WebSocket reservation");
                             }
                         }
                     }
                     AppToServerMsg::CancelReservation { reservation_id } => {
-                        let state_clone = value.clone();
-
-                        let Ok(mut tx) = state_clone.pool.begin().await else {
-                            continue;
-                        };
-
-                        let res = sqlx::query!(
-                            "UPDATE reservations SET status = 'cancelled'
-                            WHERE id = $1 AND user_id = $2 AND status = 'active'
-                            RETURNING spot_id",
+                        match reservation_store::finish(
+                            &value.pool,
                             reservation_id,
-                            user_id
+                            FinishReason::Cancel { user_id },
                         )
-                        .fetch_optional(&mut *tx)
-                        .await;
-
-                        if let Ok(Some(row)) = res {
-                            let updated = sqlx::query(
-                                "UPDATE spots SET status = 'free', last_updated = NOW() \
-                                 WHERE id = $1 AND status = 'reserved'",
-                            )
-                            .bind(&row.spot_id)
-                            .execute(&mut *tx)
-                            .await;
-                            let Ok(updated) = updated else {
-                                continue;
-                            };
-                            if tx.commit().await.is_err() {
-                                continue;
-                            }
-
-                            if updated.rows_affected() > 0 {
-                                let update = ServerToAppMsg::SpotUpdate {
-                                    spot_id: row.spot_id,
-                                    status: "free".to_string(),
-                                };
-
-                                if let Ok(json) = serde_json::to_string(&update) {
-                                    let _ = state_clone.tx.send(json);
+                        .await
+                        {
+                            Ok(Some(transition)) => {
+                                if let Some(status) = transition.spot_status {
+                                    let update = ServerToAppMsg::SpotUpdate {
+                                        spot_id: transition.spot_id,
+                                        status: status.to_string(),
+                                    };
+                                    if let Ok(json) = serde_json::to_string(&update) {
+                                        let _ = value.tx.send(json);
+                                    }
                                 }
+                            }
+                            Ok(None) => {}
+                            Err(error) => {
+                                tracing::error!(%error, %reservation_id, "Failed to cancel WebSocket reservation");
                             }
                         }
                     }

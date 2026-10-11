@@ -24,8 +24,35 @@ use chrono::{Duration, Utc};
 use futures_util::StreamExt;
 use uuid::Uuid;
 
+use crate::reservation_store::{self, CreateError, FinishReason};
 use crate::state::SharedState;
-use crate::ws::messages::{EdgeToServerMsg, ServerToAppMsg};
+use crate::ws::messages::{EdgeToServerMsg, EdgeTransportMsg, ServerToAppMsg, ServerToEdgeMsg};
+
+pub(crate) async fn apply_occupied_observation(
+    pool: &sqlx::PgPool,
+    spot_id: &str,
+) -> Result<Option<Option<Uuid>>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    // Keep the spot locked until the reservation for this observation is captured.
+    let updated =
+        sqlx::query("UPDATE spots SET status = 'occupied', last_updated = NOW() WHERE id = $1")
+            .bind(spot_id)
+            .execute(&mut *tx)
+            .await?;
+    if updated.rows_affected() == 0 {
+        tx.rollback().await?;
+        return Ok(None);
+    }
+
+    let reservation_id = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM reservations WHERE spot_id = $1 AND status = 'active'",
+    )
+    .bind(spot_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(Some(reservation_id))
+}
 
 pub async fn ws_edge_handler(
     ws: WebSocketUpgrade,
@@ -49,11 +76,77 @@ pub async fn ws_edge_handler(
     ws.on_upgrade(|socket| handle_edge_socket(socket, state))
 }
 
-async fn handle_edge_socket(mut socket: WebSocket, state: SharedState) {
-    while let Some(Ok(msg)) = socket.next().await {
-        if let Message::Text(text) = msg
-            && let Ok(edge_msg) = serde_json::from_str::<EdgeToServerMsg>(&text)
+fn schedule_unconfirmed_occupancy(state: SharedState, reservation_id: Uuid) {
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+        if let Err(error) = reservation_store::finish(
+            &state.pool,
+            reservation_id,
+            FinishReason::UnconfirmedOccupancy,
+        )
+        .await
         {
+            tracing::error!(%error, %reservation_id, "Failed to finish unconfirmed occupancy");
+        }
+    });
+}
+
+async fn handle_edge_socket(mut socket: WebSocket, state: SharedState) {
+    let ready = ServerToEdgeMsg::Ready {
+        delivery_version: 1,
+    };
+    if let Ok(json) = serde_json::to_string(&ready)
+        && socket.send(Message::Text(json.into())).await.is_err()
+    {
+        return;
+    }
+    while let Some(Ok(msg)) = socket.next().await {
+        if let Message::Text(text) = msg {
+            if let Ok(EdgeTransportMsg::Event {
+                version,
+                event_id,
+                payload,
+            }) = serde_json::from_str::<EdgeTransportMsg>(&text)
+            {
+                if version != 1 {
+                    tracing::warn!(%event_id, version, "Unsupported edge delivery version");
+                    break;
+                }
+                let delivery =
+                    match crate::edge_delivery::apply(&state.pool, event_id, payload).await {
+                        Ok(delivery) => delivery,
+                        Err(error) => {
+                            tracing::error!(%error, %event_id, "Failed to persist edge event");
+                            break;
+                        }
+                    };
+                if let Some((spot_id, status)) = delivery.spot_update {
+                    let update = ServerToAppMsg::SpotUpdate { spot_id, status };
+                    if let Ok(json) = serde_json::to_string(&update) {
+                        let _ = state.tx.send(json);
+                    }
+                }
+                if let Some(id) = delivery.unconfirmed_reservation {
+                    schedule_unconfirmed_occupancy(state.clone(), id);
+                }
+                let ack = ServerToEdgeMsg::Ack {
+                    version: delivery.ack.version,
+                    event_id: delivery.ack.event_id,
+                    outcome: delivery.ack.outcome.as_str().to_owned(),
+                    reason: delivery.ack.reason,
+                    duplicate: delivery.ack.duplicate,
+                };
+                if let Ok(json) = serde_json::to_string(&ack)
+                    && socket.send(Message::Text(json.into())).await.is_err()
+                {
+                    break;
+                }
+                continue;
+            }
+            let Ok(edge_msg) = serde_json::from_str::<EdgeToServerMsg>(&text) else {
+                tracing::warn!("Invalid edge message ignored without ACK");
+                continue;
+            };
             match edge_msg {
                 EdgeToServerMsg::CarDetected {
                     plate, camera_id, ..
@@ -80,17 +173,29 @@ async fn handle_edge_socket(mut socket: WebSocket, state: SharedState) {
                         continue;
                     }
 
-                    let updated = sqlx::query(
-                        "UPDATE spots SET status = $1, last_updated = NOW() \
-                         WHERE id = $2 AND NOT (status = 'reserved' AND $1 = 'free')",
-                    )
-                    .bind(&status)
-                    .bind(&spot_id)
-                    .execute(&state.pool)
-                    .await;
-                    if !matches!(updated, Ok(ref result) if result.rows_affected() > 0) {
-                        continue;
-                    }
+                    let active_reservation = if status == "occupied" {
+                        match apply_occupied_observation(&state.pool, &spot_id).await {
+                            Ok(Some(reservation_id)) => reservation_id,
+                            Ok(None) => continue,
+                            Err(error) => {
+                                tracing::error!(%error, %spot_id, "Failed to apply occupied observation");
+                                continue;
+                            }
+                        }
+                    } else {
+                        let updated = sqlx::query(
+                            "UPDATE spots SET status = $1, last_updated = NOW() \
+                             WHERE id = $2 AND NOT (status = 'reserved' AND $1 = 'free')",
+                        )
+                        .bind(&status)
+                        .bind(&spot_id)
+                        .execute(&state.pool)
+                        .await;
+                        if !matches!(updated, Ok(ref result) if result.rows_affected() > 0) {
+                            continue;
+                        }
+                        None
+                    };
                     if status == "free" {
                         let _ = sqlx::query(
                             "UPDATE user_occupancy_history SET released_at = NOW() \
@@ -117,55 +222,8 @@ async fn handle_edge_socket(mut socket: WebSocket, state: SharedState) {
                         let _ = state.tx.send(json_str);
                     }
 
-                    if status == "occupied" {
-                        let state_clone = state.clone();
-                        let spot_id_clone = spot_id.clone();
-                        tokio::spawn(async move {
-                            let active_res = sqlx::query!(
-                                "SELECT id FROM reservations WHERE spot_id = $1 AND status = 'active'",
-                                spot_id_clone
-                            )
-                            .fetch_optional(&state_clone.pool)
-                            .await
-                            .unwrap_or(None);
-
-                            if let Some(res) = active_res {
-                                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-
-                                let still_active = sqlx::query!(
-                                    "SELECT status FROM reservations WHERE id = $1",
-                                    res.id
-                                )
-                                .fetch_one(&state_clone.pool)
-                                .await;
-
-                                if let Ok(record) = still_active
-                                    && record.status == "active"
-                                {
-                                    let _ = sqlx::query!(
-                                        "UPDATE reservations SET status = 'cancelled' WHERE id = $1",
-                                        res.id
-                                    )
-                                    .execute(&state_clone.pool)
-                                    .await;
-
-                                    let _ = sqlx::query!(
-                                        "UPDATE spots SET status = 'occupied', last_updated = NOW() WHERE id = $1",
-                                        spot_id_clone
-                                    )
-                                    .execute(&state_clone.pool)
-                                    .await;
-
-                                    let update_msg = ServerToAppMsg::SpotUpdate {
-                                        spot_id: spot_id_clone,
-                                        status: "occupied".to_string(),
-                                    };
-                                    if let Ok(json_str) = serde_json::to_string(&update_msg) {
-                                        let _ = state_clone.tx.send(json_str);
-                                    }
-                                }
-                            }
-                        });
+                    if let Some(reservation_id) = active_reservation {
+                        schedule_unconfirmed_occupancy(state.clone(), reservation_id);
                     }
                 }
                 EdgeToServerMsg::PathUpdate {
@@ -275,35 +333,9 @@ async fn handle_car_detected(state: &SharedState, plate: String, camera_id: Stri
 
         let mut claimed = None;
         for (_, spot, route) in candidates {
-            let Ok(mut tx) = state.pool.begin().await else {
-                return;
-            };
-            let available = sqlx::query(
-                "UPDATE spots SET status = 'reserved', last_updated = NOW() \
-                 WHERE id = $1 AND status = 'free' RETURNING id",
-            )
-            .bind(&spot)
-            .fetch_optional(&mut *tx)
-            .await;
-            if !matches!(available, Ok(Some(_))) {
-                continue;
-            }
-            let new_res_id = Uuid::new_v4();
             let expires_at = Utc::now() + Duration::minutes(15);
-
-            let insert_result = sqlx::query!(
-                "INSERT INTO reservations (id, user_id, spot_id, status, expires_at) VALUES ($1, $2, $3, 'active', $4)",
-                new_res_id, user_id, spot, expires_at
-            )
-            .execute(&mut *tx)
-            .await;
-
-            match insert_result {
-                Ok(res) if res.rows_affected() > 0 => {
-                    if tx.commit().await.is_err() {
-                        return;
-                    }
-
+            match reservation_store::create(&state.pool, &spot, user_id, expires_at).await {
+                Ok(_) => {
                     // Dispara broadcast de SPOT_UPDATE para os outros clientes saberem que a vaga foi ocupada
                     let update_msg = ServerToAppMsg::SpotUpdate {
                         spot_id: spot.clone(),
@@ -316,7 +348,11 @@ async fn handle_car_detected(state: &SharedState, plate: String, camera_id: Stri
                     claimed = Some((spot, route));
                     break;
                 }
-                _ => return, // Falha de persistência
+                Err(CreateError::Unavailable) => continue,
+                Err(CreateError::Database(error)) => {
+                    tracing::error!(%error, spot_id = %spot, "Failed to create automatic reservation");
+                    return;
+                }
             }
         }
         let Some((spot, route)) = claimed else { return };

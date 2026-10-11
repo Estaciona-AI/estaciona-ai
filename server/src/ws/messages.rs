@@ -32,6 +32,32 @@ pub enum AppToServerMsg {
     CancelReservation { reservation_id: Uuid },
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+pub enum EdgeTransportMsg {
+    #[serde(rename = "EDGE_EVENT")]
+    Event {
+        version: u8,
+        event_id: Uuid,
+        payload: serde_json::Value,
+    },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+pub enum ServerToEdgeMsg {
+    #[serde(rename = "EDGE_READY")]
+    Ready { delivery_version: u8 },
+    #[serde(rename = "EDGE_ACK")]
+    Ack {
+        version: u8,
+        event_id: Uuid,
+        outcome: String,
+        reason: Option<String>,
+        duplicate: bool,
+    },
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HourlyOccupancy {
     pub timestamp: DateTime<Utc>,
