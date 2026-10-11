@@ -82,6 +82,7 @@ jobs:
     env:
       DATABASE_URL: postgres://estaciona_test:estaciona_test@127.0.0.1:5432/estaciona_test
       ESTACIONA_TEST_SERVER: ${{ github.workspace }}/test-server/estaciona-ai-rust-server
+      ESTACIONA_TEST_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
     defaults:
       run:
         working-directory: ./gateway
