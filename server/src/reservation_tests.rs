@@ -1,0 +1,364 @@
+use std::sync::{Arc, Mutex};
+
+use axum::{
+    Json,
+    body::to_bytes,
+    extract::{Path, State},
+    http::{HeaderMap, StatusCode, header},
+    response::{IntoResponse, Response},
+};
+use chrono::{Duration, Utc};
+use dashmap::DashMap;
+use sqlx::PgPool;
+use tokio::sync::{RwLock, broadcast};
+use uuid::Uuid;
+
+use crate::{
+    pathfinding::ParkingGraph,
+    reservations::{self, CreateReservation, UpdateSpotStatus},
+    security,
+    state::{AppState, SharedState},
+};
+
+struct Fixture {
+    state: SharedState,
+    owner: Uuid,
+    other: Uuid,
+    admin: Uuid,
+    spot_id: String,
+}
+
+impl Fixture {
+    async fn new(pool: PgPool) -> Result<Self, sqlx::Error> {
+        let owner = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let admin = Uuid::new_v4();
+        for (id, role) in [(owner, "user"), (other, "user"), (admin, "admin")] {
+            sqlx::query(
+                "INSERT INTO users (id, name, email, password_hash, role) \
+                 VALUES ($1, 'Reservation Fixture', $2, 'unused-test-hash', $3)",
+            )
+            .bind(id)
+            .bind(format!("{id}@example.invalid"))
+            .bind(role)
+            .execute(&pool)
+            .await?;
+        }
+
+        let spot_id = "R01-01".to_owned();
+        sqlx::query("INSERT INTO spots (id, status, x, y) VALUES ($1, 'free', 0, 0)")
+            .bind(&spot_id)
+            .execute(&pool)
+            .await?;
+
+        let (tx, _) = broadcast::channel(100);
+        let state = Arc::new(AppState {
+            pool,
+            tx,
+            user_sessions: DashMap::new(),
+            graph: RwLock::new(ParkingGraph::new()),
+            jwt_secret: "r01-disposable-jwt-secret".to_owned(),
+            plate_pepper: "r01-disposable-plate-pepper".to_owned(),
+            edge_api_key: "r01-disposable-edge-key".to_owned(),
+            last_trend_prediction: Mutex::new(None),
+            site_data_dir: std::env::temp_dir().join(format!("r01-reservation-{owner}")),
+        });
+
+        Ok(Self {
+            state,
+            owner,
+            other,
+            admin,
+            spot_id,
+        })
+    }
+
+    fn headers(&self, user_id: Uuid, role: &str) -> HeaderMap {
+        let token = security::create_jwt(&user_id.to_string(), role, &self.state.jwt_secret)
+            .expect("fixture JWT must be valid");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {token}")
+                .parse()
+                .expect("valid bearer header"),
+        );
+        headers
+    }
+
+    async fn create(&self, user_id: Uuid) -> Response {
+        reservations::create_reservation(
+            State(self.state.clone()),
+            self.headers(user_id, "user"),
+            Json(CreateReservation {
+                spot_id: self.spot_id.clone(),
+                expires_at: Utc::now() + Duration::minutes(15),
+            }),
+        )
+        .await
+        .into_response()
+    }
+
+    async fn create_for_owner(&self) -> Uuid {
+        let response = self.create(self.owner).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 16_384)
+            .await
+            .expect("reservation response body");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("reservation response JSON");
+        Uuid::parse_str(value["id"].as_str().expect("reservation response ID"))
+            .expect("reservation UUID")
+    }
+
+    async fn update_spot(&self, status: &str) {
+        let response = reservations::update_spot_status(
+            State(self.state.clone()),
+            Path(self.spot_id.clone()),
+            self.headers(self.admin, "admin"),
+            Json(UpdateSpotStatus {
+                status: status.to_owned(),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    async fn spot_status(&self) -> Result<String, sqlx::Error> {
+        sqlx::query_scalar("SELECT status FROM spots WHERE id = $1")
+            .bind(&self.spot_id)
+            .fetch_one(&self.state.pool)
+            .await
+    }
+
+    async fn reservation_status(&self, id: Uuid) -> Result<String, sqlx::Error> {
+        sqlx::query_scalar("SELECT status FROM reservations WHERE id = $1")
+            .bind(id)
+            .fetch_one(&self.state.pool)
+            .await
+    }
+
+    async fn active_count(&self) -> Result<i64, sqlx::Error> {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM reservations WHERE spot_id = $1 AND status = 'active'",
+        )
+        .bind(&self.spot_id)
+        .fetch_one(&self.state.pool)
+        .await
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn rest_rejects_second_active_reservation_after_spot_becomes_free(
+    pool: PgPool,
+) -> Result<(), sqlx::Error> {
+    let fixture = Fixture::new(pool).await?;
+    let first = fixture.create_for_owner().await;
+    fixture.update_spot("occupied").await;
+    fixture.update_spot("free").await;
+
+    let second = fixture.create(fixture.other).await;
+    assert_eq!(
+        (
+            second.status(),
+            fixture.spot_status().await?,
+            fixture.active_count().await?,
+            fixture.reservation_status(first).await?,
+        ),
+        (
+            StatusCode::CONFLICT,
+            "free".to_owned(),
+            1,
+            "active".to_owned(),
+        ),
+        "another claim must be rejected without changing the spot or its active reservation",
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn database_rejects_two_active_reservations_for_one_spot(
+    pool: PgPool,
+) -> Result<(), sqlx::Error> {
+    let fixture = Fixture::new(pool).await?;
+    fixture.create_for_owner().await;
+
+    let result = sqlx::query(
+        "INSERT INTO reservations (id, user_id, spot_id, expires_at) \
+         VALUES ($1, $2, $3, NOW() + INTERVAL '15 minutes')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(fixture.other)
+    .bind(&fixture.spot_id)
+    .execute(&fixture.state.pool)
+    .await;
+
+    let error = result.expect_err("the database must enforce one active reservation per spot");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|database_error| database_error.code())
+            .as_deref(),
+        Some("23505"),
+    );
+    assert_eq!(fixture.active_count().await?, 1);
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn rest_cancel_denies_a_different_owner_without_releasing_the_spot(
+    pool: PgPool,
+) -> Result<(), sqlx::Error> {
+    let fixture = Fixture::new(pool).await?;
+    let reservation_id = fixture.create_for_owner().await;
+
+    let response = reservations::cancel_reservation(
+        State(fixture.state.clone()),
+        Path(reservation_id),
+        fixture.headers(fixture.other, "user"),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(fixture.reservation_status(reservation_id).await?, "active");
+    assert_eq!(fixture.spot_status().await?, "reserved");
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn rest_cancel_rolls_back_when_releasing_the_spot_fails(
+    pool: PgPool,
+) -> Result<(), sqlx::Error> {
+    let fixture = Fixture::new(pool).await?;
+    let reservation_id = fixture.create_for_owner().await;
+    sqlx::raw_sql(
+        "CREATE FUNCTION reject_test_spot_release() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+             BEGIN
+                 IF NEW.status = 'free' THEN
+                     RAISE EXCEPTION 'injected test release failure';
+                 END IF;
+                 RETURN NEW;
+             END;
+         $$;
+         CREATE TRIGGER reject_test_spot_release
+             BEFORE UPDATE ON spots
+             FOR EACH ROW EXECUTE FUNCTION reject_test_spot_release();",
+    )
+    .execute(&fixture.state.pool)
+    .await?;
+
+    let response = reservations::cancel_reservation(
+        State(fixture.state.clone()),
+        Path(reservation_id),
+        fixture.headers(fixture.owner, "user"),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(fixture.reservation_status(reservation_id).await?, "active");
+    assert_eq!(fixture.spot_status().await?, "reserved");
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn unconfirmed_occupancy_does_not_overwrite_a_newer_free_observation(
+    pool: PgPool,
+) -> Result<(), sqlx::Error> {
+    let fixture = Fixture::new(pool).await?;
+    let id = fixture.create_for_owner().await;
+    fixture.update_spot("occupied").await;
+    fixture.update_spot("free").await;
+
+    let outcome = crate::reservation_store::finish(
+        &fixture.state.pool,
+        id,
+        crate::reservation_store::FinishReason::UnconfirmedOccupancy,
+    )
+    .await?;
+    assert!(outcome.is_none());
+    assert_eq!(fixture.spot_status().await?, "free");
+    assert_eq!(fixture.reservation_status(id).await?, "active");
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn unconfirmed_occupancy_finishes_only_the_active_reservation(
+    pool: PgPool,
+) -> Result<(), sqlx::Error> {
+    let fixture = Fixture::new(pool).await?;
+    let id = fixture.create_for_owner().await;
+    fixture.update_spot("occupied").await;
+
+    let outcome = crate::reservation_store::finish(
+        &fixture.state.pool,
+        id,
+        crate::reservation_store::FinishReason::UnconfirmedOccupancy,
+    )
+    .await?
+    .expect("active reservation should finish while occupied");
+    assert!(outcome.spot_status.is_none());
+    assert_eq!(fixture.spot_status().await?, "occupied");
+    assert_eq!(fixture.reservation_status(id).await?, "cancelled");
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn failed_reservation_insert_rolls_back_the_spot_claim(
+    pool: PgPool,
+) -> Result<(), sqlx::Error> {
+    let fixture = Fixture::new(pool).await?;
+    let outcome = crate::reservation_store::create(
+        &fixture.state.pool,
+        &fixture.spot_id,
+        Uuid::new_v4(), // Missing user: a persistence failure, not spot contention.
+        Utc::now() + Duration::minutes(15),
+    )
+    .await;
+    assert!(matches!(
+        outcome,
+        Err(crate::reservation_store::CreateError::Database(_))
+    ));
+    assert_eq!(fixture.spot_status().await?, "free");
+    assert_eq!(fixture.active_count().await?, 0);
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn occupied_observation_rolls_back_if_capturing_its_reservation_fails(
+    pool: PgPool,
+) -> Result<(), sqlx::Error> {
+    let fixture = Fixture::new(pool).await?;
+    fixture.create_for_owner().await;
+    // Simulate a persistence failure after the spot write, not a valid empty lookup.
+    sqlx::query("DROP TABLE reservations")
+        .execute(&fixture.state.pool)
+        .await?;
+
+    let result =
+        crate::ws::ws_edge::apply_occupied_observation(&fixture.state.pool, &fixture.spot_id).await;
+    assert!(result.is_err());
+    assert_eq!(
+        fixture.spot_status().await?,
+        "reserved",
+        "the observation and its reservation capture must commit together",
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn occupied_observation_captures_the_reservation_that_owns_its_spot(
+    pool: PgPool,
+) -> Result<(), sqlx::Error> {
+    let fixture = Fixture::new(pool).await?;
+    let id = fixture.create_for_owner().await;
+    let result =
+        crate::ws::ws_edge::apply_occupied_observation(&fixture.state.pool, &fixture.spot_id)
+            .await?;
+    assert_eq!(result, Some(Some(id)));
+    assert_eq!(fixture.spot_status().await?, "occupied");
+    assert_eq!(fixture.reservation_status(id).await?, "active");
+    Ok(())
+}

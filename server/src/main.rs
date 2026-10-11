@@ -19,6 +19,11 @@ mod auth;
 mod pathfinding;
 #[cfg(test)]
 mod postgres_tests;
+#[cfg(test)]
+mod reservation_concurrency_tests;
+mod reservation_store;
+#[cfg(test)]
+mod reservation_tests;
 mod reservations;
 mod security;
 mod site_config;
@@ -143,44 +148,49 @@ async fn main() {
         loop {
             interval.tick().await;
 
-            let expired_records = sqlx::query!(
-                "UPDATE reservations
-                SET status = 'expired'
-                WHERE status = 'active' AND expires_at < NOW()
-                RETURNING spot_id, user_id"
+            let expired_ids = sqlx::query_scalar::<_, uuid::Uuid>(
+                "SELECT id FROM reservations WHERE status = 'active' AND expires_at < NOW()",
             )
             .fetch_all(&state_for_bg_task.pool)
             .await;
+            let ids = match expired_ids {
+                Ok(ids) => ids,
+                Err(error) => {
+                    tracing::error!("Failed to select expired reservations: {}", error);
+                    continue;
+                }
+            };
 
-            if let Ok(records) = expired_records {
-                for record in records {
-                    let released = sqlx::query(
-                        "UPDATE spots SET status = 'free', last_updated = NOW() \
-                         WHERE id = $1 AND status = 'reserved'",
-                    )
-                    .bind(&record.spot_id)
-                    .execute(&state_for_bg_task.pool)
-                    .await
-                    .is_ok_and(|result| result.rows_affected() > 0);
-
-                    let expired_msg = ServerToAppMsg::ReservationExpired {
-                        spot_id: record.spot_id.clone(),
-                    };
-                    if let Ok(json_str) = serde_json::to_string(&expired_msg)
-                        && let Some(user_id) = record.user_id
-                        && let Some(user_tx) = state_for_bg_task.user_sessions.get(&user_id)
-                    {
-                        let _ = user_tx.send(json_str);
-                    }
-                    if released {
-                        let update_msg = ServerToAppMsg::SpotUpdate {
-                            spot_id: record.spot_id,
-                            status: "free".to_string(),
+            for id in ids {
+                let transition = reservation_store::finish(
+                    &state_for_bg_task.pool,
+                    id,
+                    reservation_store::FinishReason::Expired,
+                )
+                .await;
+                match transition {
+                    Ok(Some(record)) => {
+                        let expired_msg = ServerToAppMsg::ReservationExpired {
+                            spot_id: record.spot_id.clone(),
                         };
-                        if let Ok(json_str) = serde_json::to_string(&update_msg) {
-                            let _ = state_for_bg_task.tx.send(json_str);
+                        if let Ok(json) = serde_json::to_string(&expired_msg)
+                            && let Some(user_id) = record.user_id
+                            && let Some(user_tx) = state_for_bg_task.user_sessions.get(&user_id)
+                        {
+                            let _ = user_tx.send(json);
+                        }
+                        if let Some(status) = record.spot_status {
+                            let update_msg = ServerToAppMsg::SpotUpdate {
+                                spot_id: record.spot_id,
+                                status: status.to_string(),
+                            };
+                            if let Ok(json) = serde_json::to_string(&update_msg) {
+                                let _ = state_for_bg_task.tx.send(json);
+                            }
                         }
                     }
+                    Ok(None) => {}
+                    Err(error) => tracing::error!("Failed to expire reservation {}: {}", id, error),
                 }
             }
         }
