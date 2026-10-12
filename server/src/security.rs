@@ -16,10 +16,11 @@
 // ==============================================================================
 
 use argon2::{
-    Argon2,
+    Argon2, Params,
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
 };
 use axum::http::{HeaderMap, StatusCode, header};
+use axum::response::{IntoResponse, Response};
 use chrono::{Duration, Utc};
 use hmac::{Hmac, KeyInit, Mac};
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
@@ -74,6 +75,113 @@ pub fn verify_password(password: &str, password_hash: &str) -> bool {
     Argon2::default()
         .verify_password(password.as_bytes(), &parsed_hash)
         .is_ok()
+}
+
+#[derive(Debug)]
+pub enum PasswordWorkError {
+    Work(crate::auth_limits::AuthLimitError),
+    Hash(argon2::password_hash::Error),
+    UnsupportedCost,
+}
+
+impl IntoResponse for PasswordWorkError {
+    fn into_response(self) -> Response {
+        match self {
+            Self::Work(error) => error.into_response(),
+            Self::Hash(_error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Password processing failed",
+            )
+                .into_response(),
+            Self::UnsupportedCost => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(header::RETRY_AFTER, "1")],
+                "Password verification unavailable",
+            )
+                .into_response(),
+        }
+    }
+}
+
+impl From<crate::auth_limits::AuthLimitError> for PasswordWorkError {
+    fn from(error: crate::auth_limits::AuthLimitError) -> Self {
+        Self::Work(error)
+    }
+}
+
+impl From<argon2::password_hash::Error> for PasswordWorkError {
+    fn from(error: argon2::password_hash::Error) -> Self {
+        Self::Hash(error)
+    }
+}
+
+const MAX_PASSWORD_MEMORY_KIB: u32 = 65_536;
+const MAX_PASSWORD_ITERATIONS: u32 = 6;
+const MAX_PASSWORD_PARALLELISM: u32 = 4;
+
+fn password_hash_allowed(password_hash: &str) -> Result<bool, PasswordWorkError> {
+    let hash = match PasswordHash::new(password_hash) {
+        Ok(hash) => hash,
+        Err(_) => return Ok(false),
+    };
+    if argon2::Algorithm::try_from(hash.algorithm).is_err()
+        || hash
+            .version
+            .is_some_and(|version| argon2::Version::try_from(version).is_err())
+    {
+        return Ok(false);
+    }
+    let (Some(salt), Some(_)) = (hash.salt, hash.hash) else {
+        return Ok(false);
+    };
+    let mut salt_buffer = [0u8; 64];
+    match salt.decode_b64(&mut salt_buffer) {
+        Ok(bytes) if bytes.len() >= argon2::MIN_SALT_LEN => {}
+        _ => return Ok(false),
+    }
+
+    // Params::new multiplies p * 8 before its own upper-bound check.
+    if let Some(value) = hash.params.get("p") {
+        match value.decimal() {
+            Ok(parallelism) if parallelism <= Params::MAX_P_COST => {}
+            _ => return Ok(false),
+        }
+    }
+    let params = match Params::try_from(&hash) {
+        Ok(params) => params,
+        Err(_) => return Ok(false),
+    };
+    if params.m_cost() > MAX_PASSWORD_MEMORY_KIB
+        || params.t_cost() > MAX_PASSWORD_ITERATIONS
+        || params.p_cost() > MAX_PASSWORD_PARALLELISM
+    {
+        return Err(PasswordWorkError::UnsupportedCost);
+    }
+    Ok(true)
+}
+
+pub async fn hash_password_async(
+    limits: &crate::auth_limits::AuthLimits,
+    password: String,
+) -> Result<String, PasswordWorkError> {
+    limits
+        .run_blocking(move || hash_password(&password))
+        .await?
+        .map_err(PasswordWorkError::Hash)
+}
+
+pub async fn verify_password_async(
+    limits: &crate::auth_limits::AuthLimits,
+    password: String,
+    password_hash: String,
+) -> Result<bool, PasswordWorkError> {
+    if !password_hash_allowed(&password_hash)? {
+        return Ok(false);
+    }
+    limits
+        .run_blocking(move || verify_password(&password, &password_hash))
+        .await
+        .map_err(PasswordWorkError::Work)
 }
 
 // Autenticação de sessão com JWT
@@ -276,6 +384,231 @@ pub async fn require_admin(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const PHC_SALT: &str = "MTIzNDU2Nzg";
+    const PHC_OUTPUT: &str = "QUFBQUFBQUFBQUFBQUFBQQ";
+
+    fn phc_fixture(params: &str) -> String {
+        if params.is_empty() {
+            format!("$argon2id$v=19${PHC_SALT}${PHC_OUTPUT}")
+        } else {
+            format!("$argon2id$v=19${params}${PHC_SALT}${PHC_OUTPUT}")
+        }
+    }
+
+    #[test]
+    fn r04_phc_cost_ceiling_is_inclusive_and_defaults_match_argon2() {
+        for params in [
+            "m=65536,t=6,p=4",
+            "m=19456,t=2,p=1",
+            "t=2,p=1",
+            "m=19456,p=1",
+            "m=19456,t=2",
+            "",
+        ] {
+            let hash = phc_fixture(params);
+            assert!(password_hash_allowed(&hash).unwrap(), "{params}");
+        }
+    }
+
+    #[test]
+    fn r04_phc_cost_above_budget_is_rejected_without_kdf_allocation() {
+        for params in [
+            "m=65537,t=2,p=1",
+            "m=4294967295,t=2,p=1",
+            "m=19456,t=7,p=1",
+            "m=19456,t=4294967295,p=1",
+            "m=65536,t=2,p=5",
+            "m=4294967295,t=2,p=16777215",
+        ] {
+            assert!(
+                matches!(
+                    password_hash_allowed(&phc_fixture(params)),
+                    Err(PasswordWorkError::UnsupportedCost)
+                ),
+                "{params}",
+            );
+        }
+    }
+
+    #[test]
+    fn r04_invalid_phc_is_an_authentication_failure_without_panicking() {
+        for params in [
+            "m=0,t=2,p=1",
+            "m=8,t=0,p=1",
+            "m=8,t=1,p=0",
+            "m=8,t=1,p=2",
+            "m=4294967295,t=1,p=4294967295",
+            "m=4294967296,t=2,p=1",
+            "m=invalid,t=2,p=1",
+            "m=19456,t=2,p=1,unknown=1",
+            "m=65537,t=2,p=1,unknown=1",
+        ] {
+            assert!(
+                !password_hash_allowed(&phc_fixture(params)).unwrap(),
+                "{params}"
+            );
+        }
+        for hash in [
+            "",
+            "not-a-password-hash",
+            "$argon2id$v=20$m=8,t=1,p=1$MTIzNDU2Nzg$QUFBQUFBQUFBQUFBQUFBQQ",
+            "$unknown$v=19$m=65537,t=1,p=1$MTIzNDU2Nzg$QUFBQUFBQUFBQUFBQUFBQQ",
+            "$argon2id$v=19$m=8,t=1,p=1$YWJj$QUFBQUFBQUFBQUFBQUFBQQ",
+            "$argon2id$v=19$m=8,t=1,p=1$----$QUFBQUFBQUFBQUFBQUFBQQ",
+            "$argon2id$v=19$m=8,t=1,p=1$MTIzNDU2Nzg$YQ",
+            "$argon2id$v=19$m=8,t=1,p=1$MTIzNDU2Nzg",
+            "$argon2id$v=19$m=8,t=1,p=1",
+        ] {
+            assert!(!password_hash_allowed(hash).unwrap(), "{hash}");
+        }
+    }
+
+    #[tokio::test]
+    async fn r04_async_password_hashing_remains_salted_and_verifiable() {
+        let limits = crate::auth_limits::AuthLimits::default();
+        let first = hash_password_async(&limits, "r04-secret".to_owned())
+            .await
+            .unwrap();
+        let second = hash_password_async(&limits, "r04-secret".to_owned())
+            .await
+            .unwrap();
+        assert_ne!(first, second);
+        assert!(verify_password("r04-secret", &first));
+        assert!(
+            verify_password_async(&limits, "r04-secret".to_owned(), first.clone())
+                .await
+                .unwrap()
+        );
+        assert!(
+            verify_password_async(
+                &limits,
+                "r04-secret".to_owned(),
+                first.replace("$m=19456,t=2,p=1", "").replace("$v=19", ""),
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            !verify_password_async(&limits, "wrong-secret".to_owned(), first)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn r04_async_verification_preserves_supported_algorithms_versions_and_output() {
+        let limits = crate::auth_limits::AuthLimits::default();
+        let salt = SaltString::encode_b64(b"12345678").unwrap();
+        for algorithm in [
+            argon2::Algorithm::Argon2d,
+            argon2::Algorithm::Argon2i,
+            argon2::Algorithm::Argon2id,
+        ] {
+            for version in [argon2::Version::V0x10, argon2::Version::V0x13] {
+                for output_len in [16, 64] {
+                    let params = argon2::Params::new(32, 3, 2, Some(output_len)).unwrap();
+                    let hash = Argon2::new(algorithm, version, params)
+                        .hash_password(b"legacy-secret", &salt)
+                        .unwrap()
+                        .to_string();
+                    assert!(
+                        verify_password_async(&limits, "legacy-secret".to_owned(), hash)
+                            .await
+                            .unwrap()
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn r04_invalid_and_over_budget_phc_do_not_acquire_a_busy_worker() {
+        let limits = std::sync::Arc::new(crate::auth_limits::AuthLimits::default());
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker_limits = limits.clone();
+        let worker = tokio::spawn(async move {
+            worker_limits
+                .run_blocking(move || {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv_timeout(StdDuration::from_secs(5)).unwrap();
+                })
+                .await
+        });
+        tokio::time::timeout(StdDuration::from_secs(2), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let valid_phc = phc_fixture("m=8,t=1,p=1");
+        let verify_busy = verify_password_async(&limits, "secret".to_owned(), valid_phc).await;
+        let hash_busy = hash_password_async(&limits, "secret".to_owned()).await;
+        let invalid = verify_password_async(
+            &limits,
+            "secret".to_owned(),
+            "not-a-password-hash".to_owned(),
+        )
+        .await;
+        let over_budget = verify_password_async(
+            &limits,
+            "secret".to_owned(),
+            phc_fixture("m=4294967295,t=2,p=1"),
+        )
+        .await;
+
+        release_tx.send(()).unwrap();
+        worker.await.unwrap().unwrap();
+        assert!(matches!(
+            verify_busy,
+            Err(PasswordWorkError::Work(
+                crate::auth_limits::AuthLimitError::Unavailable
+            ))
+        ));
+        assert!(matches!(
+            hash_busy,
+            Err(PasswordWorkError::Work(
+                crate::auth_limits::AuthLimitError::Unavailable
+            ))
+        ));
+        assert!(!invalid.unwrap());
+        assert!(matches!(
+            over_budget,
+            Err(PasswordWorkError::UnsupportedCost)
+        ));
+    }
+
+    #[test]
+    fn r04_password_work_errors_preserve_http_status_and_retry_headers() {
+        let unsupported = PasswordWorkError::UnsupportedCost.into_response();
+        assert_eq!(unsupported.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(unsupported.headers()[header::RETRY_AFTER], "1");
+        let hashing =
+            PasswordWorkError::Hash(argon2::password_hash::Error::Password).into_response();
+        assert_eq!(hashing.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!hashing.headers().contains_key(header::RETRY_AFTER));
+        for (error, status, retry) in [
+            (
+                crate::auth_limits::AuthLimitError::RateLimited,
+                StatusCode::TOO_MANY_REQUESTS,
+                true,
+            ),
+            (
+                crate::auth_limits::AuthLimitError::Unavailable,
+                StatusCode::SERVICE_UNAVAILABLE,
+                true,
+            ),
+            (
+                crate::auth_limits::AuthLimitError::Internal,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                false,
+            ),
+        ] {
+            let response = PasswordWorkError::Work(error).into_response();
+            assert_eq!(response.status(), status);
+            assert_eq!(response.headers().contains_key(header::RETRY_AFTER), retry);
+        }
+    }
 
     #[test]
     fn demo_token_cannot_grant_backend_admin_access() {

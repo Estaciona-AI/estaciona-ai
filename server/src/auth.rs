@@ -15,11 +15,36 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 // ==============================================================================
 
-use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use axum::{
+    Json,
+    extract::State,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
 use serde::{Deserialize, Serialize};
 
-use crate::security::{create_jwt, verify_password};
+use crate::security::{PasswordWorkError, create_jwt, verify_password_async};
 use crate::state::SharedState;
+
+pub enum AuthError {
+    Status(StatusCode, &'static str),
+    Password(PasswordWorkError),
+}
+
+impl From<PasswordWorkError> for AuthError {
+    fn from(error: PasswordWorkError) -> Self {
+        Self::Password(error)
+    }
+}
+
+impl IntoResponse for AuthError {
+    fn into_response(self) -> Response {
+        match self {
+            Self::Status(status, message) => (status, message).into_response(),
+            Self::Password(error) => error.into_response(),
+        }
+    }
+}
 
 #[derive(Deserialize)]
 pub struct LoginRequest {
@@ -38,7 +63,17 @@ pub struct LoginResponse {
 pub async fn login_dashboard(
     State(state): State<SharedState>,
     Json(payload): Json<LoginRequest>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
+) -> Result<impl IntoResponse, AuthError> {
+    if payload.email.is_empty()
+        || payload.email.chars().count() > 255
+        || payload.password.is_empty()
+        || payload.password.len() > 1024
+    {
+        return Err(AuthError::Status(
+            StatusCode::BAD_REQUEST,
+            "Invalid login input",
+        ));
+    }
     let user = sqlx::query!(
         "SELECT id, password_hash as \"password_hash!\", role, name FROM users WHERE email = $1",
         payload.email
@@ -47,19 +82,30 @@ pub async fn login_dashboard(
     .await
     .map_err(|e| {
         tracing::error!("Database error during login: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Database error".to_string(),
-        )
+        AuthError::Status(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
     })?;
 
     let user_record = match user {
         Some(record) => record,
-        None => return Err((StatusCode::UNAUTHORIZED, "Invalid credentials".to_string())),
+        None => {
+            return Err(AuthError::Status(
+                StatusCode::UNAUTHORIZED,
+                "Invalid credentials",
+            ));
+        }
     };
 
-    if !verify_password(&payload.password, &user_record.password_hash) {
-        return Err((StatusCode::UNAUTHORIZED, "Invalid credentials".to_string()));
+    if !verify_password_async(
+        &state.auth_limits,
+        payload.password,
+        user_record.password_hash,
+    )
+    .await?
+    {
+        return Err(AuthError::Status(
+            StatusCode::UNAUTHORIZED,
+            "Invalid credentials",
+        ));
     }
 
     let token = create_jwt(
@@ -68,9 +114,9 @@ pub async fn login_dashboard(
         &state.jwt_secret,
     )
     .map_err(|_| {
-        (
+        AuthError::Status(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed while generating access token".to_string(),
+            "Failed while generating access token",
         )
     })?;
 
