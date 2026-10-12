@@ -26,6 +26,9 @@ use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode}
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use sqlx::PgPool;
+use std::time::{Duration as StdDuration, SystemTime, UNIX_EPOCH};
+use tokio::time::{Instant, MissedTickBehavior, interval_at, timeout_at};
 use uuid::Uuid;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -105,16 +108,120 @@ pub fn create_jwt(
 }
 
 pub fn verify_jwt(token: &str, secret: &str) -> Result<Claims, jsonwebtoken::errors::Error> {
+    let mut validation = Validation::default();
+    validation.leeway = 0;
     let token_data = decode::<Claims>(
         token,
         &DecodingKey::from_secret(secret.as_bytes()),
-        &Validation::default(),
+        &validation,
     )?;
+
+    // jsonwebtoken accepts exp == now; our session ends at exp, without grace.
+    if token_data.claims.exp as u64 <= jsonwebtoken::get_current_timestamp() {
+        return Err(jsonwebtoken::errors::ErrorKind::ExpiredSignature.into());
+    }
 
     Ok(token_data.claims)
 }
 
 pub type AuthError = (StatusCode, String);
+
+const AUTHORIZATION_TIMEOUT: StdDuration = StdDuration::from_secs(2);
+const SESSION_RECHECK_INTERVAL: StdDuration = StdDuration::from_secs(5);
+
+#[derive(Debug)]
+pub struct AuthSession {
+    pub user_id: Uuid,
+    pub role: String,
+    expires_at: usize,
+    pub deadline: Instant,
+}
+
+fn expired_session() -> AuthError {
+    (StatusCode::UNAUTHORIZED, "Expired session".to_owned())
+}
+
+fn authorization_unavailable() -> AuthError {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Authorization unavailable".to_owned(),
+    )
+}
+
+impl AuthSession {
+    pub fn from_claims(claims: Claims) -> Result<Self, AuthError> {
+        let user_id = Uuid::parse_str(&claims.sub)
+            .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid user token".to_owned()))?;
+        let monotonic_now = Instant::now();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| expired_session())?;
+        let remaining = StdDuration::from_secs(claims.exp as u64)
+            .checked_sub(now)
+            .filter(|duration| !duration.is_zero())
+            .ok_or_else(expired_session)?;
+        let deadline = monotonic_now
+            .checked_add(remaining)
+            .ok_or_else(expired_session)?;
+        Ok(Self {
+            user_id,
+            role: claims.role,
+            expires_at: claims.exp,
+            deadline,
+        })
+    }
+
+    pub fn check_expiration(&self) -> Result<(), AuthError> {
+        if Instant::now() >= self.deadline
+            || jsonwebtoken::get_current_timestamp() >= self.expires_at as u64
+        {
+            return Err(expired_session());
+        }
+        Ok(())
+    }
+
+    pub async fn revalidate(&self, pool: &PgPool) -> Result<(), AuthError> {
+        self.check_expiration()?;
+        let query_deadline = self.deadline.min(Instant::now() + AUTHORIZATION_TIMEOUT);
+        let result = timeout_at(
+            query_deadline,
+            sqlx::query_scalar::<_, String>("SELECT role FROM users WHERE id = $1")
+                .bind(self.user_id)
+                .fetch_optional(pool),
+        )
+        .await;
+        // A query that finishes after exp must not extend the session.
+        self.check_expiration()?;
+        let role = result
+            .map_err(|_| authorization_unavailable())?
+            .map_err(|error| {
+                tracing::error!(%error, "Session authorization query failed");
+                authorization_unavailable()
+            })?
+            .ok_or((StatusCode::UNAUTHORIZED, "Invalid user session".to_owned()))?;
+        if role != self.role {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "Session permissions changed".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn wait_for_invalidation(&self, pool: &PgPool) -> AuthError {
+        let mut interval = interval_at(
+            Instant::now() + SESSION_RECHECK_INTERVAL,
+            SESSION_RECHECK_INTERVAL,
+        );
+        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            if let Err(error) = self.revalidate(pool).await {
+                return error;
+            }
+        }
+    }
+}
 
 pub fn authenticated_claims(headers: &HeaderMap, secret: &str) -> Result<Claims, AuthError> {
     let bearer = headers
@@ -135,15 +242,32 @@ pub fn authenticated_claims(headers: &HeaderMap, secret: &str) -> Result<Claims,
     verify_jwt(token, secret).map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid token".to_string()))
 }
 
-pub fn authenticated_user(headers: &HeaderMap, secret: &str) -> Result<Uuid, AuthError> {
+pub async fn authenticated_session(
+    headers: &HeaderMap,
+    secret: &str,
+    pool: &PgPool,
+) -> Result<AuthSession, AuthError> {
     let claims = authenticated_claims(headers, secret)?;
-    Uuid::parse_str(&claims.sub)
-        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid user token".to_string()))
+    let session = AuthSession::from_claims(claims)?;
+    session.revalidate(pool).await?;
+    Ok(session)
 }
 
-pub fn require_admin(headers: &HeaderMap, secret: &str) -> Result<(), AuthError> {
-    let claims = authenticated_claims(headers, secret)?;
-    if claims.role != "admin" {
+pub async fn authenticated_user(
+    headers: &HeaderMap,
+    secret: &str,
+    pool: &PgPool,
+) -> Result<Uuid, AuthError> {
+    Ok(authenticated_session(headers, secret, pool).await?.user_id)
+}
+
+pub async fn require_admin(
+    headers: &HeaderMap,
+    secret: &str,
+    pool: &PgPool,
+) -> Result<(), AuthError> {
+    let session = authenticated_session(headers, secret, pool).await?;
+    if session.role != "admin" {
         return Err((StatusCode::FORBIDDEN, "Admin required".to_string()));
     }
     Ok(())
@@ -159,7 +283,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(header::AUTHORIZATION, "Bearer demo-token".parse().unwrap());
         assert_eq!(
-            require_admin(&headers, "secret").unwrap_err().0,
+            authenticated_claims(&headers, "secret").unwrap_err().0,
             StatusCode::UNAUTHORIZED
         );
     }
@@ -170,23 +294,29 @@ mod tests {
         let token = create_jwt(&user_id.to_string(), "user", "secret").unwrap();
         let mut headers = HeaderMap::new();
         assert_eq!(
-            authenticated_user(&headers, "secret").unwrap_err().0,
+            authenticated_claims(&headers, "secret").unwrap_err().0,
             StatusCode::UNAUTHORIZED
         );
         headers.insert(
             header::AUTHORIZATION,
             format!("Bearer {token}").parse().unwrap(),
         );
-        assert_eq!(authenticated_user(&headers, "secret").unwrap(), user_id);
+        assert_eq!(
+            AuthSession::from_claims(authenticated_claims(&headers, "secret").unwrap())
+                .unwrap()
+                .user_id,
+            user_id
+        );
         headers.remove(header::AUTHORIZATION);
         headers.insert(
             header::COOKIE,
             format!("estaciona_token={token}").parse().unwrap(),
         );
-        assert_eq!(authenticated_user(&headers, "secret").unwrap(), user_id);
         assert_eq!(
-            require_admin(&headers, "secret").unwrap_err().0,
-            StatusCode::FORBIDDEN
+            AuthSession::from_claims(authenticated_claims(&headers, "secret").unwrap())
+                .unwrap()
+                .user_id,
+            user_id
         );
     }
 
@@ -335,5 +465,26 @@ mod tests {
         .unwrap();
         let result = verify_jwt(&token, secret);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn verify_jwt_rejects_expiration_without_grace_period() {
+        for seconds_ago in [0, 1, 30] {
+            let claims = Claims {
+                sub: Uuid::new_v4().to_string(),
+                role: "user".to_owned(),
+                exp: (Utc::now().timestamp() - seconds_ago) as usize,
+            };
+            let token = encode(
+                &Header::default(),
+                &claims,
+                &EncodingKey::from_secret(b"secret"),
+            )
+            .unwrap();
+            assert!(
+                verify_jwt(&token, "secret").is_err(),
+                "a token expired {seconds_ago} seconds ago must be rejected"
+            );
+        }
     }
 }

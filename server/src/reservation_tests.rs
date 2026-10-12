@@ -150,6 +150,66 @@ impl Fixture {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn r03_demoted_admin_cannot_mutate_a_spot(pool: PgPool) -> Result<(), sqlx::Error> {
+    let fixture = Fixture::new(pool).await?;
+    let headers = fixture.headers(fixture.admin, "admin");
+    sqlx::query("UPDATE users SET role = 'user' WHERE id = $1")
+        .bind(fixture.admin)
+        .execute(&fixture.state.pool)
+        .await?;
+    let response = reservations::update_spot_status(
+        State(fixture.state.clone()),
+        Path(fixture.spot_id.clone()),
+        headers,
+        Json(UpdateSpotStatus {
+            status: "occupied".to_owned(),
+        }),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(fixture.spot_status().await?, "free");
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn r03_deleted_user_cannot_create_a_reservation(pool: PgPool) -> Result<(), sqlx::Error> {
+    let fixture = Fixture::new(pool).await?;
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(fixture.owner)
+        .execute(&fixture.state.pool)
+        .await?;
+    let response = fixture.create(fixture.owner).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(fixture.spot_status().await?, "free");
+    assert_eq!(fixture.active_count().await?, 0);
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn r03_authorization_database_failure_denies_admin_mutation(
+    pool: PgPool,
+) -> Result<(), sqlx::Error> {
+    let fixture = Fixture::new(pool).await?;
+    sqlx::query("ALTER TABLE users RENAME TO unavailable_users")
+        .execute(&fixture.state.pool)
+        .await?;
+    let response = reservations::update_spot_status(
+        State(fixture.state.clone()),
+        Path(fixture.spot_id.clone()),
+        fixture.headers(fixture.admin, "admin"),
+        Json(UpdateSpotStatus {
+            status: "occupied".to_owned(),
+        }),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(fixture.spot_status().await?, "free");
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn rest_rejects_second_active_reservation_after_spot_becomes_free(
     pool: PgPool,
 ) -> Result<(), sqlx::Error> {

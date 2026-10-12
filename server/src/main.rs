@@ -209,7 +209,7 @@ async fn save_config(
     headers: HeaderMap,
     axum::Json(payload): axum::Json<serde_json::Value>,
 ) -> Result<&'static str, (axum::http::StatusCode, String)> {
-    crate::security::require_admin(&headers, &state.jwt_secret)?;
+    crate::security::require_admin(&headers, &state.jwt_secret, &state.pool).await?;
     site_config::save_parking_config(&state.site_data_dir, &payload).map_err(|error| {
         let status = if error.kind() == std::io::ErrorKind::InvalidData {
             StatusCode::BAD_REQUEST
