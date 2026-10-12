@@ -15,7 +15,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 // ==============================================================================
 
-use axum::extract::ws::{Message, WebSocket};
+use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use axum::{
     extract::{State, WebSocketUpgrade},
     response::IntoResponse,
@@ -27,32 +27,6 @@ use uuid::Uuid;
 use crate::reservation_store::{self, CreateError, FinishReason};
 use crate::state::SharedState;
 use crate::ws::messages::{EdgeToServerMsg, EdgeTransportMsg, ServerToAppMsg, ServerToEdgeMsg};
-
-pub(crate) async fn apply_occupied_observation(
-    pool: &sqlx::PgPool,
-    spot_id: &str,
-) -> Result<Option<Option<Uuid>>, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    // Keep the spot locked until the reservation for this observation is captured.
-    let updated =
-        sqlx::query("UPDATE spots SET status = 'occupied', last_updated = NOW() WHERE id = $1")
-            .bind(spot_id)
-            .execute(&mut *tx)
-            .await?;
-    if updated.rows_affected() == 0 {
-        tx.rollback().await?;
-        return Ok(None);
-    }
-
-    let reservation_id = sqlx::query_scalar::<_, Uuid>(
-        "SELECT id FROM reservations WHERE spot_id = $1 AND status = 'active'",
-    )
-    .bind(spot_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    Ok(Some(reservation_id))
-}
 
 pub async fn ws_edge_handler(
     ws: WebSocketUpgrade,
@@ -235,74 +209,44 @@ async fn run_edge_socket(
                     EdgeToServerMsg::SpotUpdate {
                         spot_id,
                         status,
+                        camera_id,
                         confidence,
                         ..
                     } => {
-                        if confidence < 0.20 {
-                            tracing::debug!(
-                                "Ignorando SpotUpdate para {} devido a baixa confiança ({})",
-                                spot_id,
-                                confidence
-                            );
-                            return true;
-                        }
-
-                        if status != "occupied" && status != "free" {
-                            eprintln!("Ignoring SpotUpdate with invalid status: {}", status);
-                            return true;
-                        }
-
-                        let active_reservation = if status == "occupied" {
-                            match apply_occupied_observation(&state.pool, &spot_id).await {
-                                Ok(Some(reservation_id)) => reservation_id,
-                                Ok(None) => return true,
-                                Err(error) => {
-                                    tracing::error!(%error, %spot_id, "Failed to apply occupied observation");
-                                    return true;
-                                }
+                        let observation = match crate::edge_delivery::apply_legacy(
+                            &state.pool,
+                            principal,
+                            &camera_id,
+                            &spot_id,
+                            &status,
+                            confidence,
+                        )
+                        .await
+                        {
+                            Ok(observation) => observation,
+                            Err(error) => {
+                                tracing::error!(%error, gateway_id = %principal.gateway_id, "Legacy edge observation failed");
+                                return false;
                             }
-                        } else {
-                            let updated = sqlx::query(
-                                "UPDATE spots SET status = $1, last_updated = NOW() \
-                             WHERE id = $2 AND NOT (status = 'reserved' AND $1 = 'free')",
-                            )
-                            .bind(&status)
-                            .bind(&spot_id)
-                            .execute(&state.pool)
-                            .await;
-                            if !matches!(updated, Ok(ref result) if result.rows_affected() > 0) {
-                                return true;
+                        };
+                        if observation.outcome == crate::edge_delivery::Outcome::Rejected {
+                            tracing::warn!(gateway_id = %principal.gateway_id, reason = ?observation.reason, "Legacy edge observation rejected without ACK");
+                            let _ = socket
+                                .send(Message::Close(Some(CloseFrame {
+                                    code: 1008,
+                                    reason: "Gateway observation rejected".into(),
+                                })))
+                                .await;
+                            return false;
+                        }
+                        if let Some((spot_id, status)) = observation.spot_update {
+                            let update = ServerToAppMsg::SpotUpdate { spot_id, status };
+                            if let Ok(json) = serde_json::to_string(&update) {
+                                let _ = state.tx.send(json);
                             }
-                            None
-                        };
-                        if status == "free" {
-                            let _ = sqlx::query(
-                                "UPDATE user_occupancy_history SET released_at = NOW() \
-                             WHERE spot_id = $1 AND released_at IS NULL",
-                            )
-                            .bind(&spot_id)
-                            .execute(&state.pool)
-                            .await;
                         }
-
-                        tracing::info!(
-                            "[WS EDGE] Spot {} updated to {} (Confidence: {:.2})",
-                            spot_id,
-                            status,
-                            confidence
-                        );
-
-                        let update_msg = ServerToAppMsg::SpotUpdate {
-                            spot_id: spot_id.clone(),
-                            status: status.clone(),
-                        };
-
-                        if let Ok(json_str) = serde_json::to_string(&update_msg) {
-                            let _ = state.tx.send(json_str);
-                        }
-
-                        if let Some(reservation_id) = active_reservation {
-                            schedule_unconfirmed_occupancy(state.clone(), reservation_id);
+                        if let Some(id) = observation.unconfirmed_reservation {
+                            schedule_unconfirmed_occupancy(state.clone(), id);
                         }
                     }
                     EdgeToServerMsg::PathUpdate {

@@ -91,6 +91,26 @@ pub async fn begin_authorized<'p>(
     .map_err(|_| AuthError::Database(sqlx::Error::PoolTimedOut))?
 }
 
+pub async fn spot_allowed(
+    tx: &mut Transaction<'_, Postgres>,
+    principal: &Principal,
+    camera_id: &str,
+    spot_id: &str,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (\
+         SELECT 1 FROM edge_camera_spots AS spots \
+         JOIN edge_camera_grants AS grants USING (gateway_id, camera_id) \
+         WHERE grants.gateway_id = $1 AND grants.camera_id = $2 \
+         AND spots.spot_id = $3 AND grants.spot_update)",
+    )
+    .bind(principal.gateway_id)
+    .bind(camera_id)
+    .bind(spot_id)
+    .fetch_one(&mut **tx)
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,6 +280,66 @@ mod tests {
             begin_authorized(&pool, &principal).await,
             Err(AuthError::Unauthenticated)
         ));
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn spot_scope_requires_gateway_camera_pair_and_observation_permission(
+        pool: PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let principal = fixture(&pool).await?;
+        let other = Uuid::new_v4();
+        sqlx::query("INSERT INTO edge_gateways (id,name,credential_digest) VALUES ($1,'Other',$2)")
+            .bind(other)
+            .bind(vec![7_u8; 32])
+            .execute(&pool)
+            .await?;
+        sqlx::query("INSERT INTO spots (id,status,x,y) VALUES ('A','free',0,0),('B','free',0,0)")
+            .execute(&pool)
+            .await?;
+        for (gateway, camera, permission) in [
+            (principal.gateway_id, "cam-a", true),
+            (principal.gateway_id, "cam-disabled", false),
+            (other, "cam-a", true),
+        ] {
+            sqlx::query("INSERT INTO edge_camera_grants (gateway_id,camera_id,spot_update,car_detected) VALUES ($1,$2,$3,true)")
+                .bind(gateway).bind(camera).bind(permission).execute(&pool).await?;
+        }
+        for (gateway, camera, spot) in [
+            (principal.gateway_id, "cam-a", "A"),
+            (principal.gateway_id, "cam-disabled", "A"),
+            (other, "cam-a", "B"),
+        ] {
+            sqlx::query(
+                "INSERT INTO edge_camera_spots (gateway_id,camera_id,spot_id) VALUES ($1,$2,$3)",
+            )
+            .bind(gateway)
+            .bind(camera)
+            .bind(spot)
+            .execute(&pool)
+            .await?;
+        }
+        let mut tx = begin_authorized(&pool, &principal).await?;
+        for (camera, spot, expected) in [
+            ("cam-a", "A", true),
+            ("cam-a", "B", false),
+            ("cam-disabled", "A", false),
+            ("unknown", "A", false),
+            ("cam-a", "unknown", false),
+        ] {
+            assert_eq!(
+                spot_allowed(&mut tx, &principal, camera, spot).await?,
+                expected
+            );
+        }
+        tx.rollback().await?;
+        sqlx::query("DELETE FROM edge_camera_grants WHERE gateway_id = $1 AND camera_id = 'cam-a'")
+            .bind(principal.gateway_id)
+            .execute(&pool)
+            .await?;
+        let mut tx = begin_authorized(&pool, &principal).await?;
+        assert!(!spot_allowed(&mut tx, &principal, "cam-a", "A").await?);
+        tx.rollback().await?;
         Ok(())
     }
 }

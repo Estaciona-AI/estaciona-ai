@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::edge_auth::{AuthError, Principal};
@@ -29,6 +29,14 @@ pub struct Delivery {
     pub unconfirmed_reservation: Option<Uuid>,
 }
 
+#[derive(Debug)]
+pub struct Observation {
+    pub outcome: Outcome,
+    pub reason: Option<String>,
+    pub spot_update: Option<(String, String)>,
+    pub unconfirmed_reservation: Option<Uuid>,
+}
+
 impl Outcome {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -48,6 +56,88 @@ fn contains_null_character(value: &Value) -> bool {
             .any(|(key, value)| key.contains('\0') || contains_null_character(value)),
         _ => false,
     }
+}
+
+async fn observe(
+    tx: &mut Transaction<'_, Postgres>,
+    principal: &Principal,
+    camera_id: &str,
+    spot_id: &str,
+    status: &str,
+    confidence: f64,
+) -> Result<Observation, sqlx::Error> {
+    let mut observation = Observation {
+        outcome: Outcome::Rejected,
+        reason: Some("invalid_status".to_owned()),
+        spot_update: None,
+        unconfirmed_reservation: None,
+    };
+    if !crate::edge_auth::spot_allowed(tx, principal, camera_id, spot_id).await? {
+        observation.reason = Some("scope_forbidden".to_owned());
+        return Ok(observation);
+    }
+    if status != "free" && status != "occupied" {
+        return Ok(observation);
+    }
+    if confidence < 0.20 {
+        observation.outcome = Outcome::Ignored;
+        observation.reason = Some("low_confidence".to_owned());
+        return Ok(observation);
+    }
+    let current =
+        sqlx::query_scalar::<_, String>("SELECT status FROM spots WHERE id = $1 FOR NO KEY UPDATE")
+            .bind(spot_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+    match current {
+        None => observation.reason = Some("unknown_spot".to_owned()),
+        Some(current) if current == "reserved" && status == "free" => {
+            observation.outcome = Outcome::Ignored;
+            observation.reason = Some("reservation_protected".to_owned());
+        }
+        Some(_) => {
+            sqlx::query("UPDATE spots SET status = $2, last_updated = NOW() WHERE id = $1")
+                .bind(spot_id)
+                .bind(status)
+                .execute(&mut **tx)
+                .await?;
+            if status == "free" {
+                sqlx::query(
+                    "UPDATE user_occupancy_history SET released_at = NOW() \
+                     WHERE spot_id = $1 AND released_at IS NULL",
+                )
+                .bind(spot_id)
+                .execute(&mut **tx)
+                .await?;
+            } else {
+                observation.unconfirmed_reservation = sqlx::query_scalar(
+                    "SELECT id FROM reservations WHERE spot_id = $1 AND status = 'active'",
+                )
+                .bind(spot_id)
+                .fetch_optional(&mut **tx)
+                .await?;
+            }
+            observation.outcome = Outcome::Applied;
+            observation.reason = None;
+            observation.spot_update = Some((spot_id.to_owned(), status.to_owned()));
+        }
+    }
+    Ok(observation)
+}
+
+pub async fn apply_legacy(
+    pool: &PgPool,
+    principal: &Principal,
+    camera_id: &str,
+    spot_id: &str,
+    status: &str,
+    confidence: f64,
+) -> Result<Observation, AuthError> {
+    let mut tx = crate::edge_auth::begin_authorized(pool, principal).await?;
+    let observation = observe(&mut tx, principal, camera_id, spot_id, status, confidence).await?;
+    // Raw observations have no synthetic event UUID, ledger entry or ACK.
+    tx.commit().await?;
+    Ok(observation)
 }
 
 pub async fn apply(
@@ -152,59 +242,20 @@ pub async fn apply(
     };
     match parsed_payload {
         Some(crate::ws::messages::EdgeToServerMsg::SpotUpdate {
+            camera_id,
             spot_id,
             status,
             confidence,
             ..
         }) => {
-            if status != "free" && status != "occupied" {
-                delivery.ack.reason = Some("invalid_status".to_owned());
-            } else if confidence < 0.20 {
-                delivery.ack.outcome = Outcome::Ignored;
-                delivery.ack.reason = Some("low_confidence".to_owned());
-            } else {
-                let current = sqlx::query_scalar::<_, String>(
-                    "SELECT status FROM spots WHERE id = $1 FOR NO KEY UPDATE",
-                )
-                .bind(&spot_id)
-                .fetch_optional(&mut *tx)
-                .await?;
-                match current {
-                    None => delivery.ack.reason = Some("unknown_spot".to_owned()),
-                    Some(current) if current == "reserved" && status == "free" => {
-                        delivery.ack.outcome = Outcome::Ignored;
-                        delivery.ack.reason = Some("reservation_protected".to_owned());
-                    }
-                    Some(_) => {
-                        sqlx::query(
-                            "UPDATE spots SET status = $2, last_updated = NOW() WHERE id = $1",
-                        )
-                        .bind(&spot_id)
-                        .bind(&status)
-                        .execute(&mut *tx)
-                        .await?;
-                        if status == "free" {
-                            sqlx::query(
-                                "UPDATE user_occupancy_history SET released_at = NOW() \
-                                 WHERE spot_id = $1 AND released_at IS NULL",
-                            )
-                            .bind(&spot_id)
-                            .execute(&mut *tx)
-                            .await?;
-                        } else {
-                            delivery.unconfirmed_reservation = sqlx::query_scalar(
-                                "SELECT id FROM reservations WHERE spot_id = $1 AND status = 'active'",
-                            )
-                            .bind(&spot_id)
-                            .fetch_optional(&mut *tx)
-                            .await?;
-                        }
-                        delivery.ack.outcome = Outcome::Applied;
-                        delivery.ack.reason = None;
-                        delivery.spot_update = Some((spot_id, status));
-                    }
-                }
-            }
+            let observation = observe(
+                &mut tx, principal, &camera_id, &spot_id, &status, confidence,
+            )
+            .await?;
+            delivery.ack.outcome = observation.outcome;
+            delivery.ack.reason = observation.reason;
+            delivery.spot_update = observation.spot_update;
+            delivery.unconfirmed_reservation = observation.unconfirmed_reservation;
         }
         Some(_) => delivery.ack.reason = Some("unsupported_event".to_owned()),
         None => {}
@@ -321,8 +372,8 @@ mod tests {
     async fn event_uuid_is_scoped_to_its_authenticated_gateway(pool: PgPool) -> TestResult {
         let first_principal = principal(&pool).await?;
         let second_principal = principal(&pool).await?;
-        let first_spot = spot(&pool, "free").await?;
-        let second_spot = spot(&pool, "free").await?;
+        let first_spot = authorized_spot(&pool, &first_principal, "free").await?;
+        let second_spot = authorized_spot(&pool, &second_principal, "free").await?;
         let event_id = Uuid::new_v4();
         let first = apply(
             &pool,
@@ -360,7 +411,7 @@ mod tests {
         pool: PgPool,
     ) -> TestResult {
         let principal = principal(&pool).await?;
-        let spot_id = spot(&pool, "free").await?;
+        let spot_id = authorized_spot(&pool, &principal, "free").await?;
         let event_id = Uuid::new_v4();
         let event_payload = payload(&spot_id, "occupied");
         let stored_payload = json!({"json": &event_payload});
@@ -413,7 +464,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn revoked_credential_cannot_replay_or_create_a_receipt(pool: PgPool) -> TestResult {
         let principal = principal(&pool).await?;
-        let spot_id = spot(&pool, "free").await?;
+        let spot_id = authorized_spot(&pool, &principal, "free").await?;
         let event_id = Uuid::new_v4();
         let event_payload = payload(&spot_id, "occupied");
         apply(&pool, &principal, event_id, event_payload.clone()).await?;
@@ -440,7 +491,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn rotated_credential_replays_the_same_gateway_receipt(pool: PgPool) -> TestResult {
         let principal = principal(&pool).await?;
-        let spot_id = spot(&pool, "free").await?;
+        let spot_id = authorized_spot(&pool, &principal, "free").await?;
         let event_id = Uuid::new_v4();
         let event_payload = payload(&spot_id, "occupied");
         apply(&pool, &principal, event_id, event_payload.clone()).await?;
@@ -473,7 +524,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn occupied_receipt_and_captured_reservation_are_committed(pool: PgPool) -> TestResult {
         let principal = principal(&pool).await?;
-        let spot_id = spot(&pool, "free").await?;
+        let spot_id = authorized_spot(&pool, &principal, "free").await?;
         let owner = user(&pool).await?;
         let reservation =
             reservation_store::create(&pool, &spot_id, owner, Utc::now() + Duration::minutes(15))
@@ -498,7 +549,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn duplicate_returns_original_ack_without_reapplying(pool: PgPool) -> TestResult {
         let principal = principal(&pool).await?;
-        let spot_id = spot(&pool, "free").await?;
+        let spot_id = authorized_spot(&pool, &principal, "free").await?;
         let id = Uuid::new_v4();
         let first_payload = payload(&spot_id, "occupied");
         let first = apply(&pool, &principal, id, first_payload.clone()).await?;
@@ -527,7 +578,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn concurrent_duplicate_mutates_spot_once(pool: PgPool) -> TestResult {
         let principal = principal(&pool).await?;
-        let spot_id = spot(&pool, "free").await?;
+        let spot_id = authorized_spot(&pool, &principal, "free").await?;
         sqlx::raw_sql(
             "CREATE TABLE delivery_effect_count (updates INTEGER NOT NULL); \
              INSERT INTO delivery_effect_count VALUES (0); \
@@ -576,7 +627,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn reused_id_rejects_changed_payload_and_preserves_original(pool: PgPool) -> TestResult {
         let principal = principal(&pool).await?;
-        let spot_id = spot(&pool, "free").await?;
+        let spot_id = authorized_spot(&pool, &principal, "free").await?;
         let id = Uuid::new_v4();
         let original = payload(&spot_id, "occupied");
         assert_eq!(
@@ -609,7 +660,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn free_event_releases_history_and_commits_receipt(pool: PgPool) -> TestResult {
         let principal = principal(&pool).await?;
-        let spot_id = spot(&pool, "occupied").await?;
+        let spot_id = authorized_spot(&pool, &principal, "occupied").await?;
         let history_id = history(&pool, &spot_id).await?;
         let id = Uuid::new_v4();
         let delivery = apply(&pool, &principal, id, payload(&spot_id, "free")).await?;
@@ -634,7 +685,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn finalization_error_rolls_back_receipt_spot_and_history(pool: PgPool) -> TestResult {
         let principal = principal(&pool).await?;
-        let spot_id = spot(&pool, "occupied").await?;
+        let spot_id = authorized_spot(&pool, &principal, "occupied").await?;
         let history_id = history(&pool, &spot_id).await?;
         sqlx::raw_sql(
             "CREATE FUNCTION fail_delivery_receipt() RETURNS TRIGGER LANGUAGE plpgsql AS $$ \
@@ -679,7 +730,7 @@ mod tests {
         pool: PgPool,
     ) -> TestResult {
         let principal = principal(&pool).await?;
-        let spot_id = spot(&pool, "reserved").await?;
+        let spot_id = authorized_spot(&pool, &principal, "reserved").await?;
         let history_id = history(&pool, &spot_id).await?;
         let mut low_confidence = payload(&spot_id, "occupied");
         low_confidence["confidence"] = json!(0.19);
@@ -718,7 +769,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn invalid_and_unsupported_payloads_have_terminal_receipts(pool: PgPool) -> TestResult {
         let principal = principal(&pool).await?;
-        let spot_id = spot(&pool, "free").await?;
+        let spot_id = authorized_spot(&pool, &principal, "free").await?;
         let mut missing = payload(&spot_id, "occupied");
         missing.as_object_mut().unwrap().remove("camera_id");
         let mut null_character = payload(&spot_id, "free");
@@ -733,7 +784,7 @@ mod tests {
             (null_key, "invalid_payload"),
             (nested_null, "invalid_payload"),
             (payload(&spot_id, "reserved"), "invalid_status"),
-            (payload("unknown-delivery-spot", "free"), "unknown_spot"),
+            (payload("unknown-delivery-spot", "free"), "scope_forbidden"),
             (
                 json!({"type": "PATH_UPDATE", "from_node": "a", "to_node": "b", "is_active": true}),
                 "unsupported_event",
@@ -783,7 +834,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn authorized_delivery_holds_revocation_until_commit(pool: PgPool) -> TestResult {
         let principal = principal(&pool).await?;
-        let spot_id = spot(&pool, "free").await?;
+        let spot_id = authorized_spot(&pool, &principal, "free").await?;
         let mut blocker = pool.begin().await?;
         sqlx::query("SELECT id FROM spots WHERE id = $1 FOR UPDATE")
             .bind(&spot_id)
@@ -833,7 +884,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn observation_lock_timeout_rolls_back_the_pending_receipt(pool: PgPool) -> TestResult {
         let principal = principal(&pool).await?;
-        let spot_id = spot(&pool, "occupied").await?;
+        let spot_id = authorized_spot(&pool, &principal, "occupied").await?;
         let history_id = history(&pool, &spot_id).await?;
         let mut blocker = pool.begin().await?;
         sqlx::query("SELECT id FROM spots WHERE id = $1 FOR UPDATE")
@@ -956,6 +1007,266 @@ mod tests {
         let mut expected = vec![first_principal.gateway_id, second_principal.gateway_id];
         expected.sort();
         assert_eq!(owners, expected);
+        Ok(())
+    }
+
+    async fn authorized_spot(
+        pool: &PgPool,
+        principal: &Principal,
+        status: &str,
+    ) -> Result<String, sqlx::Error> {
+        let spot_id = spot(pool, status).await?;
+        sqlx::query(
+            "INSERT INTO edge_camera_grants (gateway_id, camera_id, spot_update, car_detected) \
+             VALUES ($1, 'test-camera', TRUE, FALSE) \
+             ON CONFLICT (gateway_id, camera_id) DO UPDATE SET spot_update = TRUE",
+        )
+        .bind(principal.gateway_id)
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO edge_camera_spots (gateway_id, camera_id, spot_id) \
+             VALUES ($1, 'test-camera', $2)",
+        )
+        .bind(principal.gateway_id)
+        .bind(&spot_id)
+        .execute(pool)
+        .await?;
+        Ok(spot_id)
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn forbidden_durable_and_legacy_observations_preserve_domain_state(
+        pool: PgPool,
+    ) -> TestResult {
+        let principal = principal(&pool).await?;
+        let own_spot = authorized_spot(&pool, &principal, "occupied").await?;
+        let foreign_spot = spot(&pool, "occupied").await?;
+        let history_id = history(&pool, &foreign_spot).await?;
+        for (camera_id, spot_id) in [
+            ("test-camera", foreign_spot.as_str()),
+            ("forged-camera", own_spot.as_str()),
+        ] {
+            let mut event_payload = payload(spot_id, "free");
+            event_payload["camera_id"] = json!(camera_id);
+            let delivery = apply(&pool, &principal, Uuid::new_v4(), event_payload).await?;
+            assert_eq!(delivery.ack.outcome, Outcome::Rejected);
+            assert_eq!(delivery.ack.reason.as_deref(), Some("scope_forbidden"));
+            assert_no_effects(&delivery);
+            let legacy = apply_legacy(&pool, &principal, camera_id, spot_id, "free", 1.0).await?;
+            assert_eq!(legacy.outcome, Outcome::Rejected);
+            assert_eq!(legacy.reason.as_deref(), Some("scope_forbidden"));
+            assert_eq!(legacy.spot_update, None);
+            assert_eq!(legacy.unconfirmed_reservation, None);
+        }
+        assert_eq!(status(&pool, &own_spot).await?, "occupied");
+        assert_eq!(status(&pool, &foreign_spot).await?, "occupied");
+        let unreleased: bool = sqlx::query_scalar(
+            "SELECT released_at IS NULL FROM user_occupancy_history WHERE id = $1",
+        )
+        .bind(history_id)
+        .fetch_one(&pool)
+        .await?;
+        assert!(unreleased);
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM edge_event_receipts")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(count, 2, "legacy observations must not fabricate receipts");
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn foreign_gateway_reusing_uuid_cannot_read_the_owner_ack(pool: PgPool) -> TestResult {
+        let owner = principal(&pool).await?;
+        let attacker = principal(&pool).await?;
+        let spot_id = authorized_spot(&pool, &owner, "free").await?;
+        let event_id = Uuid::new_v4();
+        let event_payload = payload(&spot_id, "occupied");
+        let original = apply(&pool, &owner, event_id, event_payload.clone()).await?;
+        assert_eq!(original.ack.outcome, Outcome::Applied);
+        let forbidden = apply(&pool, &attacker, event_id, event_payload.clone()).await?;
+        assert_eq!(forbidden.ack.outcome, Outcome::Rejected);
+        assert_eq!(forbidden.ack.reason.as_deref(), Some("scope_forbidden"));
+        assert!(!forbidden.ack.duplicate);
+        assert_no_effects(&forbidden);
+        let original_replay = apply(&pool, &owner, event_id, event_payload).await?;
+        assert_eq!(original_replay.ack.outcome, Outcome::Applied);
+        assert!(original_replay.ack.duplicate);
+        assert_no_effects(&original_replay);
+        let outcomes: Vec<(Uuid, String)> = sqlx::query_as(
+            "SELECT gateway_id, outcome FROM edge_event_receipts WHERE event_id = $1",
+        )
+        .bind(event_id)
+        .fetch_all(&pool)
+        .await?;
+        assert_eq!(outcomes.len(), 2);
+        assert!(outcomes.contains(&(owner.gateway_id, "applied".to_owned())));
+        assert!(outcomes.contains(&(attacker.gateway_id, "rejected".to_owned())));
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn legacy_observation_denies_a_foreign_spot_without_a_receipt(
+        pool: PgPool,
+    ) -> TestResult {
+        let principal = principal(&pool).await?;
+        authorized_spot(&pool, &principal, "free").await?;
+        let foreign_spot = spot(&pool, "occupied").await?;
+        let history_id = history(&pool, &foreign_spot).await?;
+        let legacy =
+            apply_legacy(&pool, &principal, "test-camera", &foreign_spot, "free", 1.0).await?;
+        assert_eq!(legacy.outcome, Outcome::Rejected);
+        assert_eq!(legacy.reason.as_deref(), Some("scope_forbidden"));
+        assert_eq!(legacy.spot_update, None);
+        assert_eq!(legacy.unconfirmed_reservation, None);
+        assert_eq!(status(&pool, &foreign_spot).await?, "occupied");
+        let unreleased: bool = sqlx::query_scalar(
+            "SELECT released_at IS NULL FROM user_occupancy_history WHERE id = $1",
+        )
+        .bind(history_id)
+        .fetch_one(&pool)
+        .await?;
+        assert!(unreleased);
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM edge_event_receipts")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(count, 0);
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn exact_pair_still_requires_spot_update_permission(pool: PgPool) -> TestResult {
+        let principal = principal(&pool).await?;
+        let spot_id = authorized_spot(&pool, &principal, "free").await?;
+        sqlx::query("UPDATE edge_camera_grants SET spot_update = FALSE WHERE gateway_id = $1")
+            .bind(principal.gateway_id)
+            .execute(&pool)
+            .await?;
+        let delivery = apply(
+            &pool,
+            &principal,
+            Uuid::new_v4(),
+            payload(&spot_id, "occupied"),
+        )
+        .await?;
+        assert_eq!(delivery.ack.outcome, Outcome::Rejected);
+        assert_eq!(delivery.ack.reason.as_deref(), Some("scope_forbidden"));
+        assert_no_effects(&delivery);
+        let legacy =
+            apply_legacy(&pool, &principal, "test-camera", &spot_id, "occupied", 1.0).await?;
+        assert_eq!(legacy.outcome, Outcome::Rejected);
+        assert_eq!(legacy.reason.as_deref(), Some("scope_forbidden"));
+        assert_eq!(legacy.spot_update, None);
+        assert_eq!(status(&pool, &spot_id).await?, "free");
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn removed_grant_preserves_historical_ack_but_denies_new_observations(
+        pool: PgPool,
+    ) -> TestResult {
+        let principal = principal(&pool).await?;
+        let spot_id = authorized_spot(&pool, &principal, "free").await?;
+        let event_id = Uuid::new_v4();
+        let event_payload = payload(&spot_id, "occupied");
+        apply(&pool, &principal, event_id, event_payload.clone()).await?;
+        sqlx::query("DELETE FROM edge_camera_spots WHERE gateway_id = $1")
+            .bind(principal.gateway_id)
+            .execute(&pool)
+            .await?;
+        sqlx::query("UPDATE spots SET status = 'free' WHERE id = $1")
+            .bind(&spot_id)
+            .execute(&pool)
+            .await?;
+        let duplicate = apply(&pool, &principal, event_id, event_payload.clone()).await?;
+        assert_eq!(duplicate.ack.outcome, Outcome::Applied);
+        assert!(duplicate.ack.duplicate);
+        assert_no_effects(&duplicate);
+        let new_event = apply(&pool, &principal, Uuid::new_v4(), event_payload).await?;
+        assert_eq!(new_event.ack.outcome, Outcome::Rejected);
+        assert_eq!(new_event.ack.reason.as_deref(), Some("scope_forbidden"));
+        let legacy =
+            apply_legacy(&pool, &principal, "test-camera", &spot_id, "occupied", 1.0).await?;
+        assert_eq!(legacy.outcome, Outcome::Rejected);
+        assert_eq!(legacy.reason.as_deref(), Some("scope_forbidden"));
+        assert_eq!(status(&pool, &spot_id).await?, "free");
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn legacy_authorized_observation_commits_without_a_receipt(pool: PgPool) -> TestResult {
+        let principal = principal(&pool).await?;
+        let spot_id = authorized_spot(&pool, &principal, "free").await?;
+        let owner = user(&pool).await?;
+        let reservation =
+            reservation_store::create(&pool, &spot_id, owner, Utc::now() + Duration::minutes(15))
+                .await
+                .expect("fixture reservation must be created");
+        let occupied =
+            apply_legacy(&pool, &principal, "test-camera", &spot_id, "occupied", 1.0).await?;
+        assert_eq!(occupied.outcome, Outcome::Applied);
+        assert_eq!(occupied.unconfirmed_reservation, Some(reservation.id));
+        assert_eq!(
+            occupied.spot_update,
+            Some((spot_id.clone(), "occupied".to_owned()))
+        );
+        let history_id = history(&pool, &spot_id).await?;
+        let free = apply_legacy(&pool, &principal, "test-camera", &spot_id, "free", 1.0).await?;
+        assert_eq!(free.outcome, Outcome::Applied);
+        assert_eq!(status(&pool, &spot_id).await?, "free");
+        let released: bool = sqlx::query_scalar(
+            "SELECT released_at IS NOT NULL FROM user_occupancy_history WHERE id = $1",
+        )
+        .bind(history_id)
+        .fetch_one(&pool)
+        .await?;
+        assert!(released);
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM edge_event_receipts")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(count, 0);
+        sqlx::query("UPDATE edge_gateways SET revoked_at = NOW() WHERE id = $1")
+            .bind(principal.gateway_id)
+            .execute(&pool)
+            .await?;
+        assert!(matches!(
+            apply_legacy(&pool, &principal, "test-camera", &spot_id, "occupied", 1.0).await,
+            Err(AuthError::Unauthenticated)
+        ));
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn legacy_history_failure_rolls_back_the_spot_without_a_receipt(
+        pool: PgPool,
+    ) -> TestResult {
+        let principal = principal(&pool).await?;
+        let spot_id = authorized_spot(&pool, &principal, "occupied").await?;
+        let history_id = history(&pool, &spot_id).await?;
+        sqlx::raw_sql(
+            "CREATE FUNCTION fail_legacy_history() RETURNS TRIGGER LANGUAGE plpgsql AS $$ \
+         BEGIN RAISE EXCEPTION 'synthetic history failure'; END $$; \
+         CREATE TRIGGER fail_legacy_history BEFORE UPDATE ON user_occupancy_history \
+         FOR EACH ROW EXECUTE FUNCTION fail_legacy_history();",
+        )
+        .execute(&pool)
+        .await?;
+        assert!(matches!(
+            apply_legacy(&pool, &principal, "test-camera", &spot_id, "free", 1.0).await,
+            Err(AuthError::Database(_))
+        ));
+        assert_eq!(status(&pool, &spot_id).await?, "occupied");
+        let unreleased: bool = sqlx::query_scalar(
+            "SELECT released_at IS NULL FROM user_occupancy_history WHERE id = $1",
+        )
+        .bind(history_id)
+        .fetch_one(&pool)
+        .await?;
+        assert!(unreleased);
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM edge_event_receipts")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(count, 0);
         Ok(())
     }
 }
