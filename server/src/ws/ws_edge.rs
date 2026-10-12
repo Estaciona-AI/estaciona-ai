@@ -178,14 +178,20 @@ async fn run_edge_socket(
                         tracing::warn!(%event_id, version, "Unsupported edge delivery version");
                         return false;
                     }
-                    let delivery =
-                        match crate::edge_delivery::apply(&state.pool, event_id, payload).await {
-                            Ok(delivery) => delivery,
-                            Err(error) => {
-                                tracing::error!(%error, %event_id, "Failed to persist edge event");
-                                return false;
-                            }
-                        };
+                    let delivery = match crate::edge_delivery::apply(
+                        &state.pool,
+                        principal,
+                        event_id,
+                        payload,
+                    )
+                    .await
+                    {
+                        Ok(delivery) => delivery,
+                        Err(error) => {
+                            tracing::error!(%error, %event_id, "Failed to persist edge event");
+                            return false;
+                        }
+                    };
                     if let Some((spot_id, status)) = delivery.spot_update {
                         let update = ServerToAppMsg::SpotUpdate { spot_id, status };
                         if let Ok(json) = serde_json::to_string(&update) {

@@ -317,7 +317,8 @@ def test_gateway_recovers_a_lost_ack_after_both_processes_restart(server, tmp_pa
     assert [ack["duplicate"] for ack in acks] == [False, True]
     assert server.query("SELECT updates FROM effect_count") == [(1,)]
     assert server.query(
-        "SELECT outcome FROM edge_event_receipts WHERE event_id = %s", (event_id,)
+        "SELECT outcome FROM edge_event_receipts WHERE gateway_id = %s AND event_id = %s",
+        (server.gateway_id, event_id),
     ) == [("applied",)]
     with sqlite3.connect(metrics) as conn:
         assert conn.execute(
