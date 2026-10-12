@@ -108,13 +108,11 @@ async fn main() {
     let plate_pepper =
         std::env::var("PLATE_SECRET_PEPPER").expect("PLATE_SECRET_PEPPER missing in .env");
     let jwt_secret = std::env::var("JWT_SECRET").expect("JWT_SECRET missing in .env");
-    let edge_api_key = std::env::var("EDGE_API_KEY").expect("EDGE_API_KEY missing in .env");
     let site_data_dir = std::env::var("SITE_DATA_DIR")
         .expect("SITE_DATA_DIR required: directory containing config.json and spots_3d.json");
     let site = site_config::SiteConfig::load(site_data_dir)
         .expect("Failed to load installation maps from SITE_DATA_DIR");
-    let parking_state: SharedState =
-        init_state(pool, jwt_secret, plate_pepper, edge_api_key, site).await;
+    let parking_state: SharedState = init_state(pool, jwt_secret, plate_pepper, site).await;
 
     let cors = CorsLayer::new()
         .allow_origin(Any)

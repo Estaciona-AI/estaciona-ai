@@ -59,21 +59,33 @@ pub async fn ws_edge_handler(
     headers: axum::http::HeaderMap,
     State(state): State<SharedState>,
 ) -> axum::response::Response {
-    let expected_auth = format!("Bearer {}", state.edge_api_key);
-
-    let is_authorized = headers
+    let Some(token) = headers
         .get("Authorization")
-        .and_then(|h| h.to_str().ok())
-        .map(|h| h == expected_auth)
-        .unwrap_or(false);
-
-    if !is_authorized {
-        return (axum::http::StatusCode::UNAUTHORIZED, "Invalid Edge API Key").into_response();
+        .and_then(|header| header.to_str().ok())
+        .and_then(|header| header.strip_prefix("Bearer "))
+    else {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            "Invalid gateway credential",
+        )
+            .into_response();
+    };
+    match crate::edge_auth::authenticate(&state.pool, token).await {
+        Ok(Some(principal)) => ws.on_upgrade(|socket| handle_edge_socket(socket, state, principal)),
+        Ok(None) => (
+            axum::http::StatusCode::UNAUTHORIZED,
+            "Invalid gateway credential",
+        )
+            .into_response(),
+        Err(error) => {
+            tracing::error!(%error, "Gateway authentication unavailable");
+            (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "Gateway authentication unavailable",
+            )
+                .into_response()
+        }
     }
-
-    tracing::info!("[WS EDGE] Camera connected with valid API key.");
-
-    ws.on_upgrade(|socket| handle_edge_socket(socket, state))
 }
 
 fn schedule_unconfirmed_occupancy(state: SharedState, reservation_id: Uuid) {
@@ -91,183 +103,252 @@ fn schedule_unconfirmed_occupancy(state: SharedState, reservation_id: Uuid) {
     });
 }
 
-async fn handle_edge_socket(mut socket: WebSocket, state: SharedState) {
+async fn revalidate_edge(state: &SharedState, principal: &crate::edge_auth::Principal) -> bool {
+    matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            let tx = crate::edge_auth::begin_authorized(&state.pool, principal).await?;
+            tx.commit()
+                .await
+                .map_err(crate::edge_auth::AuthError::Database)
+        })
+        .await,
+        Ok(Ok(()))
+    )
+}
+
+async fn watch_edge_session(state: &SharedState, principal: &crate::edge_auth::Principal) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    interval.tick().await;
+    loop {
+        interval.tick().await;
+        if !revalidate_edge(state, principal).await {
+            return;
+        }
+    }
+}
+
+async fn handle_edge_socket(
+    socket: WebSocket,
+    state: SharedState,
+    principal: crate::edge_auth::Principal,
+) {
+    tokio::select! {
+        biased;
+        _ = watch_edge_session(&state, &principal) => {
+            tracing::warn!(gateway_id = %principal.gateway_id, "Gateway session invalidated");
+        }
+        _ = run_edge_socket(socket, &state, &principal) => {}
+    }
+}
+
+async fn run_edge_socket(
+    mut socket: WebSocket,
+    state: &SharedState,
+    principal: &crate::edge_auth::Principal,
+) {
     let ready = ServerToEdgeMsg::Ready {
         delivery_version: 1,
     };
     if let Ok(json) = serde_json::to_string(&ready)
-        && socket.send(Message::Text(json.into())).await.is_err()
+        && !matches!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                socket.send(Message::Text(json.into()))
+            )
+            .await,
+            Ok(Ok(()))
+        )
     {
         return;
     }
     while let Some(Ok(msg)) = socket.next().await {
         if let Message::Text(text) = msg {
-            if let Ok(EdgeTransportMsg::Event {
-                version,
-                event_id,
-                payload,
-            }) = serde_json::from_str::<EdgeTransportMsg>(&text)
-            {
-                if version != 1 {
-                    tracing::warn!(%event_id, version, "Unsupported edge delivery version");
-                    break;
+            let operation = async {
+                if !revalidate_edge(state, principal).await {
+                    return false;
                 }
-                let delivery =
-                    match crate::edge_delivery::apply(&state.pool, event_id, payload).await {
-                        Ok(delivery) => delivery,
-                        Err(error) => {
-                            tracing::error!(%error, %event_id, "Failed to persist edge event");
-                            break;
-                        }
-                    };
-                if let Some((spot_id, status)) = delivery.spot_update {
-                    let update = ServerToAppMsg::SpotUpdate { spot_id, status };
-                    if let Ok(json) = serde_json::to_string(&update) {
-                        let _ = state.tx.send(json);
-                    }
-                }
-                if let Some(id) = delivery.unconfirmed_reservation {
-                    schedule_unconfirmed_occupancy(state.clone(), id);
-                }
-                let ack = ServerToEdgeMsg::Ack {
-                    version: delivery.ack.version,
-                    event_id: delivery.ack.event_id,
-                    outcome: delivery.ack.outcome.as_str().to_owned(),
-                    reason: delivery.ack.reason,
-                    duplicate: delivery.ack.duplicate,
-                };
-                if let Ok(json) = serde_json::to_string(&ack)
-                    && socket.send(Message::Text(json.into())).await.is_err()
+                if let Ok(EdgeTransportMsg::Event {
+                    version,
+                    event_id,
+                    payload,
+                }) = serde_json::from_str::<EdgeTransportMsg>(&text)
                 {
-                    break;
-                }
-                continue;
-            }
-            let Ok(edge_msg) = serde_json::from_str::<EdgeToServerMsg>(&text) else {
-                tracing::warn!("Invalid edge message ignored without ACK");
-                continue;
-            };
-            match edge_msg {
-                EdgeToServerMsg::CarDetected {
-                    plate, camera_id, ..
-                } => {
-                    handle_car_detected(&state, plate, camera_id).await;
-                }
-                EdgeToServerMsg::SpotUpdate {
-                    spot_id,
-                    status,
-                    confidence,
-                    ..
-                } => {
-                    if confidence < 0.20 {
-                        tracing::debug!(
-                            "Ignorando SpotUpdate para {} devido a baixa confiança ({})",
-                            spot_id,
-                            confidence
-                        );
-                        continue;
+                    if version != 1 {
+                        tracing::warn!(%event_id, version, "Unsupported edge delivery version");
+                        return false;
                     }
-
-                    if status != "occupied" && status != "free" {
-                        eprintln!("Ignoring SpotUpdate with invalid status: {}", status);
-                        continue;
-                    }
-
-                    let active_reservation = if status == "occupied" {
-                        match apply_occupied_observation(&state.pool, &spot_id).await {
-                            Ok(Some(reservation_id)) => reservation_id,
-                            Ok(None) => continue,
+                    let delivery =
+                        match crate::edge_delivery::apply(&state.pool, event_id, payload).await {
+                            Ok(delivery) => delivery,
                             Err(error) => {
-                                tracing::error!(%error, %spot_id, "Failed to apply occupied observation");
-                                continue;
+                                tracing::error!(%error, %event_id, "Failed to persist edge event");
+                                return false;
                             }
+                        };
+                    if let Some((spot_id, status)) = delivery.spot_update {
+                        let update = ServerToAppMsg::SpotUpdate { spot_id, status };
+                        if let Ok(json) = serde_json::to_string(&update) {
+                            let _ = state.tx.send(json);
                         }
-                    } else {
-                        let updated = sqlx::query(
-                            "UPDATE spots SET status = $1, last_updated = NOW() \
-                             WHERE id = $2 AND NOT (status = 'reserved' AND $1 = 'free')",
-                        )
-                        .bind(&status)
-                        .bind(&spot_id)
-                        .execute(&state.pool)
-                        .await;
-                        if !matches!(updated, Ok(ref result) if result.rows_affected() > 0) {
-                            continue;
-                        }
-                        None
-                    };
-                    if status == "free" {
-                        let _ = sqlx::query(
-                            "UPDATE user_occupancy_history SET released_at = NOW() \
-                             WHERE spot_id = $1 AND released_at IS NULL",
-                        )
-                        .bind(&spot_id)
-                        .execute(&state.pool)
-                        .await;
                     }
-
-                    tracing::info!(
-                        "[WS EDGE] Spot {} updated to {} (Confidence: {:.2})",
+                    if let Some(id) = delivery.unconfirmed_reservation {
+                        schedule_unconfirmed_occupancy(state.clone(), id);
+                    }
+                    let ack = ServerToEdgeMsg::Ack {
+                        version: delivery.ack.version,
+                        event_id: delivery.ack.event_id,
+                        outcome: delivery.ack.outcome.as_str().to_owned(),
+                        reason: delivery.ack.reason,
+                        duplicate: delivery.ack.duplicate,
+                    };
+                    if let Ok(json) = serde_json::to_string(&ack)
+                        && !matches!(
+                            tokio::time::timeout(
+                                std::time::Duration::from_secs(5),
+                                socket.send(Message::Text(json.into()))
+                            )
+                            .await,
+                            Ok(Ok(()))
+                        )
+                    {
+                        return false;
+                    }
+                    return true;
+                }
+                let Ok(edge_msg) = serde_json::from_str::<EdgeToServerMsg>(&text) else {
+                    tracing::warn!("Invalid edge message ignored without ACK");
+                    return true;
+                };
+                match edge_msg {
+                    EdgeToServerMsg::CarDetected {
+                        plate, camera_id, ..
+                    } => {
+                        handle_car_detected(state, plate, camera_id).await;
+                    }
+                    EdgeToServerMsg::SpotUpdate {
                         spot_id,
                         status,
-                        confidence
-                    );
+                        confidence,
+                        ..
+                    } => {
+                        if confidence < 0.20 {
+                            tracing::debug!(
+                                "Ignorando SpotUpdate para {} devido a baixa confiança ({})",
+                                spot_id,
+                                confidence
+                            );
+                            return true;
+                        }
 
-                    let update_msg = ServerToAppMsg::SpotUpdate {
-                        spot_id: spot_id.clone(),
-                        status: status.clone(),
-                    };
+                        if status != "occupied" && status != "free" {
+                            eprintln!("Ignoring SpotUpdate with invalid status: {}", status);
+                            return true;
+                        }
 
-                    if let Ok(json_str) = serde_json::to_string(&update_msg) {
-                        let _ = state.tx.send(json_str);
+                        let active_reservation = if status == "occupied" {
+                            match apply_occupied_observation(&state.pool, &spot_id).await {
+                                Ok(Some(reservation_id)) => reservation_id,
+                                Ok(None) => return true,
+                                Err(error) => {
+                                    tracing::error!(%error, %spot_id, "Failed to apply occupied observation");
+                                    return true;
+                                }
+                            }
+                        } else {
+                            let updated = sqlx::query(
+                                "UPDATE spots SET status = $1, last_updated = NOW() \
+                             WHERE id = $2 AND NOT (status = 'reserved' AND $1 = 'free')",
+                            )
+                            .bind(&status)
+                            .bind(&spot_id)
+                            .execute(&state.pool)
+                            .await;
+                            if !matches!(updated, Ok(ref result) if result.rows_affected() > 0) {
+                                return true;
+                            }
+                            None
+                        };
+                        if status == "free" {
+                            let _ = sqlx::query(
+                                "UPDATE user_occupancy_history SET released_at = NOW() \
+                             WHERE spot_id = $1 AND released_at IS NULL",
+                            )
+                            .bind(&spot_id)
+                            .execute(&state.pool)
+                            .await;
+                        }
+
+                        tracing::info!(
+                            "[WS EDGE] Spot {} updated to {} (Confidence: {:.2})",
+                            spot_id,
+                            status,
+                            confidence
+                        );
+
+                        let update_msg = ServerToAppMsg::SpotUpdate {
+                            spot_id: spot_id.clone(),
+                            status: status.clone(),
+                        };
+
+                        if let Ok(json_str) = serde_json::to_string(&update_msg) {
+                            let _ = state.tx.send(json_str);
+                        }
+
+                        if let Some(reservation_id) = active_reservation {
+                            schedule_unconfirmed_occupancy(state.clone(), reservation_id);
+                        }
                     }
-
-                    if let Some(reservation_id) = active_reservation {
-                        schedule_unconfirmed_occupancy(state.clone(), reservation_id);
-                    }
-                }
-                EdgeToServerMsg::PathUpdate {
-                    from_node,
-                    to_node,
-                    is_active,
-                } => {
-                    let mut graph_write = state.graph.write().await;
-                    graph_write.set_edge_status(&from_node, &to_node, is_active);
-                    tracing::info!(
-                        "Path update: {} -> {} active: {}",
+                    EdgeToServerMsg::PathUpdate {
                         from_node,
                         to_node,
-                        is_active
-                    );
-                }
-                EdgeToServerMsg::TrendPrediction {
-                    timestamp,
-                    avg_stay_duration_mins,
-                    stay_duration_distribution,
-                    max_capacity,
-                    model_health,
-                    next_24h_occupancy,
-                } => {
-                    tracing::info!(
-                        "[WS EDGE] TrendPrediction received: {:.1} mins avg stay, {} hours forecast",
-                        avg_stay_duration_mins,
-                        next_24h_occupancy.len()
-                    );
-                    let broadcast_msg = ServerToAppMsg::TrendPrediction {
+                        is_active,
+                    } => {
+                        let mut graph_write = state.graph.write().await;
+                        graph_write.set_edge_status(&from_node, &to_node, is_active);
+                        tracing::info!(
+                            "Path update: {} -> {} active: {}",
+                            from_node,
+                            to_node,
+                            is_active
+                        );
+                    }
+                    EdgeToServerMsg::TrendPrediction {
                         timestamp,
                         avg_stay_duration_mins,
                         stay_duration_distribution,
                         max_capacity,
                         model_health,
                         next_24h_occupancy,
-                    };
-                    if let Ok(json_str) = serde_json::to_string(&broadcast_msg) {
-                        if let Ok(mut cache) = state.last_trend_prediction.lock() {
-                            *cache = Some(json_str.clone());
+                    } => {
+                        tracing::info!(
+                            "[WS EDGE] TrendPrediction received: {:.1} mins avg stay, {} hours forecast",
+                            avg_stay_duration_mins,
+                            next_24h_occupancy.len()
+                        );
+                        let broadcast_msg = ServerToAppMsg::TrendPrediction {
+                            timestamp,
+                            avg_stay_duration_mins,
+                            stay_duration_distribution,
+                            max_capacity,
+                            model_health,
+                            next_24h_occupancy,
+                        };
+                        if let Ok(json_str) = serde_json::to_string(&broadcast_msg) {
+                            if let Ok(mut cache) = state.last_trend_prediction.lock() {
+                                *cache = Some(json_str.clone());
+                            }
+                            let _ = state.tx.send(json_str);
                         }
-                        let _ = state.tx.send(json_str);
                     }
                 }
+                true
+            };
+            if !matches!(
+                tokio::time::timeout(std::time::Duration::from_secs(5), operation).await,
+                Ok(true)
+            ) {
+                break;
             }
         }
     }

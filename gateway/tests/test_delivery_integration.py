@@ -2,6 +2,7 @@
 
 import asyncio
 from contextlib import closing, suppress
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -18,6 +19,7 @@ import psycopg2
 from psycopg2 import sql
 import pytest
 import websockets
+from websockets.exceptions import ConnectionClosed, InvalidStatus
 
 import gateway
 
@@ -25,7 +27,7 @@ pytestmark = pytest.mark.skipif(
     not os.environ.get("ESTACIONA_TEST_SERVER"),
     reason="set ESTACIONA_TEST_SERVER and DATABASE_URL to run real Rust integration",
 )
-KEY = "disposable-delivery-test-key"
+KEY = "11" * 32
 IMAGE = (
     "postgres@sha256:bbbf67eadd2381a2738a4a2e36d4c3936c36edd82d80e7ef00411194385d3829"
 )
@@ -34,6 +36,7 @@ IMAGE = (
 class Server:
     def __init__(self, binary, db_url, root):
         self.binary, self.db_url, self.root = binary, db_url, root
+        self.gateway_id = str(uuid4())
         self.process = None
         self.container_id = None
         self.postgres_container = os.environ.get("ESTACIONA_TEST_POSTGRES_CONTAINER")
@@ -68,8 +71,8 @@ class Server:
             "SITE_DATA_DIR": str(site),
             "JWT_SECRET": "disposable-jwt",
             "PLATE_SECRET_PEPPER": "disposable-pepper",
-            "EDGE_API_KEY": KEY,
         }
+        self.environment.pop("EDGE_API_KEY", None)
 
     def query(self, statement, arguments=()):
         with closing(psycopg2.connect(self.db_url)) as conn, conn:
@@ -103,8 +106,6 @@ class Server:
                 "--env",
                 "SITE_DATA_DIR=/site",
                 "--env",
-                f"EDGE_API_KEY={KEY}",
-                "--env",
                 "JWT_SECRET=disposable-jwt",
                 "--env",
                 "PLATE_SECRET_PEPPER=disposable-pepper",
@@ -112,6 +113,12 @@ class Server:
                 "/app/server",
                 IMAGE,
             ]
+            # Only the compatibility rejection test injects a legacy global key.
+            if "EDGE_API_KEY" in self.environment:
+                args[2:2] = [
+                    "--env",
+                    f"EDGE_API_KEY={self.environment['EDGE_API_KEY']}",
+                ]
             self.container_id = subprocess.check_output(args, text=True).strip()
         else:
             # Refuse unrelated listeners; never signal them.
@@ -174,6 +181,25 @@ def server(tmp_path):
     instance = Server(binary, db_url, tmp_path)
     try:
         instance.start()
+        instance.query(
+            "INSERT INTO edge_gateways (id, name, credential_digest) VALUES (%s, %s, %s)",
+            (
+                instance.gateway_id,
+                "Delivery fixture",
+                hashlib.sha256(KEY.encode()).digest(),
+            ),
+        )
+        for camera_id in ("test-camera", "session-camera"):
+            instance.query(
+                "INSERT INTO edge_camera_grants (gateway_id, camera_id, spot_update, car_detected) "
+                "VALUES (%s, %s, TRUE, TRUE)",
+                (instance.gateway_id, camera_id),
+            )
+            instance.query(
+                "INSERT INTO edge_camera_spots (gateway_id, camera_id, spot_id) "
+                "VALUES (%s, %s, 'R02-A')",
+                (instance.gateway_id, camera_id),
+            )
         yield instance
     finally:
         instance.stop()
@@ -311,7 +337,7 @@ def test_failed_commit_has_no_ack_and_same_id_can_retry(server):
         ) as conn:
             await receive_ready(conn)
             await conn.send(json.dumps(message(event_id)))
-            with pytest.raises(websockets.exceptions.ConnectionClosed):
+            with pytest.raises(ConnectionClosed):
                 await asyncio.wait_for(conn.recv(), timeout=3)
         assert server.query("SELECT status FROM spots WHERE id = 'R02-A'") == [
             ("free",)
@@ -335,7 +361,7 @@ def test_failed_commit_has_no_ack_and_same_id_can_retry(server):
 
 def test_unauthorized_edge_has_no_protocol_or_receipt(server):
     async def run():
-        with pytest.raises(websockets.exceptions.InvalidStatus) as failure:
+        with pytest.raises(InvalidStatus) as failure:
             async with websockets.connect(
                 server.url,
                 additional_headers={"Authorization": "Bearer invalid-test-key"},

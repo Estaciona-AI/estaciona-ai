@@ -60,7 +60,6 @@ impl Fixture {
             graph: RwLock::new(ParkingGraph::new()),
             jwt_secret: "r01-disposable-jwt-secret".to_owned(),
             plate_pepper: "r01-disposable-plate-pepper".to_owned(),
-            edge_api_key: "r01-disposable-edge-key".to_owned(),
             last_trend_prediction: Mutex::new(None),
             site_data_dir: std::env::temp_dir().join(format!("r01-reservation-{owner}")),
         });
