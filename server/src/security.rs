@@ -105,11 +105,18 @@ pub fn create_jwt(
 }
 
 pub fn verify_jwt(token: &str, secret: &str) -> Result<Claims, jsonwebtoken::errors::Error> {
+    let mut validation = Validation::default();
+    validation.leeway = 0;
     let token_data = decode::<Claims>(
         token,
         &DecodingKey::from_secret(secret.as_bytes()),
-        &Validation::default(),
+        &validation,
     )?;
+
+    // jsonwebtoken accepts exp == now; our session ends at exp, without grace.
+    if token_data.claims.exp as u64 <= jsonwebtoken::get_current_timestamp() {
+        return Err(jsonwebtoken::errors::ErrorKind::ExpiredSignature.into());
+    }
 
     Ok(token_data.claims)
 }
@@ -335,5 +342,26 @@ mod tests {
         .unwrap();
         let result = verify_jwt(&token, secret);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn verify_jwt_rejects_expiration_without_grace_period() {
+        for seconds_ago in [0, 1, 30] {
+            let claims = Claims {
+                sub: Uuid::new_v4().to_string(),
+                role: "user".to_owned(),
+                exp: (Utc::now().timestamp() - seconds_ago) as usize,
+            };
+            let token = encode(
+                &Header::default(),
+                &claims,
+                &EncodingKey::from_secret(b"secret"),
+            )
+            .unwrap();
+            assert!(
+                verify_jwt(&token, "secret").is_err(),
+                "a token expired {seconds_ago} seconds ago must be rejected"
+            );
+        }
     }
 }
