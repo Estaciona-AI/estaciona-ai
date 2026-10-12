@@ -56,7 +56,8 @@ async fn require_reservation_owner(
     headers: &HeaderMap,
     reservation_id: Uuid,
 ) -> Result<(), (StatusCode, String)> {
-    let requester = crate::security::authenticated_user(headers, &state.jwt_secret)?;
+    let requester =
+        crate::security::authenticated_user(headers, &state.jwt_secret, &state.pool).await?;
     let owner: Option<Uuid> = sqlx::query_scalar("SELECT user_id FROM reservations WHERE id = $1")
         .bind(reservation_id)
         .fetch_optional(&state.pool)
@@ -80,7 +81,7 @@ pub async fn update_spot_status(
     headers: HeaderMap,
     Json(payload): Json<UpdateSpotStatus>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    crate::security::require_admin(&headers, &state.jwt_secret)?;
+    crate::security::require_admin(&headers, &state.jwt_secret, &state.pool).await?;
     if payload.status != "occupied" && payload.status != "free" && payload.status != "reserved" {
         return Err((StatusCode::BAD_REQUEST, "Invalid status".to_string()));
     }
@@ -132,7 +133,8 @@ pub async fn create_reservation(
     headers: HeaderMap,
     Json(payload): Json<CreateReservation>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let user_id = crate::security::authenticated_user(&headers, &state.jwt_secret)?;
+    let user_id =
+        crate::security::authenticated_user(&headers, &state.jwt_secret, &state.pool).await?;
     let record =
         reservation_store::create(&state.pool, &payload.spot_id, user_id, payload.expires_at)
             .await
@@ -170,7 +172,7 @@ pub async fn get_reservations(
     State(state): State<SharedState>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    crate::security::require_admin(&headers, &state.jwt_secret)?;
+    crate::security::require_admin(&headers, &state.jwt_secret, &state.pool).await?;
     let records = sqlx::query_as!(
         ReservationResponse,
         r#"
@@ -205,7 +207,8 @@ pub async fn cancel_reservation(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     require_reservation_owner(&state, &headers, id).await?;
-    let user_id = crate::security::authenticated_user(&headers, &state.jwt_secret)?;
+    let user_id =
+        crate::security::authenticated_user(&headers, &state.jwt_secret, &state.pool).await?;
     let transition = reservation_store::finish(&state.pool, id, FinishReason::Cancel { user_id })
         .await
         .map_err(|error| {
@@ -356,7 +359,8 @@ pub async fn recommend_spot(
     headers: HeaderMap,
     Query(query): Query<RecommendQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let requester = crate::security::authenticated_user(&headers, &state.jwt_secret)?;
+    let requester =
+        crate::security::authenticated_user(&headers, &state.jwt_secret, &state.pool).await?;
     if requester != query.user_id {
         return Err((StatusCode::FORBIDDEN, "User access denied".to_string()));
     }

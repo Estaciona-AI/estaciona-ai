@@ -126,8 +126,9 @@ pub async fn get_user(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let requester = crate::security::authenticated_claims(&headers, &state.jwt_secret)?;
-    if requester.role != "admin" && requester.sub != id.to_string() {
+    let requester =
+        crate::security::authenticated_session(&headers, &state.jwt_secret, &state.pool).await?;
+    if requester.role != "admin" && requester.user_id != id {
         return Err((StatusCode::FORBIDDEN, "User access denied".to_string()));
     }
     let record = sqlx::query_as!(
