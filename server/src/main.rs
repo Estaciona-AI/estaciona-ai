@@ -16,6 +16,9 @@
 // ==============================================================================
 
 mod auth;
+mod auth_limits;
+#[cfg(test)]
+mod auth_resource_tests;
 mod edge_delivery;
 mod pathfinding;
 #[cfg(test)]
@@ -34,7 +37,7 @@ mod ws;
 
 use axum::{
     Router,
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::{HeaderMap, StatusCode},
     routing::{get, post, put},
 };
@@ -43,6 +46,7 @@ use state::{SharedState, init_state};
 use tokio::net::TcpListener;
 use tower_http::{
     cors::{Any, CorsLayer},
+    limit::RequestBodyLimitLayer,
     trace::TraceLayer,
 };
 
@@ -130,9 +134,8 @@ async fn main() {
         )
         .route("/reservations/recommend", get(reservations::recommend_spot))
         .route("/spots/{id}/status", put(reservations::update_spot_status))
-        .route("/users", post(users::create_user))
+        .merge(auth_routes(parking_state.clone()))
         .route("/users/{id}", get(users::get_user))
-        .route("/login", post(auth::login_dashboard))
         .route("/config", post(save_config))
         .with_state(parking_state.clone())
         .layer(cors)
@@ -198,6 +201,30 @@ async fn main() {
     });
 
     axum::serve(listener, app).await.unwrap();
+}
+
+fn auth_routes(state: SharedState) -> Router<SharedState> {
+    Router::new()
+        .route(
+            "/login",
+            post(auth::login_dashboard)
+                .route_layer(DefaultBodyLimit::max(auth_limits::AUTH_BODY_LIMIT))
+                .route_layer(RequestBodyLimitLayer::new(auth_limits::AUTH_BODY_LIMIT))
+                .route_layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    auth_limits::guard_login,
+                )),
+        )
+        .route(
+            "/users",
+            post(users::create_user)
+                .route_layer(DefaultBodyLimit::max(auth_limits::AUTH_BODY_LIMIT))
+                .route_layer(RequestBodyLimitLayer::new(auth_limits::AUTH_BODY_LIMIT))
+                .route_layer(axum::middleware::from_fn_with_state(
+                    state,
+                    auth_limits::guard_register,
+                )),
+        )
 }
 
 async fn health_check() -> &'static str {

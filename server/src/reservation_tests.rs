@@ -54,6 +54,7 @@ impl Fixture {
         let (tx, _) = broadcast::channel(100);
         let state = Arc::new(AppState {
             pool,
+            auth_limits: Default::default(),
             tx,
             user_sessions: DashMap::new(),
             graph: RwLock::new(ParkingGraph::new()),

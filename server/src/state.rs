@@ -27,6 +27,7 @@ use crate::site_config::SiteConfig;
 
 pub struct AppState {
     pub pool: PgPool,
+    pub auth_limits: crate::auth_limits::AuthLimits,
     pub tx: broadcast::Sender<String>,
     pub user_sessions: DashMap<Uuid, mpsc::UnboundedSender<String>>,
     pub graph: RwLock<ParkingGraph>,
@@ -147,6 +148,7 @@ pub async fn init_state(
 
     Arc::new(AppState {
         pool,
+        auth_limits: Default::default(),
         tx,
         user_sessions: DashMap::new(),
         graph: RwLock::new(graph),

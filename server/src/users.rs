@@ -25,7 +25,8 @@ use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::security::{hash_password, hash_plate};
+use crate::auth::AuthError;
+use crate::security::{hash_password_async, hash_plate};
 use crate::state::SharedState;
 
 #[derive(Deserialize)]
@@ -53,20 +54,49 @@ pub struct UserResponse {
 pub async fn create_user(
     State(state): State<SharedState>,
     Json(payload): Json<CreateUser>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let new_id = Uuid::new_v4();
-
-    let hashed_password = hash_password(&payload.password).map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Error hashing password".to_string(),
-        )
-    })?;
+) -> Result<impl IntoResponse, AuthError> {
+    if payload.name.is_empty()
+        || payload.name.chars().count() > 255
+        || payload.email.is_empty()
+        || payload.email.chars().count() > 255
+        || payload.password.is_empty()
+        || payload.password.len() > 1024
+        || payload
+            .plate
+            .as_ref()
+            .is_some_and(|plate| plate.is_empty() || plate.len() > 32)
+    {
+        return Err(AuthError::Status(
+            StatusCode::BAD_REQUEST,
+            "Invalid registration input",
+        ));
+    }
 
     let hashed_plate = payload
         .plate
         .as_deref()
         .map(|p| hash_plate(p, &state.plate_pepper));
+
+    let duplicate = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM users WHERE email = $1 OR plate = $2)",
+    )
+    .bind(&payload.email)
+    .bind(hashed_plate.as_deref())
+    .fetch_one(&state.pool)
+    .await
+    .map_err(|error| {
+        tracing::error!(%error, "Registration preflight failed");
+        AuthError::Status(StatusCode::INTERNAL_SERVER_ERROR, "Failed to create user")
+    })?;
+    if duplicate {
+        return Err(AuthError::Status(
+            StatusCode::CONFLICT,
+            "Email or Plate already registered",
+        ));
+    }
+
+    let hashed_password = hash_password_async(&state.auth_limits, payload.password).await?;
+    let new_id = Uuid::new_v4();
 
     let record = sqlx::query!(
         r#"
@@ -94,16 +124,12 @@ pub async fn create_user(
     .await
     .map_err(|e| {
         tracing::error!("Database error: {}", e);
-        if e.to_string().contains("duplicate key value") {
-            (
-                StatusCode::CONFLICT,
-                "Email or Plate already registered".to_string(),
-            )
+        if e.as_database_error()
+            .is_some_and(|error| error.is_unique_violation())
+        {
+            AuthError::Status(StatusCode::CONFLICT, "Email or Plate already registered")
         } else {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to create user".to_string(),
-            )
+            AuthError::Status(StatusCode::INTERNAL_SERVER_ERROR, "Failed to create user")
         }
     })?;
 
