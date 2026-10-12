@@ -17,6 +17,8 @@
 
 mod auth;
 mod auth_limits;
+#[cfg(test)]
+mod auth_resource_tests;
 mod edge_delivery;
 mod pathfinding;
 #[cfg(test)]
