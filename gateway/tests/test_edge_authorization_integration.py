@@ -737,3 +737,61 @@ def test_path_update_requires_permission_and_controls_the_actual_route(server):
             assert server.query("SELECT COUNT(*) FROM reservations") == [(1,)]
 
     asyncio.run(run())
+
+
+def trend_prediction():
+    return {
+        "type": "TREND_PREDICTION",
+        "timestamp": "2026-10-12T12:00:00Z",
+        "avg_stay_duration_mins": 12.5,
+        "stay_duration_distribution": [1, 2, 3, 4, 5, 6],
+        "max_capacity": 1,
+        "model_health": {
+            "r2_score": 0.9,
+            "mae": 0.1,
+            "rmse": 0.2,
+            "inference_time_ms": 3.0,
+        },
+        "next_24h_occupancy": [
+            {"timestamp": f"2026-10-13T{hour:02d}:00:00Z", "occupancy": hour % 2}
+            for hour in range(24)
+        ],
+    }
+
+
+def test_trend_requires_explicit_permission_to_broadcast_and_cache(server):
+    user_id = insert_user(server, "admin")
+    dashboard_url = websocket_url(
+        server, "dashboard", user_id, token(user_id, "admin", int(time.time()) + 60)
+    )
+    prediction = trend_prediction()
+
+    async def run():
+        async with edge_connection(server) as edge:
+            await receive_ready(edge)
+            await edge.send(json.dumps(prediction))
+            await expect_policy_close(edge)
+        # A denied prediction must not enter the cache sent to newly connected apps.
+        async with websockets.connect(dashboard_url, close_timeout=0.5) as dashboard:
+            await consume_snapshot(dashboard)
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(dashboard.recv(), timeout=0.25)
+            server.query(
+                "UPDATE edge_gateways SET trend_prediction = TRUE WHERE id = %s",
+                (server.gateway_id,),
+            )
+            async with edge_connection(server) as edge:
+                await receive_ready(edge)
+                await edge.send(json.dumps(prediction))
+                assert (
+                    json.loads(await asyncio.wait_for(dashboard.recv(), timeout=3))
+                    == prediction
+                )
+        async with websockets.connect(dashboard_url, close_timeout=0.5) as dashboard:
+            await consume_snapshot(dashboard)
+            assert (
+                json.loads(await asyncio.wait_for(dashboard.recv(), timeout=3))
+                == prediction
+            )
+
+    asyncio.run(run())

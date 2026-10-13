@@ -6,7 +6,7 @@ use crate::{
     edge_auth::{self, AuthError, CameraOperation, GlobalOperation, Principal},
     reservation_store::{self, CreateError},
     state::SharedState,
-    ws::messages::ServerToAppMsg,
+    ws::messages::{EdgeToServerMsg, ServerToAppMsg},
 };
 
 pub async fn car_detected(
@@ -144,6 +144,49 @@ pub async fn path_update(
     let mut graph = state.graph.write().await;
     tx.commit().await?;
     graph.set_edge_status(from, to, active);
+    Ok(true)
+}
+
+pub async fn forecast(
+    state: &SharedState,
+    principal: &Principal,
+    prediction: EdgeToServerMsg,
+) -> Result<bool, AuthError> {
+    let mut tx = edge_auth::begin_authorized(&state.pool, principal).await?;
+    if !edge_auth::global_allowed(&mut tx, principal, GlobalOperation::TrendPrediction).await? {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    let EdgeToServerMsg::TrendPrediction {
+        timestamp,
+        avg_stay_duration_mins,
+        stay_duration_distribution,
+        max_capacity,
+        model_health,
+        next_24h_occupancy,
+    } = prediction
+    else {
+        return Ok(false);
+    };
+    let frame = ServerToAppMsg::TrendPrediction {
+        timestamp,
+        avg_stay_duration_mins,
+        stay_duration_distribution,
+        max_capacity,
+        model_health,
+        next_24h_occupancy,
+    };
+    let json = serde_json::to_string(&frame)
+        .map_err(|_| sqlx::Error::Protocol("Invalid forecast payload".into()))?;
+    tx.commit().await?;
+    // There is no await between committed authorization, cache replacement and broadcast.
+    let mut cache = state
+        .last_trend_prediction
+        .lock()
+        .map_err(|_| sqlx::Error::Protocol("Forecast cache unavailable".into()))?;
+    *cache = Some(json.clone());
+    drop(cache);
+    let _ = state.tx.send(json);
     Ok(true)
 }
 
@@ -405,5 +448,81 @@ mod tests {
                 .calculate_route("cam-01", "allowed")
                 .is_some()
         );
+    }
+    fn prediction() -> EdgeToServerMsg {
+        serde_json::from_value(serde_json::json!({
+            "type":"TREND_PREDICTION", "timestamp":"2026-10-13T18:00:00Z",
+            "avg_stay_duration_mins":85.0,"stay_duration_distribution":[1,2],"max_capacity":400,
+            "model_health":{"r2_score":0.95,"mae":2.0,"rmse":3.0,"inference_time_ms":50.0},
+            "next_24h_occupancy":[{"timestamp":"2026-10-13T19:00:00Z","occupancy":200}]
+        }))
+        .unwrap()
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn forecast_permission_protects_cache_and_broadcast_before_and_after_grant_removal(
+        pool: PgPool,
+    ) {
+        let mut f = fixture(pool).await;
+        assert!(
+            !forecast(&f.state, &f.principal, prediction())
+                .await
+                .unwrap()
+        );
+        assert!(f.state.last_trend_prediction.lock().unwrap().is_none());
+        assert!(f.updates.try_recv().is_err());
+        sqlx::query("UPDATE edge_gateways SET trend_prediction=true WHERE id=$1")
+            .bind(f.principal.gateway_id)
+            .execute(&f.state.pool)
+            .await
+            .unwrap();
+        assert!(
+            forecast(&f.state, &f.principal, prediction())
+                .await
+                .unwrap()
+        );
+        let cached = f
+            .state
+            .last_trend_prediction
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&cached).unwrap();
+        assert_eq!(json["type"], "TREND_PREDICTION");
+        assert_eq!(json["max_capacity"], 400);
+        assert_eq!(json["next_24h_occupancy"][0]["occupancy"], 200);
+        assert_eq!(f.updates.try_recv().unwrap(), cached);
+        sqlx::query("UPDATE edge_gateways SET trend_prediction=false WHERE id=$1")
+            .bind(f.principal.gateway_id)
+            .execute(&f.state.pool)
+            .await
+            .unwrap();
+        assert!(
+            !forecast(&f.state, &f.principal, prediction())
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            f.state.last_trend_prediction.lock().unwrap().as_deref(),
+            Some(cached.as_str())
+        );
+        assert!(f.updates.try_recv().is_err());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn revoked_gateway_cannot_replace_forecast_or_broadcast(pool: PgPool) {
+        let mut f = fixture(pool).await;
+        sqlx::query("UPDATE edge_gateways SET trend_prediction=true,revoked_at=NOW() WHERE id=$1")
+            .bind(f.principal.gateway_id)
+            .execute(&f.state.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            forecast(&f.state, &f.principal, prediction()).await,
+            Err(AuthError::Unauthenticated)
+        ));
+        assert!(f.state.last_trend_prediction.lock().unwrap().is_none());
+        assert!(f.updates.try_recv().is_err());
     }
 }

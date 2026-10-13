@@ -293,32 +293,22 @@ async fn run_edge_socket(
                             }
                         }
                     }
-                    EdgeToServerMsg::TrendPrediction {
-                        timestamp,
-                        avg_stay_duration_mins,
-                        stay_duration_distribution,
-                        max_capacity,
-                        model_health,
-                        next_24h_occupancy,
-                    } => {
-                        tracing::info!(
-                            "[WS EDGE] TrendPrediction received: {:.1} mins avg stay, {} hours forecast",
-                            avg_stay_duration_mins,
-                            next_24h_occupancy.len()
-                        );
-                        let broadcast_msg = ServerToAppMsg::TrendPrediction {
-                            timestamp,
-                            avg_stay_duration_mins,
-                            stay_duration_distribution,
-                            max_capacity,
-                            model_health,
-                            next_24h_occupancy,
-                        };
-                        if let Ok(json_str) = serde_json::to_string(&broadcast_msg) {
-                            if let Ok(mut cache) = state.last_trend_prediction.lock() {
-                                *cache = Some(json_str.clone());
+                    prediction @ EdgeToServerMsg::TrendPrediction { .. } => {
+                        match crate::edge_operations::forecast(state, principal, prediction).await {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                let _ = socket
+                                    .send(Message::Close(Some(CloseFrame {
+                                        code: 1008,
+                                        reason: "Gateway forecast operation not granted".into(),
+                                    })))
+                                    .await;
+                                return false;
                             }
-                            let _ = state.tx.send(json_str);
+                            Err(error) => {
+                                tracing::error!(%error, gateway_id = %principal.gateway_id, "Edge forecast update failed");
+                                return false;
+                            }
                         }
                     }
                 }

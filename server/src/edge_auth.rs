@@ -138,6 +138,7 @@ pub async fn camera_allowed(
 #[derive(Clone, Copy, Debug)]
 pub enum GlobalOperation {
     PathUpdate,
+    TrendPrediction,
 }
 
 pub async fn global_allowed(
@@ -148,6 +149,9 @@ pub async fn global_allowed(
     let query = match operation {
         GlobalOperation::PathUpdate => {
             "SELECT EXISTS (SELECT 1 FROM edge_gateways WHERE id = $1 AND path_update)"
+        }
+        GlobalOperation::TrendPrediction => {
+            "SELECT EXISTS (SELECT 1 FROM edge_gateways WHERE id = $1 AND trend_prediction)"
         }
     };
     sqlx::query_scalar(query)
@@ -467,6 +471,37 @@ mod tests {
         let mut tx = begin_authorized(&pool, &principal).await?;
         assert!(!global_allowed(&mut tx, &principal, GlobalOperation::PathUpdate).await?);
         tx.rollback().await?;
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn global_permissions_are_independent_for_path_and_prediction(
+        pool: PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let principal = fixture(&pool).await?;
+        let other = Uuid::new_v4();
+        sqlx::query("INSERT INTO edge_gateways (id,name,credential_digest,path_update,trend_prediction) VALUES ($1,'Other',$2,true,true)")
+            .bind(other).bind(vec![7_u8; 32]).execute(&pool).await?;
+        for (path, trend) in [(false, false), (true, false), (false, true), (true, true)] {
+            sqlx::query(
+                "UPDATE edge_gateways SET path_update = $2, trend_prediction = $3 WHERE id = $1",
+            )
+            .bind(principal.gateway_id)
+            .bind(path)
+            .bind(trend)
+            .execute(&pool)
+            .await?;
+            let mut tx = begin_authorized(&pool, &principal).await?;
+            assert_eq!(
+                global_allowed(&mut tx, &principal, GlobalOperation::PathUpdate).await?,
+                path
+            );
+            assert_eq!(
+                global_allowed(&mut tx, &principal, GlobalOperation::TrendPrediction).await?,
+                trend
+            );
+            tx.rollback().await?;
+        }
         Ok(())
     }
 }
