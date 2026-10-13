@@ -111,6 +111,30 @@ pub async fn spot_allowed(
     .await
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum CameraOperation {
+    CarDetected,
+}
+
+pub async fn camera_allowed(
+    tx: &mut Transaction<'_, Postgres>,
+    principal: &Principal,
+    camera_id: &str,
+    operation: CameraOperation,
+) -> Result<bool, sqlx::Error> {
+    let query = match operation {
+        CameraOperation::CarDetected => {
+            "SELECT EXISTS (SELECT 1 FROM edge_camera_grants \
+             WHERE gateway_id = $1 AND camera_id = $2 AND car_detected)"
+        }
+    };
+    sqlx::query_scalar(query)
+        .bind(principal.gateway_id)
+        .bind(camera_id)
+        .fetch_one(&mut **tx)
+        .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -339,6 +363,58 @@ mod tests {
             .await?;
         let mut tx = begin_authorized(&pool, &principal).await?;
         assert!(!spot_allowed(&mut tx, &principal, "cam-a", "A").await?);
+        tx.rollback().await?;
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn camera_scope_requires_gateway_camera_and_car_permission(
+        pool: PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let principal = fixture(&pool).await?;
+        let other = Uuid::new_v4();
+        sqlx::query("INSERT INTO edge_gateways (id,name,credential_digest) VALUES ($1,'Other',$2)")
+            .bind(other)
+            .bind(vec![7_u8; 32])
+            .execute(&pool)
+            .await?;
+        for (gateway, camera, spot_update, car_detected) in [
+            (principal.gateway_id, "cam-allowed", false, true),
+            (principal.gateway_id, "cam-disabled", true, false),
+            (other, "cam-other", true, true),
+        ] {
+            sqlx::query("INSERT INTO edge_camera_grants (gateway_id,camera_id,spot_update,car_detected) VALUES ($1,$2,$3,$4)")
+            .bind(gateway).bind(camera).bind(spot_update).bind(car_detected).execute(&pool).await?;
+        }
+        let mut tx = begin_authorized(&pool, &principal).await?;
+        for (camera, expected) in [
+            ("cam-allowed", true),
+            ("cam-disabled", false),
+            ("cam-other", false),
+            ("unknown", false),
+        ] {
+            assert_eq!(
+                camera_allowed(&mut tx, &principal, camera, CameraOperation::CarDetected).await?,
+                expected
+            );
+        }
+        tx.rollback().await?;
+        sqlx::query(
+            "DELETE FROM edge_camera_grants WHERE gateway_id = $1 AND camera_id = 'cam-allowed'",
+        )
+        .bind(principal.gateway_id)
+        .execute(&pool)
+        .await?;
+        let mut tx = begin_authorized(&pool, &principal).await?;
+        assert!(
+            !camera_allowed(
+                &mut tx,
+                &principal,
+                "cam-allowed",
+                CameraOperation::CarDetected
+            )
+            .await?
+        );
         tx.rollback().await?;
         Ok(())
     }

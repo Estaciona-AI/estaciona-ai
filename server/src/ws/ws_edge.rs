@@ -20,11 +20,10 @@ use axum::{
     extract::{State, WebSocketUpgrade},
     response::IntoResponse,
 };
-use chrono::{Duration, Utc};
 use futures_util::StreamExt;
 use uuid::Uuid;
 
-use crate::reservation_store::{self, CreateError, FinishReason};
+use crate::reservation_store::{self, FinishReason};
 use crate::state::SharedState;
 use crate::ws::messages::{EdgeToServerMsg, EdgeTransportMsg, ServerToAppMsg, ServerToEdgeMsg};
 
@@ -204,7 +203,26 @@ async fn run_edge_socket(
                     EdgeToServerMsg::CarDetected {
                         plate, camera_id, ..
                     } => {
-                        handle_car_detected(state, plate, camera_id).await;
+                        match crate::edge_operations::car_detected(
+                            state, principal, &plate, &camera_id,
+                        )
+                        .await
+                        {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                let _ = socket
+                                    .send(Message::Close(Some(CloseFrame {
+                                        code: 1008,
+                                        reason: "Gateway arrival not granted".into(),
+                                    })))
+                                    .await;
+                                return false;
+                            }
+                            Err(error) => {
+                                tracing::error!(%error, gateway_id = %principal.gateway_id, "Edge arrival failed");
+                                return false;
+                            }
+                        }
                     }
                     EdgeToServerMsg::SpotUpdate {
                         spot_id,
@@ -304,101 +322,4 @@ async fn run_edge_socket(
     }
 
     tracing::info!("[WS EDGE] Camera disconnected.");
-}
-
-async fn handle_car_detected(state: &SharedState, plate: String, camera_id: String) {
-    let hashed_plate = crate::security::hash_plate(&plate, &state.plate_pepper);
-
-    // 1. Validação do usuário
-    let user_record = sqlx::query!("SELECT id FROM users WHERE plate = $1", hashed_plate)
-        .fetch_optional(&state.pool)
-        .await;
-
-    let user_id = match user_record {
-        Ok(Some(record)) => record.id,
-        _ => {
-            tracing::warn!("Veículo não cadastrado detectado e ignorado.",);
-            return;
-        }
-    };
-
-    // 2. Verifica reserva ativa
-    let reservation = sqlx::query!(
-        "SELECT id, spot_id FROM reservations WHERE user_id = $1 AND status = 'active' LIMIT 1",
-        user_id
-    )
-    .fetch_optional(&state.pool)
-    .await;
-
-    // 3. Define a vaga e a rota final
-    let (spot_id, final_route) = if let Ok(Some(res)) = reservation {
-        // Fluxo com reserva prévia
-        let route = state
-            .graph
-            .read()
-            .await
-            .calculate_route(&camera_id, &res.spot_id)
-            .unwrap_or_else(|| vec![camera_id.clone(), res.spot_id.clone()]);
-
-        (res.spot_id, route)
-    } else {
-        // Fluxo sem reserva: Usa o Grafo para varrer todas as vagas livres e achar a rota mais curta
-        let free_spots = sqlx::query!("SELECT id FROM spots WHERE status = 'free'")
-            .fetch_all(&state.pool)
-            .await
-            .unwrap_or_default();
-
-        let candidates = {
-            let graph = state.graph.read().await;
-            let mut candidates: Vec<_> = free_spots
-                .into_iter()
-                .filter_map(|row| {
-                    let cost = graph.calculate_cost(&camera_id, &row.id)?;
-                    let route = graph.calculate_route(&camera_id, &row.id)?;
-                    Some((cost, row.id, route))
-                })
-                .collect();
-            candidates.sort_by_key(|(cost, _, _)| *cost);
-            candidates
-        };
-
-        let mut claimed = None;
-        for (_, spot, route) in candidates {
-            let expires_at = Utc::now() + Duration::minutes(15);
-            match reservation_store::create(&state.pool, &spot, user_id, expires_at).await {
-                Ok(_) => {
-                    // Dispara broadcast de SPOT_UPDATE para os outros clientes saberem que a vaga foi ocupada
-                    let update_msg = ServerToAppMsg::SpotUpdate {
-                        spot_id: spot.clone(),
-                        status: "reserved".to_string(),
-                    };
-                    if let Ok(json_str) = serde_json::to_string(&update_msg) {
-                        let _ = state.tx.send(json_str);
-                    }
-
-                    claimed = Some((spot, route));
-                    break;
-                }
-                Err(CreateError::Unavailable) => continue,
-                Err(CreateError::Database(error)) => {
-                    tracing::error!(%error, spot_id = %spot, "Failed to create automatic reservation");
-                    return;
-                }
-            }
-        }
-        let Some((spot, route)) = claimed else { return };
-        (spot, route)
-    };
-
-    // 4. Envia o comando de navegação para a sessão do usuário
-    if let Some(session_tx) = state.user_sessions.get(&user_id) {
-        let nav_msg = ServerToAppMsg::NavigationStart {
-            spot_id,
-            route: final_route,
-        };
-
-        if let Ok(json_str) = serde_json::to_string(&nav_msg) {
-            let _ = session_tx.send(json_str);
-        }
-    }
 }

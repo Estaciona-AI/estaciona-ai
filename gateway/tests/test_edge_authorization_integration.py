@@ -3,6 +3,7 @@
 import asyncio
 from contextlib import suppress
 import hashlib
+import hmac
 import json
 import os
 import sqlite3
@@ -23,7 +24,13 @@ from test_delivery_integration import (
     server as delivery_server,
     until,
 )
-from test_session_integration import held_table_lock
+from test_session_integration import (
+    consume_snapshot,
+    held_table_lock,
+    insert_user,
+    token,
+    websocket_url,
+)
 
 server = delivery_server
 
@@ -519,3 +526,162 @@ def test_rotated_credential_replays_its_existing_receipt_without_another_effect(
         "SELECT gateway_id::text, outcome FROM edge_event_receipts WHERE event_id = %s",
         (event_id,),
     ) == [(server.gateway_id, "applied")]
+
+
+def car_detected():
+    return {
+        "type": "CAR_DETECTED",
+        "plate": "R05TEST",
+        "camera_id": "cam-01",
+        "timestamp": "2026-10-12T12:00:00Z",
+    }
+
+
+def car_user(server):
+    plate_digest = hmac.new(
+        b"disposable-pepper", b"R05TEST", hashlib.sha256
+    ).hexdigest()
+    user_id = insert_user(server, plate=plate_digest)
+    server.query(
+        "INSERT INTO edge_camera_grants (gateway_id, camera_id, car_detected) "
+        "VALUES (%s, 'cam-01', TRUE)",
+        (server.gateway_id,),
+    )
+    return user_id
+
+
+async def receive_navigation(app, *, reservation_created=True):
+    async def receive():
+        navigation = None
+        reservation_update = False
+        while navigation is None or (reservation_created and not reservation_update):
+            value = json.loads(await app.recv())
+            if value["type"] == "NAVIGATION_START":
+                navigation = value
+            elif value.get("spot_id") == "R02-A" and value.get("status") == "reserved":
+                reservation_update = True
+        return navigation
+
+    navigation = await asyncio.wait_for(receive(), timeout=3)
+    assert navigation["spot_id"] == "R02-A"
+    assert navigation["route"][0] == "cam-01"
+    assert navigation["route"][-1] == "R02-A"
+
+
+@pytest.mark.parametrize("has_reservation", [False, True])
+def test_car_cannot_select_or_navigate_to_a_destination_outside_gateway_scope(
+    server, has_reservation
+):
+    user_id = car_user(server)
+    server.query(
+        "DELETE FROM edge_camera_spots WHERE gateway_id = %s AND spot_id = 'R02-A'",
+        (server.gateway_id,),
+    )
+    if has_reservation:
+        server.query(
+            "INSERT INTO reservations (id, user_id, spot_id, expires_at) "
+            "VALUES (%s, %s, 'R02-A', NOW() + INTERVAL '15 minutes')",
+            (str(uuid4()), str(user_id)),
+        )
+        server.query("UPDATE spots SET status = 'reserved' WHERE id = 'R02-A'")
+    expected_status = "reserved" if has_reservation else "free"
+    app_url = websocket_url(
+        server, "app", user_id, token(user_id, "user", int(time.time()) + 60)
+    )
+
+    async def run():
+        async with (
+            websockets.connect(app_url, close_timeout=0.5) as app,
+            edge_connection(server) as edge,
+        ):
+            assert json.loads(await asyncio.wait_for(app.recv(), timeout=3)) == {
+                "type": "SPOT_UPDATE",
+                "spot_id": "R02-A",
+                "status": expected_status,
+            }
+            await receive_ready(edge)
+            await edge.send(json.dumps(car_detected()))
+            # A rejected delivery is an ordered barrier without spot mutation.
+            assert (await deliver(edge, confidence=0.0))["outcome"] == "rejected"
+            assert server.query("SELECT COUNT(*) FROM reservations") == [
+                (int(has_reservation),)
+            ]
+            assert server.query("SELECT status FROM spots WHERE id = 'R02-A'") == [
+                (expected_status,)
+            ]
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(app.recv(), timeout=0.25)
+            server.query(
+                "INSERT INTO edge_camera_spots (gateway_id, camera_id, spot_id) "
+                "VALUES (%s, 'test-camera', 'R02-A')",
+                (server.gateway_id,),
+            )
+            await edge.send(json.dumps(car_detected()))
+            await receive_navigation(app, reservation_created=not has_reservation)
+            assert server.query("SELECT COUNT(*) FROM reservations") == [(1,)]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("change", ["camera", "operation"])
+def test_car_requires_camera_and_operation_grants_before_private_or_database_effects(
+    server, change
+):
+    user_id = car_user(server)
+    server.query(
+        "INSERT INTO edge_camera_spots (gateway_id, camera_id, spot_id) "
+        "VALUES (%s, 'cam-01', 'R02-A')",
+        (server.gateway_id,),
+    )
+    if change == "camera":
+        server.query(
+            "DELETE FROM edge_camera_grants WHERE gateway_id = %s AND camera_id = 'cam-01'",
+            (server.gateway_id,),
+        )
+    else:
+        server.query(
+            "UPDATE edge_camera_grants SET car_detected = FALSE "
+            "WHERE gateway_id = %s AND camera_id = 'cam-01'",
+            (server.gateway_id,),
+        )
+    app_url = websocket_url(
+        server, "app", user_id, token(user_id, "user", int(time.time()) + 60)
+    )
+
+    async def run():
+        async with websockets.connect(app_url, close_timeout=0.5) as app:
+            await consume_snapshot(app)
+            async with edge_connection(server) as edge:
+                await receive_ready(edge)
+                await edge.send(json.dumps(car_detected()))
+                await expect_policy_close(edge)
+            assert server.query("SELECT COUNT(*) FROM reservations") == [(0,)]
+            assert server.query("SELECT status FROM spots WHERE id = 'R02-A'") == [
+                ("free",)
+            ]
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(app.recv(), timeout=0.25)
+            if change == "camera":
+                server.query(
+                    "INSERT INTO edge_camera_grants (gateway_id, camera_id, car_detected) "
+                    "VALUES (%s, 'cam-01', TRUE)",
+                    (server.gateway_id,),
+                )
+                server.query(
+                    "INSERT INTO edge_camera_spots (gateway_id, camera_id, spot_id) "
+                    "VALUES (%s, 'cam-01', 'R02-A')",
+                    (server.gateway_id,),
+                )
+            else:
+                server.query(
+                    "UPDATE edge_camera_grants SET car_detected = TRUE "
+                    "WHERE gateway_id = %s AND camera_id = 'cam-01'",
+                    (server.gateway_id,),
+                )
+            async with edge_connection(server) as edge:
+                await receive_ready(edge)
+                await edge.send(json.dumps(car_detected()))
+                await receive_navigation(app)
+            assert server.query("SELECT COUNT(*) FROM reservations") == [(1,)]
+
+    asyncio.run(run())

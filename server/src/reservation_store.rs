@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 #[derive(Debug, sqlx::FromRow)]
@@ -40,22 +40,38 @@ pub async fn create(
     expires_at: DateTime<Utc>,
 ) -> Result<Reservation, CreateError> {
     let mut tx = pool.begin().await.map_err(CreateError::Database)?;
+    match create_in_transaction(&mut tx, spot_id, user_id, expires_at).await {
+        Ok(reservation) => {
+            tx.commit().await.map_err(CreateError::Database)?;
+            Ok(reservation)
+        }
+        Err(error) => {
+            tx.rollback().await.map_err(CreateError::Database)?;
+            Err(error)
+        }
+    }
+}
 
+// The caller owns commit/rollback (or a savepoint), so authorization and the
+// reservation claim can retain the same transaction and spot-first lock order.
+pub async fn create_in_transaction(
+    connection: &mut PgConnection,
+    spot_id: &str,
+    user_id: Uuid,
+    expires_at: DateTime<Utc>,
+) -> Result<Reservation, CreateError> {
     let claimed = sqlx::query(
         "UPDATE spots SET status = 'reserved', last_updated = NOW() \
          WHERE id = $1 AND status = 'free'",
     )
     .bind(spot_id)
-    .execute(&mut *tx)
+    .execute(&mut *connection)
     .await
     .map_err(CreateError::Database)?;
-
     if claimed.rows_affected() == 0 {
-        tx.rollback().await.map_err(CreateError::Database)?;
         return Err(CreateError::Unavailable);
     }
-
-    let inserted = sqlx::query_as::<_, Reservation>(
+    sqlx::query_as::<_, Reservation>(
         "INSERT INTO reservations (id, user_id, spot_id, status, expires_at) \
          VALUES ($1, $2, $3, 'active', $4) \
          RETURNING id, user_id, spot_id, status, created_at, expires_at, completed_at",
@@ -64,27 +80,19 @@ pub async fn create(
     .bind(user_id)
     .bind(spot_id)
     .bind(expires_at)
-    .fetch_one(&mut *tx)
-    .await;
-
-    let reservation = match inserted {
-        Ok(reservation) => reservation,
-        Err(error) => {
-            let active_conflict = error.as_database_error().is_some_and(|database_error| {
-                database_error.code().as_deref() == Some("23505")
-                    && database_error.constraint() == Some("reservations_one_active_per_spot")
-            });
-            tx.rollback().await.map_err(CreateError::Database)?;
-            return Err(if active_conflict {
-                CreateError::Unavailable
-            } else {
-                CreateError::Database(error)
-            });
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(|error| {
+        let active_conflict = error.as_database_error().is_some_and(|database_error| {
+            database_error.code().as_deref() == Some("23505")
+                && database_error.constraint() == Some("reservations_one_active_per_spot")
+        });
+        if active_conflict {
+            CreateError::Unavailable
+        } else {
+            CreateError::Database(error)
         }
-    };
-
-    tx.commit().await.map_err(CreateError::Database)?;
-    Ok(reservation)
+    })
 }
 
 pub async fn finish(

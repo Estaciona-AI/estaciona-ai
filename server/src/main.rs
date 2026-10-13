@@ -22,6 +22,7 @@ mod auth_resource_tests;
 mod edge_auth;
 mod edge_cli;
 mod edge_delivery;
+mod edge_operations;
 mod pathfinding;
 #[cfg(test)]
 mod postgres_tests;
