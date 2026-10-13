@@ -685,3 +685,55 @@ def test_car_requires_camera_and_operation_grants_before_private_or_database_eff
             assert server.query("SELECT COUNT(*) FROM reservations") == [(1,)]
 
     asyncio.run(run())
+
+
+def test_path_update_requires_permission_and_controls_the_actual_route(server):
+    user_id = car_user(server)
+    server.query(
+        "INSERT INTO edge_camera_spots (gateway_id, camera_id, spot_id) "
+        "VALUES (%s, 'cam-01', 'R02-A')",
+        (server.gateway_id,),
+    )
+    app_url = websocket_url(
+        server, "app", user_id, token(user_id, "user", int(time.time()) + 60)
+    )
+    path = {
+        "type": "PATH_UPDATE",
+        "from_node": "cam-01",
+        "to_node": "path_node_1",
+        "is_active": False,
+    }
+
+    async def run():
+        async with edge_connection(server) as edge:
+            await receive_ready(edge)
+            await edge.send(json.dumps(path))
+            await expect_policy_close(edge)
+        async with (
+            websockets.connect(app_url, close_timeout=0.5) as app,
+            edge_connection(server) as edge,
+        ):
+            await consume_snapshot(app)
+            await receive_ready(edge)
+            # Denial must leave the graph usable for an authorized car.
+            await edge.send(json.dumps(car_detected()))
+            await receive_navigation(app)
+            server.query("DELETE FROM reservations WHERE user_id = %s", (str(user_id),))
+            server.query("UPDATE spots SET status = 'free' WHERE id = 'R02-A'")
+            server.query(
+                "UPDATE edge_gateways SET path_update = TRUE WHERE id = %s",
+                (server.gateway_id,),
+            )
+            await edge.send(json.dumps(path))
+            await edge.send(json.dumps(car_detected()))
+            assert (await deliver(edge, confidence=0.0))["outcome"] == "ignored"
+            assert server.query("SELECT COUNT(*) FROM reservations") == [(0,)]
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(app.recv(), timeout=0.25)
+            path["is_active"] = True
+            await edge.send(json.dumps(path))
+            await edge.send(json.dumps(car_detected()))
+            await receive_navigation(app)
+            assert server.query("SELECT COUNT(*) FROM reservations") == [(1,)]
+
+    asyncio.run(run())

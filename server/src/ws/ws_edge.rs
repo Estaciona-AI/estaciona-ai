@@ -272,14 +272,26 @@ async fn run_edge_socket(
                         to_node,
                         is_active,
                     } => {
-                        let mut graph_write = state.graph.write().await;
-                        graph_write.set_edge_status(&from_node, &to_node, is_active);
-                        tracing::info!(
-                            "Path update: {} -> {} active: {}",
-                            from_node,
-                            to_node,
-                            is_active
-                        );
+                        match crate::edge_operations::path_update(
+                            state, principal, &from_node, &to_node, is_active,
+                        )
+                        .await
+                        {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                let _ = socket
+                                    .send(Message::Close(Some(CloseFrame {
+                                        code: 1008,
+                                        reason: "Gateway path operation not granted".into(),
+                                    })))
+                                    .await;
+                                return false;
+                            }
+                            Err(error) => {
+                                tracing::error!(%error, gateway_id = %principal.gateway_id, "Edge path update failed");
+                                return false;
+                            }
+                        }
                     }
                     EdgeToServerMsg::TrendPrediction {
                         timestamp,

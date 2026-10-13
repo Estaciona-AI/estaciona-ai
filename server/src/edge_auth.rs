@@ -135,6 +135,27 @@ pub async fn camera_allowed(
         .await
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum GlobalOperation {
+    PathUpdate,
+}
+
+pub async fn global_allowed(
+    tx: &mut Transaction<'_, Postgres>,
+    principal: &Principal,
+    operation: GlobalOperation,
+) -> Result<bool, sqlx::Error> {
+    let query = match operation {
+        GlobalOperation::PathUpdate => {
+            "SELECT EXISTS (SELECT 1 FROM edge_gateways WHERE id = $1 AND path_update)"
+        }
+    };
+    sqlx::query_scalar(query)
+        .bind(principal.gateway_id)
+        .fetch_one(&mut **tx)
+        .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,6 +436,36 @@ mod tests {
             )
             .await?
         );
+        tx.rollback().await?;
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn global_path_scope_requires_own_gateway_permission(
+        pool: PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let principal = fixture(&pool).await?;
+        let other = Uuid::new_v4();
+        sqlx::query("INSERT INTO edge_gateways (id,name,credential_digest,path_update) VALUES ($1,'Other',$2,true)")
+            .bind(other).bind(vec![7_u8; 32]).execute(&pool).await?;
+        let mut tx = begin_authorized(&pool, &principal).await?;
+        assert!(!global_allowed(&mut tx, &principal, GlobalOperation::PathUpdate).await?);
+        tx.rollback().await?;
+        sqlx::query("UPDATE edge_gateways SET path_update = true WHERE id = $1")
+            .bind(principal.gateway_id)
+            .execute(&pool)
+            .await?;
+        let mut tx = begin_authorized(&pool, &principal).await?;
+        assert!(global_allowed(&mut tx, &principal, GlobalOperation::PathUpdate).await?);
+        tx.rollback().await?;
+        sqlx::query(
+            "UPDATE edge_gateways SET path_update = false, trend_prediction = true WHERE id = $1",
+        )
+        .bind(principal.gateway_id)
+        .execute(&pool)
+        .await?;
+        let mut tx = begin_authorized(&pool, &principal).await?;
+        assert!(!global_allowed(&mut tx, &principal, GlobalOperation::PathUpdate).await?);
         tx.rollback().await?;
         Ok(())
     }

@@ -3,7 +3,7 @@ use sqlx::Acquire;
 use uuid::Uuid;
 
 use crate::{
-    edge_auth::{self, AuthError, CameraOperation, Principal},
+    edge_auth::{self, AuthError, CameraOperation, GlobalOperation, Principal},
     reservation_store::{self, CreateError},
     state::SharedState,
     ws::messages::ServerToAppMsg,
@@ -127,6 +127,26 @@ pub async fn car_detected(
     }
     Ok(true)
 }
+pub async fn path_update(
+    state: &SharedState,
+    principal: &Principal,
+    from: &str,
+    to: &str,
+    active: bool,
+) -> Result<bool, AuthError> {
+    let mut tx = edge_auth::begin_authorized(&state.pool, principal).await?;
+    if !edge_auth::global_allowed(&mut tx, principal, GlobalOperation::PathUpdate).await? {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    // Acquire the graph before committing authorization; cancellation/DB failure
+    // cannot leave a graph edit behind. The edit after commit has no await.
+    let mut graph = state.graph.write().await;
+    tx.commit().await?;
+    graph.set_edge_status(from, to, active);
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,5 +325,85 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 0);
+    }
+    #[sqlx::test(migrations = "./migrations")]
+    async fn path_permission_is_required_and_changes_are_rechecked(pool: PgPool) {
+        let f = fixture(pool).await;
+        assert!(
+            !path_update(&f.state, &f.principal, "cam-01", "allowed", false)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            f.state
+                .graph
+                .read()
+                .await
+                .calculate_route("cam-01", "allowed"),
+            Some(vec!["cam-01".into(), "allowed".into()])
+        );
+        sqlx::query("UPDATE edge_gateways SET path_update=true WHERE id=$1")
+            .bind(f.principal.gateway_id)
+            .execute(&f.state.pool)
+            .await
+            .unwrap();
+        assert!(
+            path_update(&f.state, &f.principal, "cam-01", "allowed", false)
+                .await
+                .unwrap()
+        );
+        assert!(
+            f.state
+                .graph
+                .read()
+                .await
+                .calculate_route("cam-01", "allowed")
+                .is_none()
+        );
+        assert!(
+            path_update(&f.state, &f.principal, "cam-01", "allowed", true)
+                .await
+                .unwrap()
+        );
+        sqlx::query("UPDATE edge_gateways SET path_update=false WHERE id=$1")
+            .bind(f.principal.gateway_id)
+            .execute(&f.state.pool)
+            .await
+            .unwrap();
+        assert!(
+            !path_update(&f.state, &f.principal, "cam-01", "allowed", false)
+                .await
+                .unwrap()
+        );
+        assert!(
+            f.state
+                .graph
+                .read()
+                .await
+                .calculate_route("cam-01", "allowed")
+                .is_some()
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn revoked_gateway_cannot_alter_navigation_graph(pool: PgPool) {
+        let f = fixture(pool).await;
+        sqlx::query("UPDATE edge_gateways SET path_update=true,revoked_at=NOW() WHERE id=$1")
+            .bind(f.principal.gateway_id)
+            .execute(&f.state.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            path_update(&f.state, &f.principal, "cam-01", "allowed", false).await,
+            Err(AuthError::Unauthenticated)
+        ));
+        assert!(
+            f.state
+                .graph
+                .read()
+                .await
+                .calculate_route("cam-01", "allowed")
+                .is_some()
+        );
     }
 }
