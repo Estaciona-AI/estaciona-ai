@@ -78,7 +78,7 @@ async fn main() {
         Ok(true) => return,
         Ok(false) => {}
         Err(error) => {
-            tracing::error!(%error, "Gateway administration failed");
+            tracing::error!(%error, cause = ?std::error::Error::source(&error), "Gateway administration failed");
             std::process::exit(1);
         }
     }
