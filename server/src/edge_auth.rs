@@ -52,14 +52,20 @@ pub async fn authenticate(
         return Ok(None);
     }
     let digest = credential_digest(credential);
-    let gateway_id = tokio::time::timeout(
-        Duration::from_secs(2),
-        sqlx::query_scalar::<_, Uuid>(
+    let gateway_id = tokio::time::timeout(Duration::from_secs(2), async {
+        let mut tx = pool.begin().await?;
+        sqlx::raw_sql("SET LOCAL statement_timeout = '2s'; SET LOCAL lock_timeout = '2s'")
+            .execute(&mut *tx)
+            .await?;
+        let gateway_id = sqlx::query_scalar::<_, Uuid>(
             "SELECT id FROM edge_gateways WHERE credential_digest = $1 AND revoked_at IS NULL",
         )
         .bind(digest.as_slice())
-        .fetch_optional(pool),
-    )
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok::<_, sqlx::Error>(gateway_id)
+    })
     .await
     .map_err(|_| sqlx::Error::PoolTimedOut)??;
     Ok(gateway_id.map(|gateway_id| Principal { gateway_id, digest }))
@@ -267,6 +273,45 @@ mod tests {
             begin.expect("transaction acquisition must have its own deadline"),
             Err(AuthError::Database(sqlx::Error::PoolTimedOut))
         ));
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn timed_out_credential_lookup_releases_the_pool_while_table_is_locked(
+        pool: PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        fixture(&pool).await?;
+        let limited_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(1))
+            .connect_with(pool.connect_options().as_ref().clone())
+            .await?;
+        let mut blocker = pool.begin().await?;
+        sqlx::query("LOCK TABLE edge_gateways IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *blocker)
+            .await?;
+
+        let lookup =
+            tokio::time::timeout(Duration::from_secs(3), authenticate(&limited_pool, TOKEN)).await;
+        let reused = tokio::time::timeout(
+            Duration::from_secs(1),
+            sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(&limited_pool),
+        )
+        .await;
+
+        blocker.rollback().await?;
+        limited_pool.close().await;
+        assert!(
+            lookup
+                .expect("credential lookup must keep its total deadline")
+                .is_err()
+        );
+        assert_eq!(
+            reused
+                .expect("credential lookup must release its pool connection while blocked")
+                .expect("pool must remain usable while the gateway table is locked"),
+            1
+        );
         Ok(())
     }
 
