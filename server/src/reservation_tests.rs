@@ -60,7 +60,6 @@ impl Fixture {
             graph: RwLock::new(ParkingGraph::new()),
             jwt_secret: "r01-disposable-jwt-secret".to_owned(),
             plate_pepper: "r01-disposable-plate-pepper".to_owned(),
-            edge_api_key: "r01-disposable-edge-key".to_owned(),
             last_trend_prediction: Mutex::new(None),
             site_data_dir: std::env::temp_dir().join(format!("r01-reservation-{owner}")),
         });
@@ -72,6 +71,32 @@ impl Fixture {
             admin,
             spot_id,
         })
+    }
+
+    async fn observe_occupied(
+        &self,
+    ) -> Result<crate::edge_delivery::Observation, Box<dyn std::error::Error>> {
+        let gateway_id = Uuid::new_v4();
+        let key = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        sqlx::query("INSERT INTO edge_gateways (id,name,credential_digest) VALUES ($1,'reservation-fixture',$2)")
+            .bind(gateway_id).bind(crate::edge_auth::credential_digest(&key).as_slice())
+            .execute(&self.state.pool).await?;
+        sqlx::query("INSERT INTO edge_camera_grants (gateway_id,camera_id,spot_update) VALUES ($1,'fixture-camera',true)")
+            .bind(gateway_id).execute(&self.state.pool).await?;
+        sqlx::query("INSERT INTO edge_camera_spots (gateway_id,camera_id,spot_id) VALUES ($1,'fixture-camera',$2)")
+            .bind(gateway_id).bind(&self.spot_id).execute(&self.state.pool).await?;
+        let principal = crate::edge_auth::authenticate(&self.state.pool, &key)
+            .await?
+            .expect("registered edge fixture");
+        Ok(crate::edge_delivery::apply_legacy(
+            &self.state.pool,
+            &principal,
+            "fixture-camera",
+            &self.spot_id,
+            "occupied",
+            1.0,
+        )
+        .await?)
     }
 
     fn headers(&self, user_id: Uuid, role: &str) -> HeaderMap {
@@ -390,7 +415,7 @@ async fn failed_reservation_insert_rolls_back_the_spot_claim(
 #[sqlx::test(migrations = "./migrations")]
 async fn occupied_observation_rolls_back_if_capturing_its_reservation_fails(
     pool: PgPool,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new(pool).await?;
     fixture.create_for_owner().await;
     // Simulate a persistence failure after the spot write, not a valid empty lookup.
@@ -398,8 +423,7 @@ async fn occupied_observation_rolls_back_if_capturing_its_reservation_fails(
         .execute(&fixture.state.pool)
         .await?;
 
-    let result =
-        crate::ws::ws_edge::apply_occupied_observation(&fixture.state.pool, &fixture.spot_id).await;
+    let result = fixture.observe_occupied().await;
     assert!(result.is_err());
     assert_eq!(
         fixture.spot_status().await?,
@@ -412,13 +436,12 @@ async fn occupied_observation_rolls_back_if_capturing_its_reservation_fails(
 #[sqlx::test(migrations = "./migrations")]
 async fn occupied_observation_captures_the_reservation_that_owns_its_spot(
     pool: PgPool,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), Box<dyn std::error::Error>> {
     let fixture = Fixture::new(pool).await?;
     let id = fixture.create_for_owner().await;
-    let result =
-        crate::ws::ws_edge::apply_occupied_observation(&fixture.state.pool, &fixture.spot_id)
-            .await?;
-    assert_eq!(result, Some(Some(id)));
+    let result = fixture.observe_occupied().await?;
+    assert_eq!(result.outcome, crate::edge_delivery::Outcome::Applied);
+    assert_eq!(result.unconfirmed_reservation, Some(id));
     assert_eq!(fixture.spot_status().await?, "occupied");
     assert_eq!(fixture.reservation_status(id).await?, "active");
     Ok(())

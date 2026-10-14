@@ -33,7 +33,6 @@ pub struct AppState {
     pub graph: RwLock<ParkingGraph>,
     pub jwt_secret: String,
     pub plate_pepper: String,
-    pub edge_api_key: String,
     pub last_trend_prediction: Mutex<Option<String>>,
     pub site_data_dir: std::path::PathBuf,
 }
@@ -44,7 +43,6 @@ pub async fn init_state(
     pool: PgPool,
     jwt_secret: String,
     plate_pepper: String,
-    edge_api_key: String,
     site: SiteConfig,
 ) -> SharedState {
     let (tx, _) = broadcast::channel(100);
@@ -154,7 +152,6 @@ pub async fn init_state(
         graph: RwLock::new(graph),
         jwt_secret,
         plate_pepper,
-        edge_api_key,
         last_trend_prediction: Mutex::new(None),
         site_data_dir: site.directory,
     })

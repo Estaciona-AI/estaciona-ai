@@ -40,7 +40,6 @@ fn fixture(pool: PgPool) -> SharedState {
         graph: RwLock::new(ParkingGraph::new()),
         jwt_secret: "r04-disposable-jwt-secret".to_owned(),
         plate_pepper: "r04-disposable-plate-pepper".to_owned(),
-        edge_api_key: "r04-disposable-edge-key".to_owned(),
         auth_limits: Default::default(),
         last_trend_prediction: Mutex::new(None),
         site_data_dir: std::env::temp_dir().join(format!("r04-auth-{}", Uuid::new_v4())),
@@ -419,7 +418,7 @@ impl HttpServer {
     async fn edge_handshake_status(&self) -> u16 {
         tokio::time::timeout(Duration::from_secs(2), async {
             let mut stream = TcpStream::connect(self.address).await.expect("WS test client");
-            stream.write_all(b"GET /ws/edge HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nAuthorization: Bearer r04-disposable-edge-key\r\n\r\n")
+            stream.write_all(b"GET /ws/edge HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nAuthorization: Bearer cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\r\n\r\n")
                 .await.expect("write WS handshake");
             let mut response = Vec::new();
             let mut buffer = [0; 1024];
@@ -510,6 +509,15 @@ async fn unsupported_auth_methods_preserve_405_for_oversized_bodies(pool: PgPool
 
 #[sqlx::test(migrations = "./migrations")]
 async fn health_and_edge_websocket_remain_responsive_while_kdf_is_busy(pool: PgPool) {
+    use sha2::{Digest, Sha256};
+    sqlx::query(
+        "INSERT INTO edge_gateways (id,name,credential_digest) VALUES ($1,'r04-fixture',$2)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(Sha256::digest("c".repeat(64).as_bytes()).to_vec())
+    .execute(&pool)
+    .await
+    .unwrap();
     let state = fixture(pool);
     let server = HttpServer::start(state.clone()).await;
     let held = HeldKdf::start(state).await;
