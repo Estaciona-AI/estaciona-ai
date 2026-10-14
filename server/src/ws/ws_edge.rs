@@ -161,7 +161,7 @@ async fn run_edge_socket(
                     {
                         Ok(delivery) => delivery,
                         Err(error) => {
-                            tracing::error!(%error, %event_id, "Failed to persist edge event");
+                            tracing::error!(%error, cause = ?std::error::Error::source(&error), %event_id, "Failed to persist edge event");
                             return false;
                         }
                     };
@@ -219,7 +219,7 @@ async fn run_edge_socket(
                                 return false;
                             }
                             Err(error) => {
-                                tracing::error!(%error, gateway_id = %principal.gateway_id, "Edge arrival failed");
+                                tracing::error!(%error, cause = ?std::error::Error::source(&error), gateway_id = %principal.gateway_id, "Edge arrival failed");
                                 return false;
                             }
                         }
@@ -243,7 +243,7 @@ async fn run_edge_socket(
                         {
                             Ok(observation) => observation,
                             Err(error) => {
-                                tracing::error!(%error, gateway_id = %principal.gateway_id, "Legacy edge observation failed");
+                                tracing::error!(%error, cause = ?std::error::Error::source(&error), gateway_id = %principal.gateway_id, "Legacy edge observation failed");
                                 return false;
                             }
                         };
@@ -288,7 +288,7 @@ async fn run_edge_socket(
                                 return false;
                             }
                             Err(error) => {
-                                tracing::error!(%error, gateway_id = %principal.gateway_id, "Edge path update failed");
+                                tracing::error!(%error, cause = ?std::error::Error::source(&error), gateway_id = %principal.gateway_id, "Edge path update failed");
                                 return false;
                             }
                         }
@@ -306,7 +306,7 @@ async fn run_edge_socket(
                                 return false;
                             }
                             Err(error) => {
-                                tracing::error!(%error, gateway_id = %principal.gateway_id, "Edge forecast update failed");
+                                tracing::error!(%error, cause = ?std::error::Error::source(&error), gateway_id = %principal.gateway_id, "Edge forecast update failed");
                                 return false;
                             }
                         }
