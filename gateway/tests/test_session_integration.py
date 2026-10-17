@@ -328,11 +328,14 @@ def test_rest_authorization_times_out_while_users_is_locked(server, role, path):
     asyncio.run(run())
 
 
-def test_blocked_app_reservation_does_not_write_after_session_expiration(server):
+@pytest.mark.parametrize("invalidation", ["expiration", "role_change", "deletion"])
+def test_blocked_app_reservation_does_not_write_after_session_invalidation(
+    server, invalidation
+):
     user_id = insert_user(server)
 
     async def run():
-        expires_at = int(time.time()) + 4
+        expires_at = int(time.time()) + (4 if invalidation == "expiration" else 60)
         async with websockets.connect(
             websocket_url(server, "app", user_id, token(user_id, "user", expires_at)),
             close_timeout=0.5,
@@ -352,10 +355,21 @@ def test_blocked_app_reservation_does_not_write_after_session_expiration(server)
                 backend_pid = await wait_for_lock_waiter(
                     server, "spots", "UPDATE spots SET status = 'reserved'"
                 )
-                closed_at = await asyncio.wait_for(
-                    closure_time(connection), timeout=expires_at - time.time() + 2
+                if invalidation == "role_change":
+                    server.query(
+                        "UPDATE users SET role = 'admin' WHERE id = %s", (str(user_id),)
+                    )
+                elif invalidation == "deletion":
+                    server.query("DELETE FROM users WHERE id = %s", (str(user_id),))
+                deadline = (
+                    expires_at + 2 if invalidation == "expiration" else time.time() + 7
                 )
-                assert expires_at - 0.2 <= closed_at <= expires_at + 2
+                closed_at = await asyncio.wait_for(
+                    closure_time(connection), timeout=deadline - time.time()
+                )
+                assert closed_at <= deadline
+                if invalidation == "expiration":
+                    assert closed_at >= expires_at - 0.2
             # Release the lock, then observe the actual transaction's completion.
             # A detached command would resume here and its committed effects count.
             await wait_for_backend_transaction_to_finish(server, backend_pid)
