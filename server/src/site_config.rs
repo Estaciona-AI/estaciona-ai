@@ -18,7 +18,7 @@
 use serde::Deserialize;
 use serde_json::Value;
 use std::{
-    io,
+    io::{self, Write},
     path::{Path, PathBuf},
 };
 
@@ -134,7 +134,56 @@ fn validate_parking_config(payload: &Value) -> io::Result<()> {
 pub fn save_parking_config(directory: &Path, payload: &Value) -> io::Result<()> {
     validate_parking_config(payload)?;
     let content = serde_json::to_string_pretty(payload).map_err(invalid_data)?;
-    std::fs::write(directory.join("config.json"), content)
+    replace_config_file(directory, |file| file.write_all(content.as_bytes()))
+}
+
+// A local-file adapter: the caller owns the destination and write admission.
+// Readers see either complete version; the active file is never truncated.
+fn replace_config_file(
+    directory: &Path,
+    write_content: impl FnOnce(&mut std::fs::File) -> io::Result<()>,
+) -> io::Result<()> {
+    let parent = std::fs::File::open(directory)?;
+    let destination = directory.join("config.json");
+    let permissions = match std::fs::metadata(&destination) {
+        Ok(metadata) => Some(metadata.permissions()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    let path = directory.join(format!(".config-{}.tmp", uuid::Uuid::new_v4()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(&path)?;
+    let mut pending = PendingConfigFile { path, file };
+    write_content(&mut pending.file)?;
+    if let Some(permissions) = permissions {
+        pending.file.set_permissions(permissions)?;
+    }
+    pending.file.sync_all()?;
+    std::fs::rename(&pending.path, destination)?;
+    // A failure here is reported, but replacement has already happened.
+    // It does not justify rolling back a concurrently observed version.
+    parent.sync_all()
+}
+
+struct PendingConfigFile {
+    path: PathBuf,
+    file: std::fs::File,
+}
+
+impl Drop for PendingConfigFile {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_file(&self.path)
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            tracing::warn!(%error, "Failed to clean up temporary configuration file");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -261,6 +310,113 @@ mod tests {
         assert_eq!(
             std::fs::read(fixture.0.join("config.json")).unwrap(),
             original
+        );
+    }
+
+    #[test]
+    fn r10_replacement_preserves_the_previous_file_inode() {
+        let fixture = Fixture::new();
+        fixture.seed();
+        let old_path = fixture.0.join("previous-config.json");
+        std::fs::hard_link(fixture.0.join("config.json"), &old_path).unwrap();
+        let original = std::fs::read(&old_path).unwrap();
+        let payload = serde_json::json!([
+            {"name": "Replacement", "path": [{"x": 0, "z": 0}, {"x": 8, "z": 0}]}
+        ]);
+        save_parking_config(&fixture.0, &payload).unwrap();
+        assert_eq!(std::fs::read(old_path).unwrap(), original);
+        assert_eq!(
+            read_json::<Value>(&fixture.0.join("config.json")).unwrap(),
+            payload
+        );
+    }
+
+    fn assert_no_pending_files(directory: &Path) {
+        assert!(std::fs::read_dir(directory).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")
+        }));
+    }
+
+    #[test]
+    fn r10_partial_write_failure_keeps_config_and_cleans_temporary_file() {
+        let fixture = Fixture::new();
+        fixture.seed();
+        let original = std::fs::read(fixture.0.join("config.json")).unwrap();
+        let result = replace_config_file(&fixture.0, |file| {
+            file.write_all(b"partial json")?;
+            Err(io::Error::other("injected disk write failure"))
+        });
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read(fixture.0.join("config.json")).unwrap(),
+            original
+        );
+        assert_no_pending_files(&fixture.0);
+    }
+
+    #[test]
+    fn r10_readers_keep_complete_config_until_publication() {
+        let fixture = Fixture::new();
+        fixture.seed();
+        let original = std::fs::read(fixture.0.join("config.json")).unwrap();
+        replace_config_file(&fixture.0, |file| {
+            file.write_all(b"[{")?;
+            assert_eq!(std::fs::read(fixture.0.join("config.json"))?, original);
+            file.write_all(b"}]")
+        })
+        .unwrap();
+        assert_eq!(
+            std::fs::read(fixture.0.join("config.json")).unwrap(),
+            b"[{}]"
+        );
+        assert_no_pending_files(&fixture.0);
+    }
+
+    #[test]
+    fn r10_rename_failure_cleans_temporary_file() {
+        let fixture = Fixture::new();
+        std::fs::create_dir(fixture.0.join("config.json")).unwrap();
+        let result = replace_config_file(&fixture.0, |file| file.write_all(b"[]"));
+        assert!(result.is_err());
+        assert!(fixture.0.join("config.json").is_dir());
+        assert_no_pending_files(&fixture.0);
+    }
+
+    #[test]
+    fn r10_writer_panic_keeps_config_and_cleans_temporary_file() {
+        let fixture = Fixture::new();
+        fixture.seed();
+        let original = std::fs::read(fixture.0.join("config.json")).unwrap();
+        let result = std::panic::catch_unwind(|| {
+            let _ = replace_config_file(&fixture.0, |file| {
+                file.write_all(b"partial")?;
+                panic!("injected writer panic");
+            });
+        });
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read(fixture.0.join("config.json")).unwrap(),
+            original
+        );
+        assert_no_pending_files(&fixture.0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r10_atomic_replacement_preserves_existing_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = Fixture::new();
+        fixture.seed();
+        let path = fixture.0.join("config.json");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        replace_config_file(&fixture.0, |file| file.write_all(b"[]")).unwrap();
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o640
         );
     }
 }
