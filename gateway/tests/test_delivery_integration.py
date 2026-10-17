@@ -245,7 +245,10 @@ async def receive_ready(connection):
     }
 
 
-def test_gateway_recovers_a_lost_ack_after_both_processes_restart(server, tmp_path):
+@pytest.mark.parametrize("rotate_credential", [False, True])
+def test_gateway_recovers_a_lost_ack_after_both_processes_restart(
+    server, tmp_path, rotate_credential
+):
     server.query(
         "CREATE TABLE effect_count (updates INTEGER NOT NULL); INSERT INTO effect_count VALUES (0); CREATE FUNCTION count_effect() RETURNS TRIGGER LANGUAGE plpgsql AS $$ BEGIN UPDATE effect_count SET updates = updates + 1; RETURN NEW; END $$; CREATE TRIGGER count_effect BEFORE UPDATE ON spots FOR EACH ROW EXECUTE FUNCTION count_effect();"
     )
@@ -255,13 +258,16 @@ def test_gateway_recovers_a_lost_ack_after_both_processes_restart(server, tmp_pa
     event_id = gateway.save_event(outbox, json.dumps(message("unused")["payload"]))
     gateway.save_metric(metrics, "cam", "R02-A", "occupied", "t0", "t1", "t2", event_id)
     frames, acks = [], []
+    current_key = KEY
 
     async def run():
+        nonlocal current_key
         dropped = asyncio.Event()
 
         async def proxy(client):
             async with websockets.connect(
-                server.url, additional_headers={"Authorization": f"Bearer {KEY}"}
+                server.url,
+                additional_headers={"Authorization": f"Bearer {current_key}"},
             ) as upstream:
                 await client.send(await upstream.recv())
                 frame = await client.recv()
@@ -298,10 +304,18 @@ def test_gateway_recovers_a_lost_ack_after_both_processes_restart(server, tmp_pa
                     with suppress(asyncio.CancelledError):
                         await first
             server.stop()
+            if rotate_credential:
+                current_key = "77" * 32
+                server.query(
+                    "UPDATE edge_gateways SET credential_digest = %s WHERE id = %s",
+                    (hashlib.sha256(current_key.encode()).digest(), server.gateway_id),
+                )
             server.start()
             gateway.init_db(outbox)
             second = asyncio.create_task(
-                gateway.sync_loop(outbox, metrics, proxy_url, KEY, asyncio.Event())
+                gateway.sync_loop(
+                    outbox, metrics, proxy_url, current_key, asyncio.Event()
+                )
             )
             try:
                 await until(lambda: not gateway.pending_deliveries(outbox))

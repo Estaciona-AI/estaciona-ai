@@ -528,3 +528,98 @@ async fn health_and_edge_websocket_remain_responsive_while_kdf_is_busy(pool: PgP
     assert_eq!(server.edge_handshake_status().await, 101);
     held.finish().await;
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn cancelled_kdf_caller_keeps_auth_bounded_while_edge_delivery_progresses(pool: PgPool) {
+    let state = fixture(pool.clone());
+    let initial = users::create_user(State(state.clone()), Json(registration()))
+        .await
+        .into_response();
+    assert_eq!(initial.status(), StatusCode::CREATED);
+    let gateway_id = Uuid::new_v4();
+    let credential = "ab".repeat(32);
+    sqlx::query("INSERT INTO edge_gateways (id,name,credential_digest) VALUES ($1,'p1',$2)")
+        .bind(gateway_id)
+        .bind(crate::edge_auth::credential_digest(&credential).to_vec())
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO spots (id,status,x,y) VALUES ('p1-slot','free',0,0)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO edge_camera_grants (gateway_id,camera_id,spot_update) VALUES ($1,'p1-camera',true)")
+        .bind(gateway_id).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO edge_camera_spots (gateway_id,camera_id,spot_id) VALUES ($1,'p1-camera','p1-slot')")
+        .bind(gateway_id).execute(&pool).await.unwrap();
+    let principal = crate::edge_auth::authenticate(&pool, &credential)
+        .await
+        .unwrap()
+        .unwrap();
+    let server = HttpServer::start(state.clone()).await;
+    let held = HeldKdf::start(state.clone()).await;
+    held.task.abort();
+    for _ in 0..3 {
+        let response = auth::login_dashboard(
+            State(state.clone()),
+            Json(LoginRequest {
+                email: "fixture@example.invalid".to_owned(),
+                password: "fixture-password".to_owned(),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(response.headers().contains_key(header::RETRY_AFTER));
+    }
+    let response = server
+        .exchange(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await;
+    assert_eq!(response_status(&response), 200);
+    let delivered = tokio::time::timeout(
+        Duration::from_secs(2),
+        crate::edge_delivery::apply(
+            &pool,
+            &principal,
+            Uuid::new_v4(),
+            serde_json::json!({
+                "type":"SPOT_UPDATE", "camera_id":"p1-camera", "spot_id":"p1-slot",
+                "status":"occupied", "confidence":0.9, "timestamp":"2026-10-17T12:00:00Z"
+            }),
+        ),
+    )
+    .await
+    .expect("edge ingestion is independent of KDF saturation")
+    .unwrap();
+    assert_eq!(
+        delivered.ack.outcome,
+        crate::edge_delivery::Outcome::Applied
+    );
+    let status: String = sqlx::query_scalar("SELECT status FROM spots WHERE id = 'p1-slot'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "occupied");
+    held.release.send(()).unwrap();
+    assert!(held.task.await.unwrap_err().is_cancelled());
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let response = auth::login_dashboard(
+                State(state.clone()),
+                Json(LoginRequest {
+                    email: "fixture@example.invalid".to_owned(),
+                    password: "fixture-password".to_owned(),
+                }),
+            )
+            .await
+            .into_response();
+            if response.status() == StatusCode::OK {
+                break;
+            }
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("login recovers when blocking work releases its slot");
+}
