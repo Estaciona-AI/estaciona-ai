@@ -93,7 +93,13 @@ async fn handle_app_socket(socket: WebSocket, state: SharedState, session: AuthS
         let db_spots = sqlx::query!("SELECT id, status FROM spots WHERE is_active")
             .fetch_all(&state.pool)
             .await
-            .unwrap_or_default();
+            .map_err(|error| {
+                tracing::error!(%error, "WebSocket snapshot query failed");
+                (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    "Snapshot unavailable".to_owned(),
+                )
+            })?;
         for row in db_spots {
             session.check_expiration()?;
             let msg = ServerToAppMsg::SpotUpdate {
@@ -267,7 +273,13 @@ async fn handle_dashboard_socket(socket: WebSocket, state: SharedState, session:
         let db_spots = sqlx::query!("SELECT id, status FROM spots WHERE is_active")
             .fetch_all(&state.pool)
             .await
-            .unwrap_or_default();
+            .map_err(|error| {
+                tracing::error!(%error, "WebSocket snapshot query failed");
+                (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    "Snapshot unavailable".to_owned(),
+                )
+            })?;
         for row in db_spots {
             session.check_expiration()?;
             let msg = ServerToAppMsg::SpotUpdate {

@@ -625,3 +625,23 @@ def test_older_socket_does_not_remove_the_newer_private_channel(server, terminat
                     }
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("endpoint,role", [("app", "user"), ("dashboard", "admin")])
+def test_r09_snapshot_database_failure_closes_instead_of_serving_empty_state(
+    server, endpoint, role
+):
+    user_id = insert_user(server, role)
+    signed = token(user_id, role, int(time.time()) + 60)
+    server.query("ALTER TABLE spots RENAME TO r09_unavailable_spots")
+
+    async def run():
+        async with websockets.connect(
+            websocket_url(server, endpoint, user_id, signed), close_timeout=0.5
+        ) as connection:
+            await asyncio.wait_for(connection.wait_closed(), timeout=2)
+
+    try:
+        asyncio.run(run())
+    finally:
+        server.query("ALTER TABLE r09_unavailable_spots RENAME TO spots")
