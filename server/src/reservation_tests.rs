@@ -61,7 +61,9 @@ impl Fixture {
             jwt_secret: "r01-disposable-jwt-secret".to_owned(),
             plate_pepper: "r01-disposable-plate-pepper".to_owned(),
             last_trend_prediction: Mutex::new(None),
-            site_data_dir: std::env::temp_dir().join(format!("r01-reservation-{owner}")),
+            config_store: crate::config_store::LocalConfigStore::new(
+                std::env::temp_dir().join(format!("r01-reservation-{owner}")),
+            ),
         });
 
         Ok(Self {

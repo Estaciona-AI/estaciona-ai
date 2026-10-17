@@ -19,6 +19,7 @@ mod auth;
 mod auth_limits;
 #[cfg(test)]
 mod auth_resource_tests;
+mod config_store;
 mod edge_auth;
 mod edge_cli;
 mod edge_delivery;
@@ -251,13 +252,25 @@ async fn save_config(
     axum::Json(payload): axum::Json<serde_json::Value>,
 ) -> Result<&'static str, (axum::http::StatusCode, String)> {
     crate::security::require_admin(&headers, &state.jwt_secret, &state.pool).await?;
-    site_config::save_parking_config(&state.site_data_dir, &payload).map_err(|error| {
-        let status = if error.kind() == std::io::ErrorKind::InvalidData {
-            StatusCode::BAD_REQUEST
-        } else {
-            StatusCode::INTERNAL_SERVER_ERROR
+    state.config_store.save(payload).await.map_err(|error| {
+        let error = match error {
+            config_store::ConfigWriteError::Busy => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Configuration write already in progress".to_owned(),
+                );
+            }
+            config_store::ConfigWriteError::Storage(error) => error,
         };
-        (status, error.to_string())
+        if error.kind() == std::io::ErrorKind::InvalidData {
+            (StatusCode::BAD_REQUEST, error.to_string())
+        } else {
+            tracing::error!(%error, "Failed to persist parking configuration");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to save configuration".to_owned(),
+            )
+        }
     })?;
 
     Ok(r#"{"status": "ok"}"#)
