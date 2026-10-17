@@ -86,12 +86,18 @@ pub async fn update_spot_status(
         return Err((StatusCode::BAD_REQUEST, "Invalid status".to_string()));
     }
 
-    sqlx::query!(
-        "UPDATE spots SET status = $1, last_updated = NOW() WHERE id = $2",
+    let mut tx = state.pool.begin().await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Database error".to_owned(),
+        )
+    })?;
+    let changed = sqlx::query!(
+        "UPDATE spots SET status = $1, last_updated = NOW() WHERE id = $2 AND is_active",
         payload.status,
         id
     )
-    .execute(&state.pool)
+    .execute(&mut *tx)
     .await
     .map_err(|e| {
         tracing::error!("Error while update spot status: {}", e);
@@ -101,13 +107,17 @@ pub async fn update_spot_status(
         )
     })?;
 
+    if changed.rows_affected() == 0 {
+        return Err((StatusCode::NOT_FOUND, "Active spot not found".into()));
+    }
+
     if payload.status == "free" {
         sqlx::query(
             "UPDATE user_occupancy_history SET released_at = NOW() \
              WHERE spot_id = $1 AND released_at IS NULL",
         )
         .bind(&id)
-        .execute(&state.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|_| {
             (
@@ -116,6 +126,13 @@ pub async fn update_spot_status(
             )
         })?;
     }
+
+    tx.commit().await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Database error".to_owned(),
+        )
+    })?;
 
     let update_msg = ServerToAppMsg::SpotUpdate {
         spot_id: id,
@@ -372,7 +389,7 @@ pub async fn recommend_spot(
         )
         SELECT s.id 
         FROM spots s, user_data u
-        WHERE s.status = 'free'
+        WHERE s.status = 'free' AND s.is_active
           AND (
               (u.pcd_status = true AND s.id IN ('A-01', 'A-02'))
               OR 
@@ -415,7 +432,7 @@ pub async fn recommend_spot(
             FROM user_occupancy_history h 
             JOIN spots s ON s.id = h.spot_id
             WHERE h.user_id = $1 
-              AND s.status = 'free' 
+              AND s.status = 'free' AND s.is_active
               AND s.id NOT IN ('A-01', 'A-02', 'A-03', 'A-04')
             GROUP BY h.spot_id
             ORDER BY uses DESC
@@ -444,7 +461,7 @@ pub async fn recommend_spot(
         r#"
         SELECT id 
         FROM spots 
-        WHERE status = 'free' 
+        WHERE status = 'free' AND is_active
           AND id NOT IN ('A-01', 'A-02', 'A-03', 'A-04')
         "#
     )

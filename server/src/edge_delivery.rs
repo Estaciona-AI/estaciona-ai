@@ -84,14 +84,16 @@ async fn observe(
         observation.reason = Some("low_confidence".to_owned());
         return Ok(observation);
     }
-    let current =
-        sqlx::query_scalar::<_, String>("SELECT status FROM spots WHERE id = $1 FOR NO KEY UPDATE")
-            .bind(spot_id)
-            .fetch_optional(&mut **tx)
-            .await?;
+    let current = sqlx::query_as::<_, (String, bool)>(
+        "SELECT status, is_active FROM spots WHERE id = $1 FOR NO KEY UPDATE",
+    )
+    .bind(spot_id)
+    .fetch_optional(&mut **tx)
+    .await?;
     match current {
         None => observation.reason = Some("unknown_spot".to_owned()),
-        Some(current) if current == "reserved" && status == "free" => {
+        Some((_, false)) => observation.reason = Some("inactive_spot".to_owned()),
+        Some((current, true)) if current == "reserved" && status == "free" => {
             observation.outcome = Outcome::Ignored;
             observation.reason = Some("reservation_protected".to_owned());
         }
@@ -852,7 +854,7 @@ mod tests {
             )
             .await
         });
-        wait_for_blocked_query(&pool, "SELECT status FROM spots").await?;
+        wait_for_blocked_query(&pool, "SELECT status, is_active FROM spots").await?;
         let revocation_pool = pool.clone();
         let gateway_id = principal.gateway_id;
         let revocation = tokio::spawn(async move {
@@ -1322,7 +1324,7 @@ mod tests {
         let delivery = tokio::spawn(async move {
             apply(&worker_pool, &worker_principal, event_id, worker_frame).await
         });
-        wait_for_blocked_query(&pool, "SELECT status FROM spots").await?;
+        wait_for_blocked_query(&pool, "SELECT status, is_active FROM spots").await?;
         let policy_pool = pool.clone();
         let gateway_id = principal.gateway_id;
         let policy_path = std::env::temp_dir().join(format!("p1-policy-{}.json", Uuid::new_v4()));
@@ -1387,7 +1389,7 @@ mod tests {
             tokio::spawn(
                 async move { apply(&worker_pool, &principal, Uuid::new_v4(), frame).await },
             );
-        wait_for_blocked_query(&pool, "SELECT status FROM spots").await?;
+        wait_for_blocked_query(&pool, "SELECT status, is_active FROM spots").await?;
         assert!(!delivery.is_finished());
         tx.commit().await?;
         let observed = tokio::time::timeout(std::time::Duration::from_secs(3), delivery)
@@ -1407,6 +1409,33 @@ mod tests {
                 .fetch_one(&pool)
                 .await?;
         assert_eq!(claim, (owner, "active".to_owned()));
+        Ok(())
+    }
+    #[sqlx::test(migrations = "./migrations")]
+    async fn retired_spot_rejects_new_observations_but_preserves_historical_ack(
+        pool: PgPool,
+    ) -> TestResult {
+        let principal = principal(&pool).await?;
+        let spot_id = authorized_spot(&pool, &principal, "free").await?;
+        let event_id = Uuid::new_v4();
+        let frame = payload(&spot_id, "occupied");
+        let first = apply(&pool, &principal, event_id, frame.clone()).await?;
+        assert_eq!(first.ack.outcome, Outcome::Applied);
+        sqlx::query("UPDATE spots SET is_active=FALSE WHERE id=$1")
+            .bind(&spot_id)
+            .execute(&pool)
+            .await?;
+        let replay = apply(&pool, &principal, event_id, frame).await?;
+        assert_eq!(replay.ack.outcome, Outcome::Applied);
+        assert!(replay.ack.duplicate);
+        assert!(replay.spot_update.is_none());
+        let fresh = apply(&pool, &principal, Uuid::new_v4(), payload(&spot_id, "free")).await?;
+        assert_eq!(fresh.ack.outcome, Outcome::Rejected);
+        assert_eq!(fresh.ack.reason.as_deref(), Some("inactive_spot"));
+        let legacy = apply_legacy(&pool, &principal, "test-camera", &spot_id, "free", 1.0).await?;
+        assert_eq!(legacy.reason.as_deref(), Some("inactive_spot"));
+        assert!(legacy.spot_update.is_none());
+        assert_eq!(status(&pool, &spot_id).await?, "occupied");
         Ok(())
     }
 }
