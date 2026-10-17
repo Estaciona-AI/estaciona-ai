@@ -538,3 +538,180 @@ async fn historical_recommendation_excludes_retired_spots(pool: PgPool) {
 async fn closest_recommendation_excludes_retired_spots(pool: PgPool) {
     assert_recommendation_ignores_retired(pool, "closest").await;
 }
+
+async fn recommendation_fixture(pool: PgPool) -> Fixture {
+    let f = Fixture::new(pool).await.unwrap();
+    let mut graph = ParkingGraph::new();
+    let camera = graph.add_node("cam-01", 0.0, 0.0);
+    let spot = graph.add_node(&f.spot_id, 1.0, 0.0);
+    graph.add_edge(camera, spot, 1, true);
+    *f.state.graph.write().await = graph;
+    f
+}
+
+async fn recommendation_response(f: &Fixture) -> Response {
+    reservations::recommend_spot(
+        State(f.state.clone()),
+        f.headers(f.owner, "user"),
+        axum::extract::Query(reservations::RecommendQuery { user_id: f.owner }),
+    )
+    .await
+    .into_response()
+}
+
+async fn assert_recommendation_unavailable(f: &Fixture) {
+    let mut updates = f.state.tx.subscribe();
+    let response = recommendation_response(f).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = to_bytes(response.into_body(), 16384).await.unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    for internal_detail in [
+        "injected",
+        "SELECT",
+        "Lotado",
+        "pcd_status",
+        "user_occupancy_history",
+        "r08_",
+    ] {
+        assert!(
+            !text.contains(internal_detail),
+            "database details must stay private: {text}"
+        );
+    }
+    assert_eq!(f.spot_status().await.unwrap(), "free");
+    assert_eq!(f.active_count().await.unwrap(), 0);
+    assert!(updates.try_recv().is_err());
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn r08_priority_query_failure_does_not_fall_back_to_an_ordinary_spot(pool: PgPool) {
+    let f = recommendation_fixture(pool).await;
+    // Break the priority query at prepare time, while the role lookup still works.
+    sqlx::query("ALTER TABLE users RENAME COLUMN pcd_status TO r08_unavailable")
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    assert_recommendation_unavailable(&f).await;
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn r08_history_count_failure_does_not_fall_back_to_the_closest_spot(pool: PgPool) {
+    let f = recommendation_fixture(pool).await;
+    sqlx::query("ALTER TABLE user_occupancy_history RENAME TO r08_unavailable")
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    assert_recommendation_unavailable(&f).await;
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn r08_favorite_lookup_failure_does_not_fall_back_to_the_closest_spot(pool: PgPool) {
+    let f = recommendation_fixture(pool).await;
+    for _ in 0..3 {
+        sqlx::query("INSERT INTO user_occupancy_history (user_id,spot_id) VALUES ($1,$2)")
+            .bind(f.owner)
+            .bind(&f.spot_id)
+            .execute(&f.state.pool)
+            .await
+            .unwrap();
+    }
+    // COUNT(*) still works; only the subsequent favorite lookup loses its column.
+    sqlx::query("ALTER TABLE user_occupancy_history RENAME COLUMN spot_id TO r08_unavailable")
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    assert_recommendation_unavailable(&f).await;
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn r08_free_spots_query_failure_is_unavailable_instead_of_full(pool: PgPool) {
+    let f = recommendation_fixture(pool).await;
+    // Earlier priority reads and later verification reads must remain healthy.
+    // Inject only the final ordinary-spots SELECT, using a disposable SQL view.
+    sqlx::raw_sql(
+        "ALTER TABLE spots RENAME TO r08_original_spots;
+         CREATE FUNCTION r08_free_read_allowed() RETURNS BOOLEAN
+         LANGUAGE plpgsql VOLATILE AS $$ BEGIN
+             IF strpos(current_query(), 'AND id NOT IN') > 0 THEN
+                 RAISE EXCEPTION 'injected R08 free spots failure';
+             END IF;
+             RETURN TRUE;
+         END $$;
+         CREATE VIEW spots AS SELECT * FROM r08_original_spots
+         WHERE r08_free_read_allowed();",
+    )
+    .execute(&f.state.pool)
+    .await
+    .unwrap();
+    assert_recommendation_unavailable(&f).await;
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn r08_successful_empty_lookup_still_reports_full(pool: PgPool) {
+    let f = recommendation_fixture(pool).await;
+    sqlx::query("UPDATE spots SET status='occupied'")
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    let response = recommendation_response(&f).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = to_bytes(response.into_body(), 16384).await.unwrap();
+    assert_eq!(body.as_ref(), "Estacionamento Lotado".as_bytes());
+}
+
+async fn assert_recommended_spot(f: &Fixture, expected: &str) {
+    let response = recommendation_response(f).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 16384).await.unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["recommended_spot"], expected);
+    assert_eq!(value["route"], serde_json::json!(["cam-01", expected]));
+}
+
+async fn add_preferred_spot(f: &Fixture, spot_id: &str) {
+    sqlx::query("INSERT INTO spots (id,status,x,y) VALUES ($1,'free',10,0)")
+        .bind(spot_id)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    let mut graph = ParkingGraph::new();
+    let camera = graph.add_node("cam-01", 0.0, 0.0);
+    let ordinary = graph.add_node(&f.spot_id, 1.0, 0.0);
+    let preferred = graph.add_node(spot_id, 10.0, 0.0);
+    graph.add_edge(camera, ordinary, 1, true);
+    graph.add_edge(camera, preferred, 10, true);
+    *f.state.graph.write().await = graph;
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn r08_valid_priority_still_takes_precedence_over_distance(pool: PgPool) {
+    let f = recommendation_fixture(pool).await;
+    add_preferred_spot(&f, "A-01").await;
+    sqlx::query("UPDATE users SET pcd_status=TRUE WHERE id=$1")
+        .bind(f.owner)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    assert_recommended_spot(&f, "A-01").await;
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn r08_valid_history_still_takes_precedence_over_distance(pool: PgPool) {
+    let f = recommendation_fixture(pool).await;
+    add_preferred_spot(&f, "B-07").await;
+    for _ in 0..3 {
+        sqlx::query("INSERT INTO user_occupancy_history (user_id,spot_id) VALUES ($1,'B-07')")
+            .bind(f.owner)
+            .execute(&f.state.pool)
+            .await
+            .unwrap();
+    }
+    assert_recommended_spot(&f, "B-07").await;
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn r08_valid_empty_history_still_uses_distance(pool: PgPool) {
+    let f = recommendation_fixture(pool).await;
+    add_preferred_spot(&f, "B-07").await;
+    assert_recommended_spot(&f, "R01-01").await;
+}
