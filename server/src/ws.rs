@@ -117,15 +117,11 @@ async fn handle_app_socket(socket: WebSocket, state: SharedState, session: AuthS
 
         loop {
             tokio::select! {
-                received = broadcast_rx.recv() => match received {
-                    Ok(broadcast_msg) => {
-                        session.check_expiration()?;
-                        if write_message(&mut sender, Message::Text(broadcast_msg.into())).await.is_err() {
-                            break;
-                        }
+                received = broadcast_rx.recv() => {
+                    session.check_expiration()?;
+                    if write_broadcast(&mut sender, received).await.is_err() {
+                        break;
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 },
                 Some(private_msg) = private_rx.recv() => {
                     session.check_expiration()?;
@@ -311,18 +307,10 @@ async fn handle_dashboard_socket(socket: WebSocket, state: SharedState, session:
         }
 
         loop {
-            match broadcast_rx.recv().await {
-                Ok(broadcast_msg) => {
-                    session.check_expiration()?;
-                    if write_message(&mut sender, Message::Text(broadcast_msg.into()))
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            let received = broadcast_rx.recv().await;
+            session.check_expiration()?;
+            if write_broadcast(&mut sender, received).await.is_err() {
+                break;
             }
         }
         Ok::<(), AuthError>(())
@@ -352,6 +340,8 @@ async fn handle_dashboard_socket(socket: WebSocket, state: SharedState, session:
 enum WriteError {
     Timeout,
     Transport,
+    Lagged,
+    Closed,
 }
 
 async fn write_message<S>(sink: &mut S, message: Message) -> Result<(), WriteError>
@@ -365,6 +355,26 @@ where
             tracing::warn!("Closing WebSocket after write timeout");
             Err(WriteError::Timeout)
         }
+    }
+}
+
+async fn write_broadcast<S>(
+    sink: &mut S,
+    received: Result<String, tokio::sync::broadcast::error::RecvError>,
+) -> Result<(), WriteError>
+where
+    S: futures_util::Sink<Message> + Unpin,
+{
+    match received {
+        Ok(message) => write_message(sink, Message::Text(message.into())).await,
+        Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+            tracing::warn!(
+                missed,
+                "Closing lagged WebSocket; reconnect for a fresh snapshot"
+            );
+            Err(WriteError::Lagged)
+        }
+        Err(tokio::sync::broadcast::error::RecvError::Closed) => Err(WriteError::Closed),
     }
 }
 
@@ -408,6 +418,43 @@ mod delivery_tests {
         fn poll_close(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
             Poll::Ready(Ok(()))
         }
+    }
+
+    #[tokio::test]
+    async fn r09_lagged_broadcast_requires_reconnection_instead_of_continuing() {
+        let (updates, mut receiver) = tokio::sync::broadcast::channel(2);
+        for message in ["old", "middle", "latest"] {
+            updates.send(message.to_owned()).unwrap();
+        }
+        let mut sink = TestSink {
+            blocked_before_send: false,
+            blocked_on_flush: false,
+            messages: vec![],
+        };
+        assert_eq!(
+            write_broadcast(&mut sink, receiver.recv().await).await,
+            Err(WriteError::Lagged)
+        );
+        assert!(
+            sink.messages.is_empty(),
+            "a partial stream is not a valid snapshot"
+        );
+    }
+
+    #[tokio::test]
+    async fn r09_closed_broadcast_ends_delivery_without_spinning() {
+        let (updates, mut receiver) = tokio::sync::broadcast::channel::<String>(2);
+        drop(updates);
+        let mut sink = TestSink {
+            blocked_before_send: false,
+            blocked_on_flush: false,
+            messages: vec![],
+        };
+        assert_eq!(
+            write_broadcast(&mut sink, receiver.recv().await).await,
+            Err(WriteError::Closed)
+        );
+        assert!(sink.messages.is_empty());
     }
 
     async fn assert_write_times_out(blocked_before_send: bool) {
