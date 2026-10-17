@@ -795,3 +795,88 @@ def test_trend_requires_explicit_permission_to_broadcast_and_cache(server):
             )
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "failure", ["blocked", "unknown_camera", "missing_destination"]
+)
+def test_reserved_arrival_reports_unavailable_without_replacing_reservation(
+    server, failure
+):
+    user_id = car_user(server)
+    reservation_id = str(uuid4())
+    server.query(
+        "INSERT INTO reservations (id,user_id,spot_id,expires_at) "
+        "VALUES (%s,%s,'R02-A',NOW()+INTERVAL '15 minutes')",
+        (reservation_id, str(user_id)),
+    )
+    server.query("UPDATE spots SET status='reserved' WHERE id='R02-A'")
+    server.query(
+        "UPDATE edge_gateways SET path_update=TRUE WHERE id=%s", (server.gateway_id,)
+    )
+    event = car_detected()
+    if failure == "unknown_camera":
+        event["camera_id"] = "authorized-but-unmapped"
+        server.query(
+            "INSERT INTO edge_camera_grants (gateway_id,camera_id,car_detected) VALUES (%s,%s,TRUE)",
+            (server.gateway_id, event["camera_id"]),
+        )
+    if failure == "missing_destination":
+        server.stop()
+        (server.root / "site" / "spots_3d.json").write_text("[]")
+        server.start()
+    app_url = websocket_url(
+        server, "app", user_id, token(user_id, "user", int(time.time()) + 60)
+    )
+
+    async def run():
+        async with (
+            websockets.connect(app_url, close_timeout=0.5) as app,
+            edge_connection(server) as edge,
+        ):
+            assert json.loads(await asyncio.wait_for(app.recv(), timeout=3)) == {
+                "type": "SPOT_UPDATE",
+                "spot_id": "R02-A",
+                "status": "reserved",
+            }
+            await receive_ready(edge)
+            if failure == "blocked":
+                await edge.send(
+                    json.dumps(
+                        {
+                            "type": "PATH_UPDATE",
+                            "from_node": "cam-01",
+                            "to_node": "path_node_1",
+                            "is_active": False,
+                        }
+                    )
+                )
+            await edge.send(json.dumps(event))
+            assert json.loads(await asyncio.wait_for(app.recv(), timeout=3)) == {
+                "type": "NAVIGATION_UNAVAILABLE",
+                "spot_id": "R02-A",
+                "reason": "route_unavailable",
+            }
+            # A subsequent ACK proves the edge processed the preceding arrival.
+            assert (await deliver(edge, confidence=0.0))["outcome"] == "ignored"
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(app.recv(), timeout=0.15)
+            if failure == "blocked":
+                await edge.send(
+                    json.dumps(
+                        {
+                            "type": "PATH_UPDATE",
+                            "from_node": "cam-01",
+                            "to_node": "path_node_1",
+                            "is_active": True,
+                        }
+                    )
+                )
+                await edge.send(json.dumps(event))
+                await receive_navigation(app, reservation_created=False)
+
+    asyncio.run(run())
+    assert server.query(
+        "SELECT id::text,user_id::text,spot_id,status FROM reservations"
+    ) == [(reservation_id, str(user_id), "R02-A", "active")]
+    assert server.query("SELECT status FROM spots WHERE id='R02-A'") == [("reserved",)]
