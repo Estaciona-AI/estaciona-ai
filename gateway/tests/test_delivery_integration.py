@@ -70,6 +70,7 @@ class Server:
             "DATABASE_URL": db_url,
             "SITE_DATA_DIR": str(site),
             "JWT_SECRET": "disposable-jwt",
+            "LPR_ENABLED": "false",
             "PLATE_SECRET_PEPPER": "disposable-pepper",
         }
         self.environment.pop("EDGE_API_KEY", None)
@@ -105,6 +106,8 @@ class Server:
                 f"DATABASE_URL={database_url}",
                 "--env",
                 "SITE_DATA_DIR=/site",
+                "--env",
+                f"LPR_ENABLED={self.environment['LPR_ENABLED']}",
                 "--env",
                 "JWT_SECRET=disposable-jwt",
                 "--env",
