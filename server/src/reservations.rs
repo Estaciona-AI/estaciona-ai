@@ -453,7 +453,13 @@ pub async fn recommend_spot(
     )
     .fetch_one(&state.pool)
     .await
-    .unwrap_or(Some(0))
+    .map_err(|source| {
+        RecommendationQueryError {
+            query: "history_count",
+            source,
+        }
+        .into_http_error()
+    })?
     .unwrap_or(0);
 
     if history_count >= 3 {
@@ -473,7 +479,13 @@ pub async fn recommend_spot(
         )
         .fetch_optional(&state.pool)
         .await
-        .unwrap_or(None);
+        .map_err(|source| {
+            RecommendationQueryError {
+                query: "favorite",
+                source,
+            }
+            .into_http_error()
+        })?;
 
         if let Some(fav) = favorite_spot {
             let graph = state.graph.read().await;

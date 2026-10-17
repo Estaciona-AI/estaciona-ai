@@ -565,12 +565,19 @@ async fn assert_recommendation_unavailable(f: &Fixture) {
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let body = to_bytes(response.into_body(), 16384).await.unwrap();
     let text = String::from_utf8(body.to_vec()).unwrap();
-    assert!(
-        !text.contains("injected"),
-        "database details must stay private"
-    );
-    assert!(!text.contains("SELECT"));
-    assert!(!text.contains("Lotado"));
+    for internal_detail in [
+        "injected",
+        "SELECT",
+        "Lotado",
+        "pcd_status",
+        "user_occupancy_history",
+        "r08_",
+    ] {
+        assert!(
+            !text.contains(internal_detail),
+            "database details must stay private: {text}"
+        );
+    }
     assert_eq!(f.spot_status().await.unwrap(), "free");
     assert_eq!(f.active_count().await.unwrap(), 0);
     assert!(updates.try_recv().is_err());
@@ -581,6 +588,35 @@ async fn r08_priority_query_failure_does_not_fall_back_to_an_ordinary_spot(pool:
     let f = recommendation_fixture(pool).await;
     // Break the priority query at prepare time, while the role lookup still works.
     sqlx::query("ALTER TABLE users RENAME COLUMN pcd_status TO r08_unavailable")
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    assert_recommendation_unavailable(&f).await;
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn r08_history_count_failure_does_not_fall_back_to_the_closest_spot(pool: PgPool) {
+    let f = recommendation_fixture(pool).await;
+    sqlx::query("ALTER TABLE user_occupancy_history RENAME TO r08_unavailable")
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    assert_recommendation_unavailable(&f).await;
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn r08_favorite_lookup_failure_does_not_fall_back_to_the_closest_spot(pool: PgPool) {
+    let f = recommendation_fixture(pool).await;
+    for _ in 0..3 {
+        sqlx::query("INSERT INTO user_occupancy_history (user_id,spot_id) VALUES ($1,$2)")
+            .bind(f.owner)
+            .bind(&f.spot_id)
+            .execute(&f.state.pool)
+            .await
+            .unwrap();
+    }
+    // COUNT(*) still works; only the subsequent favorite lookup loses its column.
+    sqlx::query("ALTER TABLE user_occupancy_history RENAME COLUMN spot_id TO r08_unavailable")
         .execute(&f.state.pool)
         .await
         .unwrap();
