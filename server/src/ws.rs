@@ -101,7 +101,9 @@ async fn handle_app_socket(socket: WebSocket, state: SharedState, session: AuthS
                 status: row.status,
             };
             if let Ok(json_str) = serde_json::to_string(&msg)
-                && sender.send(Message::Text(json_str.into())).await.is_err()
+                && write_message(&mut sender, Message::Text(json_str.into()))
+                    .await
+                    .is_err()
             {
                 return Ok::<(), AuthError>(());
             }
@@ -112,7 +114,7 @@ async fn handle_app_socket(socket: WebSocket, state: SharedState, session: AuthS
                 received = broadcast_rx.recv() => match received {
                     Ok(broadcast_msg) => {
                         session.check_expiration()?;
-                        if sender.send(Message::Text(broadcast_msg.into())).await.is_err() {
+                        if write_message(&mut sender, Message::Text(broadcast_msg.into())).await.is_err() {
                             break;
                         }
                     }
@@ -121,7 +123,7 @@ async fn handle_app_socket(socket: WebSocket, state: SharedState, session: AuthS
                 },
                 Some(private_msg) = private_rx.recv() => {
                     session.check_expiration()?;
-                    if sender.send(Message::Text(private_msg.into())).await.is_err() {
+                    if write_message(&mut sender, Message::Text(private_msg.into())).await.is_err() {
                         break;
                     }
                 }
@@ -273,7 +275,9 @@ async fn handle_dashboard_socket(socket: WebSocket, state: SharedState, session:
                 status: row.status,
             };
             if let Ok(json_str) = serde_json::to_string(&msg)
-                && sender.send(Message::Text(json_str.into())).await.is_err()
+                && write_message(&mut sender, Message::Text(json_str.into()))
+                    .await
+                    .is_err()
             {
                 return Ok::<(), AuthError>(());
             }
@@ -286,7 +290,10 @@ async fn handle_dashboard_socket(socket: WebSocket, state: SharedState, session:
             .and_then(|c| c.clone());
         if let Some(json_str) = cached_trend {
             session.check_expiration()?;
-            if sender.send(Message::Text(json_str.into())).await.is_err() {
+            if write_message(&mut sender, Message::Text(json_str.into()))
+                .await
+                .is_err()
+            {
                 return Ok::<(), AuthError>(());
             }
         }
@@ -295,8 +302,7 @@ async fn handle_dashboard_socket(socket: WebSocket, state: SharedState, session:
             match broadcast_rx.recv().await {
                 Ok(broadcast_msg) => {
                     session.check_expiration()?;
-                    if sender
-                        .send(Message::Text(broadcast_msg.into()))
+                    if write_message(&mut sender, Message::Text(broadcast_msg.into()))
                         .await
                         .is_err()
                     {
@@ -328,4 +334,123 @@ async fn handle_dashboard_socket(socket: WebSocket, state: SharedState, session:
         tracing::debug!(user_id = %session.user_id, "Closing invalid dashboard WebSocket session");
     }
     // Never flush an interrupted data send while invalidating authentication.
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum WriteError {
+    Timeout,
+    Transport,
+}
+
+async fn write_message<S>(sink: &mut S, message: Message) -> Result<(), WriteError>
+where
+    S: futures_util::Sink<Message> + Unpin,
+{
+    match tokio::time::timeout(std::time::Duration::from_secs(5), sink.send(message)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_)) => Err(WriteError::Transport),
+        Err(_) => {
+            tracing::warn!("Closing WebSocket after write timeout");
+            Err(WriteError::Timeout)
+        }
+    }
+}
+
+#[cfg(test)]
+mod delivery_tests {
+    use super::*;
+    use futures_util::Sink;
+    use std::{
+        pin::Pin,
+        task::{Context, Poll},
+        time::{Duration, Instant},
+    };
+
+    struct TestSink {
+        blocked_before_send: bool,
+        blocked_on_flush: bool,
+        messages: Vec<Message>,
+    }
+
+    impl Sink<Message> for TestSink {
+        type Error = std::io::Error;
+
+        fn poll_ready(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            if self.blocked_before_send {
+                Poll::Pending
+            } else {
+                Poll::Ready(Ok(()))
+            }
+        }
+        fn start_send(mut self: Pin<&mut Self>, message: Message) -> Result<(), Self::Error> {
+            self.messages.push(message);
+            Ok(())
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            if self.blocked_on_flush {
+                Poll::Pending
+            } else {
+                Poll::Ready(Ok(()))
+            }
+        }
+        fn poll_close(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    async fn assert_write_times_out(blocked_before_send: bool) {
+        let mut sink = TestSink {
+            blocked_before_send,
+            blocked_on_flush: !blocked_before_send,
+            messages: vec![],
+        };
+        let start = Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(7),
+            write_message(&mut sink, Message::Text("pending".into())),
+        )
+        .await;
+        assert_eq!(result.unwrap(), Err(WriteError::Timeout));
+        assert!(start.elapsed() >= Duration::from_millis(4900));
+    }
+
+    #[tokio::test]
+    async fn r09_write_timeout_covers_readiness() {
+        assert_write_times_out(true).await;
+    }
+
+    #[tokio::test]
+    async fn r09_write_timeout_covers_flush() {
+        assert_write_times_out(false).await;
+    }
+
+    #[tokio::test]
+    async fn r09_transport_write_can_be_canceled_before_its_timeout() {
+        let mut sink = TestSink {
+            blocked_before_send: true,
+            blocked_on_flush: false,
+            messages: vec![],
+        };
+        // The authentication supervisor must remain able to cancel a blocked send.
+        let result = tokio::time::timeout(
+            Duration::from_millis(20),
+            write_message(&mut sink, Message::Text("protected".into())),
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(sink.messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn r09_healthy_transport_delivers_normally() {
+        let mut sink = TestSink {
+            blocked_before_send: false,
+            blocked_on_flush: false,
+            messages: vec![],
+        };
+        write_message(&mut sink, Message::Text("delivered".into()))
+            .await
+            .unwrap();
+        assert_eq!(sink.messages, [Message::Text("delivered".into())]);
+    }
 }
