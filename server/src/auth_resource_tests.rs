@@ -280,7 +280,7 @@ impl HeldKdf {
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn known_email_and_plate_conflicts_bypass_a_busy_kdf(
+async fn known_email_conflicts_bypass_kdf_while_plate_claims_obey_capacity(
     pool: PgPool,
 ) -> Result<(), sqlx::Error> {
     let state = fixture(pool.clone());
@@ -304,7 +304,14 @@ async fn known_email_and_plate_conflicts_bypass_a_busy_kdf(
         .await
         .expect("preflight must not wait for the KDF slot")
         .into_response();
-        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response.status(),
+            if duplicate_plate {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::CONFLICT
+            }
+        );
     }
     held.finish().await;
     Ok(())
@@ -319,7 +326,7 @@ impl<T> Drop for AbortTask<T> {
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn concurrent_email_and_plate_inserts_still_return_conflict(
+async fn concurrent_email_conflicts_are_preserved_and_plate_claims_are_nonexclusive(
     pool: PgPool,
 ) -> Result<(), sqlx::Error> {
     let state = fixture(pool.clone());
@@ -365,7 +372,14 @@ async fn concurrent_email_and_plate_inserts_still_return_conflict(
             .await
             .expect("INSERT finishes after releasing the lock")
             .expect("registration worker");
-        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response.status(),
+            if duplicate_plate {
+                StatusCode::CREATED
+            } else {
+                StatusCode::CONFLICT
+            }
+        );
     }
     Ok(())
 }
@@ -625,4 +639,46 @@ async fn cancelled_kdf_caller_keeps_auth_bounded_while_edge_delivery_progresses(
     })
     .await
     .expect("login recovers when blocking work releases its slot");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn r12_unverified_plate_does_not_block_another_registration(pool: PgPool) {
+    let state = fixture(pool);
+    for email in ["first-claim@example.invalid", "legitimate@example.invalid"] {
+        let mut payload = registration();
+        payload.email = email.into();
+        payload.plate = Some("ABC1D23".into());
+        let response = users::create_user(State(state.clone()), Json(payload))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn r12_failed_declaration_rolls_back_registration(pool: PgPool) {
+    let state = fixture(pool.clone());
+    sqlx::raw_sql("CREATE FUNCTION reject_vehicle_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'audit unavailable'; END $$; CREATE TRIGGER reject_vehicle_audit BEFORE INSERT ON vehicle_binding_audit FOR EACH ROW EXECUTE FUNCTION reject_vehicle_audit();")
+        .execute(&pool).await.unwrap();
+    let mut payload = registration();
+    payload.plate = Some("ABC1D23".into());
+    let email = payload.email.clone();
+    let response = users::create_user(State(state), Json(payload))
+        .await
+        .into_response();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let users: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE email=$1")
+        .bind(email)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let vehicles: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM vehicles")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        (users, vehicles),
+        (0, 0),
+        "the account and declaration must commit together"
+    );
 }
