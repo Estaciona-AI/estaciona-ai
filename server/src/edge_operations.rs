@@ -636,4 +636,104 @@ mod tests {
             0
         );
     }
+
+    async fn assert_arrival_database_failure(pool: PgPool, stage: &str) {
+        let mut f = fixture(pool).await;
+        let existing = matches!(stage, "reservation" | "grant");
+        if existing {
+            crate::reservation_store::create(
+                &f.state.pool,
+                "allowed",
+                f.user,
+                Utc::now() + Duration::minutes(15),
+            )
+            .await
+            .unwrap();
+        }
+        let (table, column) = match stage {
+            "user" => ("users", "plate"),
+            "reservation" => ("reservations", "user_id"),
+            "grant" => ("edge_camera_spots", "spot_id"),
+            "free" => ("spots", "is_active"),
+            _ => panic!("unknown arrival failure stage"),
+        };
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "ALTER TABLE {table} RENAME COLUMN {column} TO r08_unavailable"
+        )))
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+        let result = car_detected(&f.state, &f.principal, "ABC1D23", "cam-01").await;
+        match result {
+            Err(AuthError::Database(error)) => assert_eq!(
+                error
+                    .as_database_error()
+                    .and_then(|error| error.code())
+                    .as_deref(),
+                Some("42703"),
+                "the intended lookup must fail, not authentication",
+            ),
+            other => panic!("expected a typed database error, got {other:?}"),
+        }
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "ALTER TABLE {table} RENAME COLUMN r08_unavailable TO {column}"
+        )))
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+        let reservations: Vec<(String, String)> =
+            sqlx::query_as("SELECT spot_id,status FROM reservations ORDER BY spot_id")
+                .fetch_all(&f.state.pool)
+                .await
+                .unwrap();
+        let expected = if existing {
+            vec![("allowed".into(), "active".into())]
+        } else {
+            vec![]
+        };
+        assert_eq!(reservations, expected);
+        let spots: Vec<(String, String)> =
+            sqlx::query_as("SELECT id,status FROM spots ORDER BY id")
+                .fetch_all(&f.state.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            spots,
+            [
+                (
+                    "allowed".into(),
+                    if existing { "reserved" } else { "free" }.into()
+                ),
+                ("outside".into(), "free".into()),
+            ]
+        );
+        assert!(
+            f.nav.try_recv().is_err(),
+            "unknown data must not produce navigation"
+        );
+        assert!(
+            f.updates.try_recv().is_err(),
+            "uncommitted data must not be broadcast"
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn r08_arrival_user_lookup_failure_has_no_effects(pool: PgPool) {
+        assert_arrival_database_failure(pool, "user").await;
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn r08_arrival_reservation_lookup_failure_preserves_existing_claim(pool: PgPool) {
+        assert_arrival_database_failure(pool, "reservation").await;
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn r08_arrival_grant_lookup_failure_preserves_existing_claim(pool: PgPool) {
+        assert_arrival_database_failure(pool, "grant").await;
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn r08_arrival_free_spots_lookup_failure_has_no_effects(pool: PgPool) {
+        assert_arrival_database_failure(pool, "free").await;
+    }
 }
