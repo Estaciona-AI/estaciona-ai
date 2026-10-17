@@ -217,6 +217,7 @@ mod tests {
                 "r10-disposable-jwt".into(),
                 "r10-disposable-pepper".into(),
                 crate::site_config::SiteConfig::load(&self.0).unwrap(),
+                Default::default(),
             )
             .await
             .unwrap()

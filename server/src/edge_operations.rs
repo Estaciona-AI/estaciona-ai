@@ -1,133 +1,11 @@
-use chrono::{Duration, Utc};
-use sqlx::Acquire;
-use uuid::Uuid;
-
 use crate::{
-    edge_auth::{self, AuthError, CameraOperation, GlobalOperation, Principal},
-    reservation_store::{self, CreateError},
+    edge_auth::{self, AuthError, GlobalOperation, Principal},
     state::SharedState,
     ws::messages::{EdgeToServerMsg, ServerToAppMsg},
 };
 
-pub async fn car_detected(
-    state: &SharedState,
-    principal: &Principal,
-    plate: &str,
-    camera_id: &str,
-) -> Result<bool, AuthError> {
-    let mut tx = edge_auth::begin_authorized(&state.pool, principal).await?;
-    if !edge_auth::camera_allowed(&mut tx, principal, camera_id, CameraOperation::CarDetected)
-        .await?
-    {
-        tx.rollback().await?;
-        return Ok(false);
-    }
-    let hashed_plate = crate::security::hash_plate(plate, &state.plate_pepper);
-    let user = sqlx::query_scalar::<_, Uuid>("SELECT id FROM users WHERE plate = $1")
-        .bind(hashed_plate)
-        .fetch_optional(&mut *tx)
-        .await?;
-    let Some(user_id) = user else {
-        tx.rollback().await?;
-        return Ok(true);
-    };
-    let reserved = sqlx::query_scalar::<_, String>(
-        "SELECT spot_id FROM reservations WHERE user_id = $1 AND status = 'active' LIMIT 1",
-    )
-    .bind(user_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    let (spot_id, route, newly_reserved) = if let Some(spot) = reserved {
-        let granted: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM edge_camera_spots AS grants JOIN spots ON spots.id=grants.spot_id WHERE gateway_id = $1 AND spot_id = $2 AND spots.is_active)",
-        )
-        .bind(principal.gateway_id)
-        .bind(&spot)
-        .fetch_one(&mut *tx)
-        .await?;
-        if !granted {
-            tx.rollback().await?;
-            return Ok(true);
-        }
-        let route = state.graph.read().await.calculate_route(camera_id, &spot);
-        (spot, route, false)
-    } else {
-        let free: Vec<String> = sqlx::query_scalar(
-            "SELECT id FROM spots WHERE status = 'free' AND is_active AND EXISTS( \
-             SELECT 1 FROM edge_camera_spots WHERE gateway_id = $1 AND spot_id = spots.id)",
-        )
-        .bind(principal.gateway_id)
-        .fetch_all(&mut *tx)
-        .await?;
-        let candidates = {
-            let graph = state.graph.read().await;
-            let mut candidates: Vec<_> = free
-                .into_iter()
-                .filter_map(|spot| {
-                    Some((
-                        graph.calculate_cost(camera_id, &spot)?,
-                        spot.clone(),
-                        graph.calculate_route(camera_id, &spot)?,
-                    ))
-                })
-                .collect();
-            candidates.sort_by_key(|(cost, _, _)| *cost);
-            candidates
-        };
-        let mut claimed = None;
-        for (_, spot, route) in candidates {
-            // A failed candidate may abort its SQL transaction. A savepoint keeps
-            // the authority lease intact while the next candidate is considered.
-            let mut attempt = tx.begin().await?;
-            match reservation_store::create_in_transaction(
-                &mut attempt,
-                &spot,
-                user_id,
-                Utc::now() + Duration::minutes(15),
-            )
-            .await
-            {
-                Ok(_) => {
-                    attempt.commit().await?;
-                    claimed = Some((spot, Some(route), true));
-                    break;
-                }
-                Err(CreateError::Unavailable) => attempt.rollback().await?,
-                Err(CreateError::Database(error)) => return Err(error.into()),
-            }
-        }
-        let Some(claimed) = claimed else {
-            tx.rollback().await?;
-            return Ok(true);
-        };
-        claimed
-    };
-    // Revocation/policy replacement waits for this authority lease until commit.
-    // Only committed actions may publish occupancy or private navigation.
-    tx.commit().await?;
-    if newly_reserved {
-        let update = ServerToAppMsg::SpotUpdate {
-            spot_id: spot_id.clone(),
-            status: "reserved".into(),
-        };
-        if let Ok(json) = serde_json::to_string(&update) {
-            let _ = state.tx.send(json);
-        }
-    }
-    if let Some(session) = state.user_sessions.get(&user_id) {
-        let navigation = match route {
-            Some(route) => ServerToAppMsg::NavigationStart { spot_id, route },
-            None => ServerToAppMsg::NavigationUnavailable {
-                spot_id,
-                reason: "route_unavailable".into(),
-            },
-        };
-        if let Ok(json) = serde_json::to_string(&navigation) {
-            let _ = session.try_send(json);
-        }
-    }
-    Ok(true)
-}
+pub use crate::lpr::car_detected;
+
 pub async fn path_update(
     state: &SharedState,
     principal: &Principal,
@@ -194,6 +72,7 @@ pub async fn forecast(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reservation_store;
     use crate::{auth_limits::AuthLimits, edge_auth, pathfinding::ParkingGraph, state::AppState};
     use chrono::{Duration, Utc};
     use dashmap::DashMap;
@@ -240,6 +119,21 @@ mod tests {
             .bind(user).bind(format!("{user}@example.invalid"))
             .bind(crate::security::hash_plate("ABC1D23", "fixture-pepper"))
             .execute(&pool).await.unwrap();
+        let mut binding_tx = pool.begin().await.unwrap();
+        let binding = crate::vehicles::request_binding(
+            &mut binding_tx,
+            user,
+            &crate::security::hash_plate("ABC1D23", "fixture-pepper"),
+            None,
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE vehicle_bindings SET status='approved' WHERE id=$1")
+            .bind(binding.id)
+            .execute(&mut *binding_tx)
+            .await
+            .unwrap();
+        binding_tx.commit().await.unwrap();
         let mut graph = ParkingGraph::new();
         let camera = graph.add_node("cam-01", 0.0, 0.0).unwrap();
         let outside = graph.add_node("outside", 1.0, 0.0).unwrap();
@@ -251,6 +145,7 @@ mod tests {
         let sessions = DashMap::new();
         sessions.insert(user, nav_tx);
         let state = Arc::new(AppState {
+            lpr_mode: crate::lpr::LprMode::Enabled,
             pool,
             auth_limits: AuthLimits::default(),
             tx,
@@ -652,7 +547,7 @@ mod tests {
             .unwrap();
         }
         let (table, column) = match stage {
-            "user" => ("users", "plate"),
+            "user" => ("vehicles", "plate_hash"),
             "reservation" => ("reservations", "user_id"),
             "grant" => ("edge_camera_spots", "spot_id"),
             "free" => ("spots", "is_active"),
@@ -781,5 +676,50 @@ mod tests {
             f.nav.try_recv().is_err(),
             "navigation must not grow an already full queue"
         );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn r12_disabled_lpr_is_inert_even_for_an_ungranted_camera(pool: PgPool) {
+        let mut f = fixture(pool).await;
+        Arc::get_mut(&mut f.state).unwrap().lpr_mode = crate::lpr::LprMode::Disabled;
+        for camera in ["cam-01", "ungranted-camera"] {
+            assert!(
+                car_detected(&f.state, &f.principal, "ABC1D23", camera)
+                    .await
+                    .unwrap()
+            );
+        }
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM reservations")
+                .fetch_one(&f.state.pool)
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(f.nav.try_recv().is_err());
+        assert!(f.updates.try_recv().is_err());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn r12_pending_vehicle_does_not_identify_the_declaring_account(pool: PgPool) {
+        let mut f = fixture(pool).await;
+        sqlx::query("UPDATE vehicle_bindings SET status='pending'")
+            .execute(&f.state.pool)
+            .await
+            .unwrap();
+        assert!(
+            car_detected(&f.state, &f.principal, "ABC1D23", "cam-01")
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM reservations")
+                .fetch_one(&f.state.pool)
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(f.nav.try_recv().is_err());
+        assert!(f.updates.try_recv().is_err());
     }
 }

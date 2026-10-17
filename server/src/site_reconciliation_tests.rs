@@ -29,6 +29,7 @@ async fn moved_spot_coordinates_follow_the_applied_map(pool: PgPool) {
         "test".into(),
         "test".into(),
         site(&[("R07-A", 2.0)]),
+        Default::default(),
     )
     .await
     .unwrap();
@@ -37,6 +38,7 @@ async fn moved_spot_coordinates_follow_the_applied_map(pool: PgPool) {
         "test".into(),
         "test".into(),
         site(&[("R07-A", 8.0)]),
+        Default::default(),
     )
     .await
     .unwrap();
@@ -352,6 +354,7 @@ async fn r11_navigation_collision_does_not_reconcile_any_database_changes(pool: 
         "test".into(),
         "test".into(),
         site(&[("R11-A", 2.0)]),
+        Default::default(),
     )
     .await
     .unwrap();
@@ -370,6 +373,7 @@ async fn r11_navigation_collision_does_not_reconcile_any_database_changes(pool: 
             "test".into(),
             "test".into(),
             site(&[("R11-A", 9.0), (collision, 3.0), ("R11-new", 4.0)]),
+            Default::default(),
         )
         .await;
         assert!(matches!(

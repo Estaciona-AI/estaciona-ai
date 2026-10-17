@@ -24,6 +24,7 @@ mod edge_auth;
 mod edge_cli;
 mod edge_delivery;
 mod edge_operations;
+mod lpr;
 mod pathfinding;
 #[cfg(test)]
 mod postgres_tests;
@@ -41,6 +42,7 @@ mod site_reconciliation;
 mod site_reconciliation_tests;
 mod state;
 mod users;
+mod vehicles;
 mod ws;
 
 use axum::{
@@ -118,7 +120,14 @@ async fn main() {
         .expect("SITE_DATA_DIR required: directory containing config.json and spots_3d.json");
     let site = site_config::SiteConfig::load(site_data_dir)
         .expect("Failed to load installation maps from SITE_DATA_DIR");
-    let parking_state: SharedState = init_state(pool, jwt_secret, plate_pepper, site)
+    let lpr_setting = std::env::var("LPR_ENABLED");
+    let lpr_mode = match &lpr_setting {
+        Ok(value) => lpr::LprMode::parse(Some(value)),
+        Err(std::env::VarError::NotPresent) => lpr::LprMode::parse(None),
+        Err(_) => Err("LPR_ENABLED must be UTF-8"),
+    }
+    .expect("Invalid optional LPR configuration");
+    let parking_state: SharedState = init_state(pool, jwt_secret, plate_pepper, site, lpr_mode)
         .await
         .expect("Failed to reconcile installation map");
 
@@ -151,6 +160,7 @@ async fn main() {
         .route("/reservations/recommend", get(reservations::recommend_spot))
         .route("/spots/{id}/status", put(reservations::update_spot_status))
         .merge(auth_routes(parking_state.clone()))
+        .merge(vehicles::routes(lpr_mode))
         .route("/users/{id}", get(users::get_user))
         .route("/config", post(save_config))
         .with_state(parking_state.clone())

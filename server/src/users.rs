@@ -77,27 +77,30 @@ pub async fn create_user(
         .as_deref()
         .map(|p| hash_plate(p, &state.plate_pepper));
 
-    let duplicate = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS (SELECT 1 FROM users WHERE email = $1 OR plate = $2)",
-    )
-    .bind(&payload.email)
-    .bind(hashed_plate.as_deref())
-    .fetch_one(&state.pool)
-    .await
-    .map_err(|error| {
-        tracing::error!(%error, "Registration preflight failed");
-        AuthError::Status(StatusCode::INTERNAL_SERVER_ERROR, "Failed to create user")
-    })?;
+    let duplicate =
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM users WHERE email = $1)")
+            .bind(&payload.email)
+            .fetch_one(&state.pool)
+            .await
+            .map_err(|error| {
+                tracing::error!(%error, "Registration preflight failed");
+                AuthError::Status(StatusCode::INTERNAL_SERVER_ERROR, "Failed to create user")
+            })?;
     if duplicate {
         return Err(AuthError::Status(
             StatusCode::CONFLICT,
-            "Email or Plate already registered",
+            "Email already registered",
         ));
     }
 
     let hashed_password = hash_password_async(&state.auth_limits, payload.password).await?;
     let new_id = Uuid::new_v4();
 
+    let requested_plate = hashed_plate.clone();
+    let mut tx = state.pool.begin().await.map_err(|error| {
+        tracing::error!(%error, "Registration transaction unavailable");
+        AuthError::Status(StatusCode::INTERNAL_SERVER_ERROR, "Failed to create user")
+    })?;
     let record = sqlx::query!(
         r#"
         INSERT INTO users (id, name, email, password_hash, date_of_birth, pcd_status, plate)
@@ -120,17 +123,30 @@ pub async fn create_user(
         payload.pcd_status,
         hashed_plate,
     )
-    .fetch_one(&state.pool)
+    .fetch_one(&mut *tx)
     .await
     .map_err(|e| {
         tracing::error!("Database error: {}", e);
         if e.as_database_error()
             .is_some_and(|error| error.is_unique_violation())
         {
-            AuthError::Status(StatusCode::CONFLICT, "Email or Plate already registered")
+            AuthError::Status(StatusCode::CONFLICT, "Email already registered")
         } else {
             AuthError::Status(StatusCode::INTERNAL_SERVER_ERROR, "Failed to create user")
         }
+    })?;
+
+    if let Some(hash) = requested_plate.as_deref() {
+        crate::vehicles::request_binding(&mut tx, record.id, hash, None)
+            .await
+            .map_err(|error| {
+                tracing::error!(%error, "Failed to persist declared vehicle binding");
+                AuthError::Status(StatusCode::INTERNAL_SERVER_ERROR, "Failed to create user")
+            })?;
+    }
+    tx.commit().await.map_err(|error| {
+        tracing::error!(%error, "Registration commit failed");
+        AuthError::Status(StatusCode::INTERNAL_SERVER_ERROR, "Failed to create user")
     })?;
 
     let response = UserResponse {

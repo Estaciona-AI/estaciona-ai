@@ -47,6 +47,14 @@ def token(user_id, role, expires_at):
     return (signed + b"." + base64.urlsafe_b64encode(signature).rstrip(b"=")).decode()
 
 
+def enable_lpr(server):
+    """Opt in only for tests exercising the isolated future LPR module."""
+    if server.environment.get("LPR_ENABLED") != "true":
+        server.environment["LPR_ENABLED"] = "true"
+        server.stop()
+        server.start()
+
+
 def insert_user(server, role="user", plate=None):
     user_id = uuid4()
     server.query(
@@ -54,6 +62,18 @@ def insert_user(server, role="user", plate=None):
         "VALUES (%s, 'Session fixture', %s, 'unused-test-hash', %s, %s)",
         (str(user_id), f"{user_id}@example.invalid", role, plate),
     )
+    if plate is not None:
+        # This is an explicitly trusted fixture, never the public registration flow.
+        vehicle_id = server.query(
+            "INSERT INTO vehicles (plate_hash) VALUES (%s) "
+            "ON CONFLICT (plate_hash) DO UPDATE SET plate_hash=EXCLUDED.plate_hash RETURNING id",
+            (plate,),
+        )[0][0]
+        server.query(
+            "INSERT INTO vehicle_bindings (vehicle_id,user_id,status) VALUES (%s,%s,'approved')",
+            (str(vehicle_id), str(user_id)),
+        )
+        enable_lpr(server)
     return user_id
 
 
