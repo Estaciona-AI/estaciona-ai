@@ -49,12 +49,7 @@ pub async fn car_detected(
             tx.rollback().await?;
             return Ok(true);
         }
-        let route = state
-            .graph
-            .read()
-            .await
-            .calculate_route(camera_id, &spot)
-            .unwrap_or_else(|| vec![camera_id.to_owned(), spot.clone()]);
+        let route = state.graph.read().await.calculate_route(camera_id, &spot);
         (spot, route, false)
     } else {
         let free: Vec<String> = sqlx::query_scalar(
@@ -94,7 +89,7 @@ pub async fn car_detected(
             {
                 Ok(_) => {
                     attempt.commit().await?;
-                    claimed = Some((spot, route, true));
+                    claimed = Some((spot, Some(route), true));
                     break;
                 }
                 Err(CreateError::Unavailable) => attempt.rollback().await?,
@@ -120,7 +115,13 @@ pub async fn car_detected(
         }
     }
     if let Some(session) = state.user_sessions.get(&user_id) {
-        let navigation = ServerToAppMsg::NavigationStart { spot_id, route };
+        let navigation = match route {
+            Some(route) => ServerToAppMsg::NavigationStart { spot_id, route },
+            None => ServerToAppMsg::NavigationUnavailable {
+                spot_id,
+                reason: "route_unavailable".into(),
+            },
+        };
         if let Ok(json) = serde_json::to_string(&navigation) {
             let _ = session.send(json);
         }
@@ -524,5 +525,93 @@ mod tests {
         ));
         assert!(f.state.last_trend_prediction.lock().unwrap().is_none());
         assert!(f.updates.try_recv().is_err());
+    }
+
+    async fn assert_reserved_navigation_unavailable(pool: PgPool, missing: &str) {
+        let mut f = fixture(pool).await;
+        let reservation = reservation_store::create(
+            &f.state.pool,
+            "allowed",
+            f.user,
+            Utc::now() + Duration::minutes(15),
+        )
+        .await
+        .unwrap();
+        let mut graph = ParkingGraph::new();
+        let camera = (missing != "camera").then(|| graph.add_node("cam-01", 0.0, 0.0));
+        let target = (missing != "destination").then(|| graph.add_node("allowed", 10.0, 0.0));
+        if let (Some(camera), Some(target)) = (camera, target) {
+            graph.add_edge(camera, target, 10, true);
+            graph.set_edge_status("cam-01", "allowed", false);
+        }
+        *f.state.graph.write().await = graph;
+        assert!(
+            car_detected(&f.state, &f.principal, "ABC1D23", "cam-01")
+                .await
+                .unwrap()
+        );
+        let notice: serde_json::Value = serde_json::from_str(&f.nav.try_recv().unwrap()).unwrap();
+        assert_eq!(
+            notice,
+            serde_json::json!({
+                "type":"NAVIGATION_UNAVAILABLE", "spot_id":"allowed", "reason":"route_unavailable"
+            })
+        );
+        assert!(f.nav.try_recv().is_err());
+        assert!(f.updates.try_recv().is_err());
+        let reservations: Vec<(Uuid, Uuid, String, String)> =
+            sqlx::query_as("SELECT id,user_id,spot_id,status FROM reservations ORDER BY id")
+                .fetch_all(&f.state.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            reservations,
+            vec![(reservation.id, f.user, "allowed".into(), "active".into())]
+        );
+        let statuses: Vec<(String, String)> =
+            sqlx::query_as("SELECT id,status FROM spots ORDER BY id")
+                .fetch_all(&f.state.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            statuses,
+            vec![
+                ("allowed".into(), "reserved".into()),
+                ("outside".into(), "free".into())
+            ]
+        );
+        // Restoring the route resumes navigation to the very same reservation.
+        let mut graph = ParkingGraph::new();
+        let camera = graph.add_node("cam-01", 0.0, 0.0);
+        let target = graph.add_node("allowed", 10.0, 0.0);
+        graph.add_edge(camera, target, 10, true);
+        *f.state.graph.write().await = graph;
+        car_detected(&f.state, &f.principal, "ABC1D23", "cam-01")
+            .await
+            .unwrap();
+        let notice: serde_json::Value = serde_json::from_str(&f.nav.try_recv().unwrap()).unwrap();
+        assert_eq!(
+            notice,
+            serde_json::json!({"type":"NAVIGATION_START","spot_id":"allowed","route":["cam-01","allowed"]})
+        );
+        assert!(f.updates.try_recv().is_err());
+        let ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM reservations")
+            .fetch_all(&f.state.pool)
+            .await
+            .unwrap();
+        assert_eq!(ids, vec![reservation.id]);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn reserved_arrival_reports_blocked_route_and_preserves_reservation(pool: PgPool) {
+        assert_reserved_navigation_unavailable(pool, "blocked").await;
+    }
+    #[sqlx::test(migrations = "./migrations")]
+    async fn reserved_arrival_reports_missing_camera_without_fabricating_route(pool: PgPool) {
+        assert_reserved_navigation_unavailable(pool, "camera").await;
+    }
+    #[sqlx::test(migrations = "./migrations")]
+    async fn reserved_arrival_reports_missing_destination_without_fabricating_route(pool: PgPool) {
+        assert_reserved_navigation_unavailable(pool, "destination").await;
     }
 }
