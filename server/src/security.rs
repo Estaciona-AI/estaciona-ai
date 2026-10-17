@@ -279,6 +279,10 @@ impl AuthSession {
         })
     }
 
+    pub fn expires_at(&self) -> usize {
+        self.expires_at
+    }
+
     pub fn check_expiration(&self) -> Result<(), AuthError> {
         if Instant::now() >= self.deadline
             || jsonwebtoken::get_current_timestamp() >= self.expires_at as u64

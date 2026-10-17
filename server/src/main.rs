@@ -44,6 +44,7 @@ mod state;
 mod users;
 mod vehicles;
 mod ws;
+mod ws_tickets;
 
 use axum::{
     Router,
@@ -139,8 +140,8 @@ async fn main() {
     let app = Router::new()
         .route("/health", get(health_check))
         .route("/ws/edge", get(ws::ws_edge_handler))
-        .route("/ws/app", get(ws::ws_app_handler))
-        .route("/ws/dashboard", get(ws::ws_dashboard_handler))
+        .route("/ws/app", get(ws_tickets::app_handler))
+        .route("/ws/dashboard", get(ws_tickets::dashboard_handler))
         .route(
             "/reservations",
             post(reservations::create_reservation).get(reservations::get_reservations),
@@ -160,16 +161,26 @@ async fn main() {
         .route("/reservations/recommend", get(reservations::recommend_spot))
         .route("/spots/{id}/status", put(reservations::update_spot_status))
         .merge(auth_routes(parking_state.clone()))
+        .merge(ws_tickets::routes())
         .merge(vehicles::routes(lpr_mode))
         .route("/users/{id}", get(users::get_user))
         .route("/config", post(save_config))
         .with_state(parking_state.clone())
         .layer(cors)
-        .layer(TraceLayer::new_for_http());
+        .layer(TraceLayer::new_for_http().make_span_with(
+            |request: &axum::http::Request<axum::body::Body>| {
+                tracing::info_span!(
+                    "http_request",
+                    method = %request.method(),
+                    path = %request_path_for_trace(request.uri()),
+                )
+            },
+        ));
 
     let listener = TcpListener::bind("0.0.0.0:8000").await.unwrap();
     tracing::info!("Server listening on {}", listener.local_addr().unwrap());
 
+    ws_tickets::spawn_cleanup(parking_state.pool.clone());
     let state_for_bg_task = parking_state;
 
     tokio::spawn(async move {
@@ -229,6 +240,10 @@ async fn main() {
     axum::serve(listener, app).await.unwrap();
 }
 
+fn request_path_for_trace(uri: &axum::http::Uri) -> &str {
+    uri.path()
+}
+
 fn auth_routes(state: SharedState) -> Router<SharedState> {
     Router::new()
         .route(
@@ -285,4 +300,15 @@ async fn save_config(
     })?;
 
     Ok(r#"{"status": "ok"}"#)
+}
+
+#[cfg(test)]
+mod tracing_tests {
+    use super::request_path_for_trace;
+
+    #[test]
+    fn websocket_ticket_query_is_excluded_from_trace_path() {
+        let uri = axum::http::Uri::from_static("/ws/app?ticket=secret-value");
+        assert_eq!(request_path_for_trace(&uri), "/ws/app");
+    }
 }
