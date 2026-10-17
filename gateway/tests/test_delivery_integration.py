@@ -56,7 +56,7 @@ class Server:
         self.log = (root / "server.log").open("a")
         (root / "server").mkdir()
         site = root / "site"
-        site.mkdir()
+        site.mkdir(exist_ok=True)
         (site / "config.json").write_text(
             json.dumps(
                 [{"name": "Test lot", "path": [{"x": 0, "z": 0}, {"x": 1, "z": 0}]}]
