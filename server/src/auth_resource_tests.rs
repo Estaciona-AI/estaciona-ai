@@ -34,6 +34,7 @@ use crate::{
 fn fixture(pool: PgPool) -> SharedState {
     let (tx, _) = broadcast::channel(100);
     Arc::new(AppState {
+        lpr_mode: Default::default(),
         pool,
         tx,
         user_sessions: DashMap::new(),

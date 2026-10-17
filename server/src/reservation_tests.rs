@@ -53,6 +53,7 @@ impl Fixture {
 
         let (tx, _) = broadcast::channel(100);
         let state = Arc::new(AppState {
+            lpr_mode: Default::default(),
             pool,
             auth_limits: Default::default(),
             tx,
