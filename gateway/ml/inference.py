@@ -86,7 +86,9 @@ class PredictiveEngine:
     def get_capacity(self):
         with self.engine.connect() as connection:
             return int(
-                connection.execute(text("SELECT COUNT(*) FROM spots")).scalar_one()
+                connection.execute(
+                    text("SELECT COUNT(*) FROM spots WHERE is_active")
+                ).scalar_one()
             )
 
     def predict_trends(self):

@@ -17,11 +17,19 @@ def test_forecast_capacity_comes_from_registered_spots(spot_count):
     # A real SQL table exercises capacity lookup without depending on a checkpoint.
     engine = create_engine("sqlite://")
     with engine.begin() as connection:
-        connection.execute(text("CREATE TABLE spots (id TEXT PRIMARY KEY)"))
+        connection.execute(
+            text(
+                "CREATE TABLE spots (id TEXT PRIMARY KEY, is_active BOOLEAN NOT NULL DEFAULT TRUE)"
+            )
+        )
         for index in range(spot_count):
             connection.execute(
                 text("INSERT INTO spots (id) VALUES (:id)"), {"id": str(index)}
             )
+
+        connection.execute(
+            text("INSERT INTO spots (id,is_active) VALUES ('retired',FALSE)")
+        )
 
     predictor = PredictiveEngine.__new__(PredictiveEngine)
     predictor.engine = engine
