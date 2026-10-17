@@ -538,3 +538,51 @@ async fn historical_recommendation_excludes_retired_spots(pool: PgPool) {
 async fn closest_recommendation_excludes_retired_spots(pool: PgPool) {
     assert_recommendation_ignores_retired(pool, "closest").await;
 }
+
+async fn recommendation_fixture(pool: PgPool) -> Fixture {
+    let f = Fixture::new(pool).await.unwrap();
+    let mut graph = ParkingGraph::new();
+    let camera = graph.add_node("cam-01", 0.0, 0.0);
+    let spot = graph.add_node(&f.spot_id, 1.0, 0.0);
+    graph.add_edge(camera, spot, 1, true);
+    *f.state.graph.write().await = graph;
+    f
+}
+
+async fn recommendation_response(f: &Fixture) -> Response {
+    reservations::recommend_spot(
+        State(f.state.clone()),
+        f.headers(f.owner, "user"),
+        axum::extract::Query(reservations::RecommendQuery { user_id: f.owner }),
+    )
+    .await
+    .into_response()
+}
+
+async fn assert_recommendation_unavailable(f: &Fixture) {
+    let mut updates = f.state.tx.subscribe();
+    let response = recommendation_response(f).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = to_bytes(response.into_body(), 16384).await.unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(
+        !text.contains("injected"),
+        "database details must stay private"
+    );
+    assert!(!text.contains("SELECT"));
+    assert!(!text.contains("Lotado"));
+    assert_eq!(f.spot_status().await.unwrap(), "free");
+    assert_eq!(f.active_count().await.unwrap(), 0);
+    assert!(updates.try_recv().is_err());
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn r08_priority_query_failure_does_not_fall_back_to_an_ordinary_spot(pool: PgPool) {
+    let f = recommendation_fixture(pool).await;
+    // Break the priority query at prepare time, while the role lookup still works.
+    sqlx::query("ALTER TABLE users RENAME COLUMN pcd_status TO r08_unavailable")
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    assert_recommendation_unavailable(&f).await;
+}

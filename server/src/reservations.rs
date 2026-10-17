@@ -371,6 +371,31 @@ pub struct RecommendQuery {
     pub user_id: Uuid,
 }
 
+#[derive(Debug)]
+struct RecommendationQueryError {
+    query: &'static str,
+    source: sqlx::Error,
+}
+
+impl std::fmt::Display for RecommendationQueryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Recommendation temporarily unavailable")
+    }
+}
+
+impl std::error::Error for RecommendationQueryError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+impl RecommendationQueryError {
+    fn into_http_error(self) -> (StatusCode, String) {
+        tracing::error!(query = self.query, error = %self.source, "Recommendation query failed");
+        (StatusCode::SERVICE_UNAVAILABLE, self.to_string())
+    }
+}
+
 pub async fn recommend_spot(
     State(state): State<SharedState>,
     headers: HeaderMap,
@@ -402,7 +427,13 @@ pub async fn recommend_spot(
     )
     .fetch_optional(&state.pool)
     .await
-    .unwrap_or(None);
+    .map_err(|source| {
+        RecommendationQueryError {
+            query: "priority",
+            source,
+        }
+        .into_http_error()
+    })?;
 
     if let Some(priority) = priority_spot {
         let graph = state.graph.read().await;
