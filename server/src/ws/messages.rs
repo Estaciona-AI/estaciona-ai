@@ -111,6 +111,8 @@ pub enum EdgeToServerMsg {
 pub enum ServerToAppMsg {
     #[serde(rename = "NAVIGATION_START")]
     NavigationStart { spot_id: String, route: Vec<String> },
+    #[serde(rename = "NAVIGATION_UNAVAILABLE")]
+    NavigationUnavailable { spot_id: String, reason: String },
     #[serde(rename = "RESERVATION_CONFIRMED")]
     ReservationConfirmed {
         reservation_id: Uuid,
@@ -372,5 +374,24 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+    #[test]
+    fn navigation_unavailable_preserves_the_wire_contract() {
+        let frame = ServerToAppMsg::NavigationUnavailable {
+            spot_id: "B-03".into(),
+            reason: "route_unavailable".into(),
+        };
+        let json = serde_json::to_value(frame).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type":"NAVIGATION_UNAVAILABLE","spot_id":"B-03","reason":"route_unavailable"
+            })
+        );
+        let decoded: ServerToAppMsg = serde_json::from_value(json).unwrap();
+        assert!(
+            matches!(decoded, ServerToAppMsg::NavigationUnavailable { spot_id, reason }
+            if spot_id == "B-03" && reason == "route_unavailable")
+        );
     }
 }
