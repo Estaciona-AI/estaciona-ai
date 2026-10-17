@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [ "develop", "main", "feat/**", "feats/**", "fix/**", "refactor/**" ]
+    branches: [ "develop", "main", "feat/**", "feats/**", "fix/**", "refactor/**", "test/**" ]
   pull_request:
     branches: [ "develop" ]
 
@@ -81,6 +81,7 @@ jobs:
           --health-retries 5
     env:
       DATABASE_URL: postgres://estaciona_test:estaciona_test@127.0.0.1:5432/estaciona_test
+      ESTACIONA_REQUIRE_INTEGRATION: "1"
       ESTACIONA_TEST_SERVER: ${{ github.workspace }}/test-server/estaciona-ai-rust-server
     defaults:
       run:
@@ -115,7 +116,16 @@ jobs:
       - name: Run Pytest
         env:
           ESTACIONA_TEST_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
-        run: uv run --locked pytest
+        run: uv run --locked pytest --junitxml=test-results/gateway.xml
+
+      - name: Upload gateway test results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: gateway-test-results
+          path: gateway/test-results/gateway.xml
+          if-no-files-found: warn
+          retention-days: 7
 
   vision-ci:
     name: Python Vision CI
