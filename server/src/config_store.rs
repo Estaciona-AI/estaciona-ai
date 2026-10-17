@@ -404,4 +404,65 @@ mod tests {
         );
         assert_eq!(fixture.read(), ConfigFixture::payload("Published"));
     }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn r11_config_route_rejects_navigation_collisions_without_publication(
+        pool: sqlx::PgPool,
+    ) {
+        let fixture = ConfigFixture::new();
+        let mut initial = ConfigFixture::payload("Short");
+        initial[0]["path"][1]["x"] = serde_json::json!(0);
+        std::fs::write(
+            fixture.0.join("config.json"),
+            serde_json::to_vec(&initial).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            fixture.0.join("spots_3d.json"),
+            br#"[{"id":"path_node_1","center3D":{"x":1,"y":0,"z":1}}]"#,
+        )
+        .unwrap();
+        let state = fixture.state(pool).await;
+        let headers = principal(&state, "admin").await;
+        let result = crate::save_config(
+            axum::extract::State(state.clone()),
+            headers,
+            axum::Json(ConfigFixture::payload("Extended")),
+        )
+        .await;
+        let (status, message) = result.unwrap_err();
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(message.contains("path_node_1"));
+        assert_eq!(fixture.read(), initial);
+        assert_eq!(
+            state
+                .graph
+                .read()
+                .await
+                .calculate_route("cam-01", "path_node_1"),
+            Some(vec!["cam-01".into(), "path_node_1".into()])
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn r11_config_route_treats_unreadable_geometry_as_storage_failure(pool: sqlx::PgPool) {
+        let fixture = ConfigFixture::new();
+        let original = fixture.read();
+        let state = fixture.state(pool).await;
+        let headers = principal(&state, "admin").await;
+        for geometry in [
+            b"invalid JSON".as_slice(),
+            br#"[{"id":"duplicate","center3D":{"x":0,"y":0,"z":0}},{"id":"duplicate","center3D":{"x":1,"y":0,"z":0}}]"#.as_slice(),
+        ] {
+            std::fs::write(fixture.0.join("spots_3d.json"), geometry).unwrap();
+            let result = crate::save_config(
+                axum::extract::State(state.clone()), headers.clone(),
+                axum::Json(ConfigFixture::payload("Rejected")),
+            ).await;
+            let (status, message) = result.unwrap_err();
+            assert_eq!(status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+            assert!(!message.contains(fixture.0.to_str().unwrap()));
+            assert_eq!(fixture.read(), original);
+        }
+    }
 }

@@ -60,26 +60,32 @@ impl SiteConfig {
         let config_path = directory.join("config.json");
         let raw: Value = read_json(&config_path)?;
         validate_parking_config(&raw)?;
-        let parkings = serde_json::from_value(raw).map_err(invalid_data)?;
+        let parkings: Vec<ParkingLotConfig> = serde_json::from_value(raw).map_err(invalid_data)?;
         let spots: Vec<Spot3DDef> = read_json(&directory.join("spots_3d.json"))?;
-        let mut ids = std::collections::HashSet::new();
-        for spot in &spots {
-            if spot.id.trim().is_empty() || !ids.insert(&spot.id) {
-                return Err(invalid_data("Empty or duplicate spot ID in spots_3d.json"));
-            }
-            if ![spot.center_3d.x, spot.center_3d.y, spot.center_3d.z]
-                .iter()
-                .all(|v| v.is_finite())
-            {
-                return Err(invalid_data("Non-finite spot coordinates in spots_3d.json"));
-            }
-        }
+        validate_spots(&spots)?;
+        crate::site_graph::validate_names(&parkings, &spots).map_err(invalid_data)?;
         Ok(Self {
             directory,
             parkings,
             spots,
         })
     }
+}
+
+fn validate_spots(spots: &[Spot3DDef]) -> io::Result<()> {
+    let mut ids = std::collections::HashSet::new();
+    for spot in spots {
+        if spot.id.trim().is_empty() || !ids.insert(&spot.id) {
+            return Err(invalid_data("Empty or duplicate spot ID in spots_3d.json"));
+        }
+        if ![spot.center_3d.x, spot.center_3d.y, spot.center_3d.z]
+            .iter()
+            .all(|v| v.is_finite())
+        {
+            return Err(invalid_data("Non-finite spot coordinates in spots_3d.json"));
+        }
+    }
+    Ok(())
 }
 
 fn invalid_data(error: impl std::fmt::Display) -> io::Error {
@@ -133,6 +139,12 @@ fn validate_parking_config(payload: &Value) -> io::Result<()> {
 
 pub fn save_parking_config(directory: &Path, payload: &Value) -> io::Result<()> {
     validate_parking_config(payload)?;
+    let parkings = Vec::<ParkingLotConfig>::deserialize(payload).map_err(invalid_data)?;
+    // Stored geometry failures are infrastructure errors, not invalid requests.
+    let spots: Vec<Spot3DDef> =
+        read_json(&directory.join("spots_3d.json")).map_err(io::Error::other)?;
+    validate_spots(&spots).map_err(io::Error::other)?;
+    crate::site_graph::validate_names(&parkings, &spots).map_err(invalid_data)?;
     let content = serde_json::to_string_pretty(payload).map_err(invalid_data)?;
     replace_config_file(directory, |file| file.write_all(content.as_bytes()))
 }
@@ -418,5 +430,53 @@ mod tests {
             std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
             0o640
         );
+    }
+
+    #[test]
+    fn r11_loading_rejects_collisions_with_generated_navigation_names() {
+        let fixture = Fixture::new();
+        fixture.seed();
+        for id in ["cam-01", "path_node_1"] {
+            fixture.write(
+                "spots_3d.json",
+                &serde_json::json!([
+                    {"id": id, "center3D": {"x": 1, "y": 0, "z": 1}}
+                ]),
+            );
+            let error = SiteConfig::load(&fixture.0).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert!(error.to_string().contains(id));
+        }
+    }
+
+    #[test]
+    fn r11_saving_rejects_new_collision_without_replacing_the_valid_config() {
+        let fixture = Fixture::new();
+        fixture.seed();
+        fixture.write(
+            "config.json",
+            &serde_json::json!([
+                {"name": "Short", "path": [{"x": 0, "z": 0}, {"x": 0, "z": 0}]}
+            ]),
+        );
+        fixture.write(
+            "spots_3d.json",
+            &serde_json::json!([
+                {"id": "path_node_1", "center3D": {"x": 1, "y": 0, "z": 1}}
+            ]),
+        );
+        SiteConfig::load(&fixture.0).unwrap();
+        let before = std::fs::read(fixture.0.join("config.json")).unwrap();
+        let payload = serde_json::json!([
+            {"name": "Extended", "path": [{"x": 0, "z": 0}, {"x": 1, "z": 0}]}
+        ]);
+        let error = save_parking_config(&fixture.0, &payload).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("path_node_1"));
+        assert_eq!(
+            std::fs::read(fixture.0.join("config.json")).unwrap(),
+            before
+        );
+        assert_no_pending_files(&fixture.0);
     }
 }
