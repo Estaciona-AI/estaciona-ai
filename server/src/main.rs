@@ -41,6 +41,7 @@ mod site_reconciliation;
 mod site_reconciliation_tests;
 mod state;
 mod users;
+mod vehicles;
 mod ws;
 
 use axum::{
