@@ -622,3 +622,39 @@ async fn r08_favorite_lookup_failure_does_not_fall_back_to_the_closest_spot(pool
         .unwrap();
     assert_recommendation_unavailable(&f).await;
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn r08_free_spots_query_failure_is_unavailable_instead_of_full(pool: PgPool) {
+    let f = recommendation_fixture(pool).await;
+    // Earlier priority reads and later verification reads must remain healthy.
+    // Inject only the final ordinary-spots SELECT, using a disposable SQL view.
+    sqlx::raw_sql(
+        "ALTER TABLE spots RENAME TO r08_original_spots;
+         CREATE FUNCTION r08_free_read_allowed() RETURNS BOOLEAN
+         LANGUAGE plpgsql VOLATILE AS $$ BEGIN
+             IF strpos(current_query(), 'AND id NOT IN') > 0 THEN
+                 RAISE EXCEPTION 'injected R08 free spots failure';
+             END IF;
+             RETURN TRUE;
+         END $$;
+         CREATE VIEW spots AS SELECT * FROM r08_original_spots
+         WHERE r08_free_read_allowed();",
+    )
+    .execute(&f.state.pool)
+    .await
+    .unwrap();
+    assert_recommendation_unavailable(&f).await;
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn r08_successful_empty_lookup_still_reports_full(pool: PgPool) {
+    let f = recommendation_fixture(pool).await;
+    sqlx::query("UPDATE spots SET status='occupied'")
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    let response = recommendation_response(&f).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = to_bytes(response.into_body(), 16384).await.unwrap();
+    assert_eq!(body.as_ref(), "Estacionamento Lotado".as_bytes());
+}

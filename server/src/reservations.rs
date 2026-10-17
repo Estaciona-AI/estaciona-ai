@@ -510,7 +510,13 @@ pub async fn recommend_spot(
     )
     .fetch_all(&state.pool)
     .await
-    .unwrap_or_default();
+    .map_err(|source| {
+        RecommendationQueryError {
+            query: "free_spots",
+            source,
+        }
+        .into_http_error()
+    })?;
 
     if free_spots.is_empty() {
         return Err((StatusCode::NOT_FOUND, "Estacionamento Lotado".to_string()));
