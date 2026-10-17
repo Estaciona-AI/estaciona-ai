@@ -658,3 +658,60 @@ async fn r08_successful_empty_lookup_still_reports_full(pool: PgPool) {
     let body = to_bytes(response.into_body(), 16384).await.unwrap();
     assert_eq!(body.as_ref(), "Estacionamento Lotado".as_bytes());
 }
+
+async fn assert_recommended_spot(f: &Fixture, expected: &str) {
+    let response = recommendation_response(f).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 16384).await.unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["recommended_spot"], expected);
+    assert_eq!(value["route"], serde_json::json!(["cam-01", expected]));
+}
+
+async fn add_preferred_spot(f: &Fixture, spot_id: &str) {
+    sqlx::query("INSERT INTO spots (id,status,x,y) VALUES ($1,'free',10,0)")
+        .bind(spot_id)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    let mut graph = ParkingGraph::new();
+    let camera = graph.add_node("cam-01", 0.0, 0.0);
+    let ordinary = graph.add_node(&f.spot_id, 1.0, 0.0);
+    let preferred = graph.add_node(spot_id, 10.0, 0.0);
+    graph.add_edge(camera, ordinary, 1, true);
+    graph.add_edge(camera, preferred, 10, true);
+    *f.state.graph.write().await = graph;
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn r08_valid_priority_still_takes_precedence_over_distance(pool: PgPool) {
+    let f = recommendation_fixture(pool).await;
+    add_preferred_spot(&f, "A-01").await;
+    sqlx::query("UPDATE users SET pcd_status=TRUE WHERE id=$1")
+        .bind(f.owner)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    assert_recommended_spot(&f, "A-01").await;
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn r08_valid_history_still_takes_precedence_over_distance(pool: PgPool) {
+    let f = recommendation_fixture(pool).await;
+    add_preferred_spot(&f, "B-07").await;
+    for _ in 0..3 {
+        sqlx::query("INSERT INTO user_occupancy_history (user_id,spot_id) VALUES ($1,'B-07')")
+            .bind(f.owner)
+            .execute(&f.state.pool)
+            .await
+            .unwrap();
+    }
+    assert_recommended_spot(&f, "B-07").await;
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn r08_valid_empty_history_still_uses_distance(pool: PgPool) {
+    let f = recommendation_fixture(pool).await;
+    add_preferred_spot(&f, "B-07").await;
+    assert_recommended_spot(&f, "R01-01").await;
+}
