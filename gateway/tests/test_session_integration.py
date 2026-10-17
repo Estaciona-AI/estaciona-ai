@@ -560,7 +560,8 @@ def test_idle_websocket_fails_closed_when_principal_lookup_fails(
 
 @pytest.mark.parametrize("termination", ["expiration", "client_close"])
 def test_older_socket_does_not_remove_the_newer_private_channel(server, termination):
-    # A known plate and active reservation make CAR_DETECTED send a private route.
+    # A known plate and reservation produce a private navigation result.
+    # session-camera is authorized but absent from the graph.
     hashed_plate = hmac.new(
         b"disposable-pepper", b"R03TEST", hashlib.sha256
     ).hexdigest()
@@ -618,9 +619,9 @@ def test_older_socket_does_not_remove_the_newer_private_channel(server, terminat
                     assert json.loads(
                         await asyncio.wait_for(newer.recv(), timeout=3)
                     ) == {
-                        "type": "NAVIGATION_START",
+                        "type": "NAVIGATION_UNAVAILABLE",
                         "spot_id": "R02-A",
-                        "route": ["session-camera", "R02-A"],
+                        "reason": "route_unavailable",
                     }
 
     asyncio.run(run())
