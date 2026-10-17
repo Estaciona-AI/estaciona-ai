@@ -1269,4 +1269,144 @@ mod tests {
         assert_eq!(count, 0);
         Ok(())
     }
+    // R01 + R02 + R05: a replay must not undo a newer owner's reservation.
+    #[sqlx::test(migrations = "./migrations")]
+    async fn replayed_free_event_preserves_a_new_reservation(pool: PgPool) -> TestResult {
+        let principal = principal(&pool).await?;
+        let spot_id = authorized_spot(&pool, &principal, "occupied").await?;
+        let event_id = Uuid::new_v4();
+        let frame = payload(&spot_id, "free");
+        let first = apply(&pool, &principal, event_id, frame.clone()).await?;
+        assert_eq!(first.ack.outcome, Outcome::Applied);
+        let owner = user(&pool).await?;
+        let reservation = reservation_store::create(
+            &pool,
+            &spot_id,
+            owner,
+            Utc::now() + chrono::Duration::hours(1),
+        )
+        .await
+        .expect("new owner reserves the released spot");
+        let replay = apply(&pool, &principal, event_id, frame).await?;
+        assert!(replay.ack.duplicate);
+        assert_eq!(replay.ack.outcome, Outcome::Applied);
+        assert!(replay.spot_update.is_none());
+        let fresh = apply(&pool, &principal, Uuid::new_v4(), payload(&spot_id, "free")).await?;
+        assert_eq!(fresh.ack.outcome, Outcome::Ignored);
+        assert_eq!(fresh.ack.reason.as_deref(), Some("reservation_protected"));
+        assert_eq!(status(&pool, &spot_id).await?, "reserved");
+        let claim: (Uuid, String) =
+            sqlx::query_as("SELECT user_id, status FROM reservations WHERE id = $1")
+                .bind(reservation.id)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(claim, (owner, "active".to_owned()));
+        Ok(())
+    }
+
+    // The authority lock must protect policy replacement as well as revocation.
+    #[sqlx::test(migrations = "./migrations")]
+    async fn grant_removal_waits_for_delivery_then_rejects_new_events(pool: PgPool) -> TestResult {
+        let principal = principal(&pool).await?;
+        let spot_id = authorized_spot(&pool, &principal, "free").await?;
+        let mut blocker = pool.begin().await?;
+        sqlx::query("SELECT id FROM spots WHERE id = $1 FOR UPDATE")
+            .bind(&spot_id)
+            .execute(&mut *blocker)
+            .await?;
+        let event_id = Uuid::new_v4();
+        let frame = payload(&spot_id, "occupied");
+        let worker_pool = pool.clone();
+        let worker_principal = principal.clone();
+        let worker_frame = frame.clone();
+        let delivery = tokio::spawn(async move {
+            apply(&worker_pool, &worker_principal, event_id, worker_frame).await
+        });
+        wait_for_blocked_query(&pool, "SELECT status FROM spots").await?;
+        let policy_pool = pool.clone();
+        let gateway_id = principal.gateway_id;
+        let policy_path = std::env::temp_dir().join(format!("p1-policy-{}.json", Uuid::new_v4()));
+        std::fs::write(
+            &policy_path,
+            r#"{"path_update":false,"trend_prediction":false,"cameras":[]}"#,
+        )
+        .expect("write disposable policy");
+        let args = vec![
+            "server".to_owned(),
+            "--edge-policy".to_owned(),
+            gateway_id.to_string(),
+            policy_path.to_string_lossy().into_owned(),
+        ];
+        let policy =
+            tokio::spawn(async move { crate::edge_cli::dispatch(&policy_pool, &args).await });
+        wait_for_blocked_query(&pool, "FROM edge_gateways").await?;
+        assert!(!policy.is_finished());
+        blocker.commit().await?;
+        assert_eq!(
+            delivery
+                .await
+                .expect("delivery worker")
+                .unwrap()
+                .ack
+                .outcome,
+            Outcome::Applied
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(3), policy)
+            .await
+            .expect("policy must complete")
+            .expect("policy worker")
+            .expect("CLI applies policy");
+        std::fs::remove_file(policy_path).expect("remove disposable policy");
+        let replay = apply(&pool, &principal, event_id, frame).await?;
+        assert!(replay.ack.duplicate);
+        assert_eq!(replay.ack.outcome, Outcome::Applied);
+        let fresh = apply(&pool, &principal, Uuid::new_v4(), payload(&spot_id, "free")).await?;
+        assert_eq!(fresh.ack.reason.as_deref(), Some("scope_forbidden"));
+        assert_eq!(status(&pool, &spot_id).await?, "occupied");
+        Ok(())
+    }
+    #[sqlx::test(migrations = "./migrations")]
+    async fn free_observation_waits_for_reservation_and_preserves_its_owner(
+        pool: PgPool,
+    ) -> TestResult {
+        let principal = principal(&pool).await?;
+        let spot_id = authorized_spot(&pool, &principal, "free").await?;
+        let owner = user(&pool).await?;
+        let mut tx = pool.begin().await?;
+        let reservation = reservation_store::create_in_transaction(
+            &mut tx,
+            &spot_id,
+            owner,
+            Utc::now() + chrono::Duration::hours(1),
+        )
+        .await
+        .expect("reservation claims free spot inside transaction");
+        let worker_pool = pool.clone();
+        let frame = payload(&spot_id, "free");
+        let delivery =
+            tokio::spawn(
+                async move { apply(&worker_pool, &principal, Uuid::new_v4(), frame).await },
+            );
+        wait_for_blocked_query(&pool, "SELECT status FROM spots").await?;
+        assert!(!delivery.is_finished());
+        tx.commit().await?;
+        let observed = tokio::time::timeout(std::time::Duration::from_secs(3), delivery)
+            .await
+            .expect("delivery completes after reservation commit")
+            .expect("delivery worker")?;
+        assert_eq!(observed.ack.outcome, Outcome::Ignored);
+        assert_eq!(
+            observed.ack.reason.as_deref(),
+            Some("reservation_protected")
+        );
+        assert!(observed.spot_update.is_none());
+        assert_eq!(status(&pool, &spot_id).await?, "reserved");
+        let claim: (Uuid, String) =
+            sqlx::query_as("SELECT user_id,status FROM reservations WHERE id=$1")
+                .bind(reservation.id)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(claim, (owner, "active".to_owned()));
+        Ok(())
+    }
 }
