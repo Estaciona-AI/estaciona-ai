@@ -16,6 +16,7 @@
 // ==============================================================================
 
 pub mod messages;
+pub(crate) mod private_session;
 pub mod ws_edge;
 
 pub use ws_edge::ws_edge_handler;
@@ -30,7 +31,6 @@ use axum::{
 use chrono::{Duration, Utc};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
-use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::reservation_store::{self, CreateError, FinishReason};
@@ -81,7 +81,7 @@ async fn handle_app_socket(socket: WebSocket, state: SharedState, session: AuthS
     let user_id = session.user_id;
     let (mut sender, mut receiver) = socket.split();
 
-    let (private_tx, mut private_rx) = mpsc::unbounded_channel::<String>();
+    let (private_tx, mut private_rx, mut private_closed) = private_session::channel();
     state.user_sessions.insert(user_id, private_tx.clone());
 
     let mut broadcast_rx = state.tx.subscribe();
@@ -154,7 +154,7 @@ async fn handle_app_socket(socket: WebSocket, state: SharedState, session: AuthS
                                 };
 
                                 if let Ok(json) = serde_json::to_string(&confirm) {
-                                    let _ = private_tx.send(json);
+                                    let _ = private_tx.try_send(json);
                                 }
                                 if let Ok(json) = serde_json::to_string(&update) {
                                     let _ = value.tx.send(json);
@@ -166,7 +166,7 @@ async fn handle_app_socket(socket: WebSocket, state: SharedState, session: AuthS
                                     reason: "already_taken".to_string(),
                                 };
                                 if let Ok(json) = serde_json::to_string(&reject) {
-                                    let _ = private_tx.send(json);
+                                    let _ = private_tx.try_send(json);
                                 }
                             }
                             Err(CreateError::Database(error)) => {
@@ -209,6 +209,7 @@ async fn handle_app_socket(socket: WebSocket, state: SharedState, session: AuthS
         biased;
         _ = tokio::time::sleep_until(session.deadline) => Some((axum::http::StatusCode::UNAUTHORIZED, "Expired session".to_owned())),
         error = session.wait_for_invalidation(&state.pool) => Some(error),
+        _ = private_closed.wait_for(|closed| *closed) => None,
         result = send_task => result.err(),
         result = recv_task => result.err(),
     };

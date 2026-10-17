@@ -123,7 +123,7 @@ pub async fn car_detected(
             },
         };
         if let Ok(json) = serde_json::to_string(&navigation) {
-            let _ = session.send(json);
+            let _ = session.try_send(json);
         }
     }
     Ok(true)
@@ -207,7 +207,7 @@ mod tests {
         state: SharedState,
         principal: Principal,
         user: Uuid,
-        nav: mpsc::UnboundedReceiver<String>,
+        nav: mpsc::Receiver<String>,
         updates: broadcast::Receiver<String>,
     }
 
@@ -247,7 +247,7 @@ mod tests {
         graph.add_edge(camera, outside, 1, true);
         graph.add_edge(camera, allowed, 10, true);
         let (tx, updates) = broadcast::channel(100);
-        let (nav_tx, nav) = mpsc::unbounded_channel();
+        let (nav_tx, nav, _) = crate::ws::private_session::channel();
         let sessions = DashMap::new();
         sessions.insert(user, nav_tx);
         let state = Arc::new(AppState {
