@@ -183,4 +183,225 @@ mod tests {
         assert!(matches!(result, Err(ConfigWriteError::Storage(_))));
         store.run_write(|_| Ok(())).await.unwrap();
     }
+    struct ConfigFixture(PathBuf);
+
+    impl ConfigFixture {
+        fn new() -> Self {
+            let directory =
+                std::env::temp_dir().join(format!("r10-config-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&directory).unwrap();
+            std::fs::write(
+                directory.join("config.json"),
+                serde_json::to_vec(&Self::payload("Initial")).unwrap(),
+            )
+            .unwrap();
+            std::fs::write(directory.join("spots_3d.json"), b"[]").unwrap();
+            Self(directory)
+        }
+
+        fn payload(name: &str) -> Value {
+            serde_json::json!([{
+                "name": name,
+                "camera": {"position": {"x": 5}},
+                "path": [{"x": 0, "z": 0}, {"x": 1, "z": 0}]
+            }])
+        }
+
+        fn read(&self) -> Value {
+            serde_json::from_slice(&std::fs::read(self.0.join("config.json")).unwrap()).unwrap()
+        }
+
+        async fn state(&self, pool: sqlx::PgPool) -> crate::state::SharedState {
+            crate::state::init_state(
+                pool,
+                "r10-disposable-jwt".into(),
+                "r10-disposable-pepper".into(),
+                crate::site_config::SiteConfig::load(&self.0).unwrap(),
+            )
+            .await
+            .unwrap()
+        }
+    }
+
+    impl Drop for ConfigFixture {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    async fn principal(state: &crate::state::SharedState, role: &str) -> axum::http::HeaderMap {
+        let id = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO users (id, name, email, password_hash, role) VALUES ($1, 'R10 fixture', $2, 'unused-hash', $3)")
+            .bind(id).bind(format!("{id}@example.invalid")).bind(role).execute(&state.pool).await.unwrap();
+        let token = crate::security::create_jwt(&id.to_string(), role, &state.jwt_secret).unwrap();
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {token}").parse().unwrap(),
+        );
+        headers
+    }
+
+    #[tokio::test]
+    async fn r10_saving_separate_configs_preserves_extra_fields_and_isolation() {
+        let first = ConfigFixture::new();
+        let second = ConfigFixture::new();
+        let one = LocalConfigStore::new(&first.0);
+        let two = LocalConfigStore::new(&second.0);
+        let (a, b) = tokio::join!(
+            one.save(ConfigFixture::payload("Gávea")),
+            two.save(ConfigFixture::payload("Outra unidade"))
+        );
+        a.unwrap();
+        b.unwrap();
+        assert_eq!(first.read(), ConfigFixture::payload("Gávea"));
+        assert_eq!(second.read(), ConfigFixture::payload("Outra unidade"));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn r10_config_route_preserves_success_and_invalid_payload_contracts(pool: sqlx::PgPool) {
+        let fixture = ConfigFixture::new();
+        let state = fixture.state(pool).await;
+        let headers = principal(&state, "admin").await;
+        let payload = ConfigFixture::payload("Gávea");
+        let response = crate::save_config(
+            axum::extract::State(state.clone()),
+            headers.clone(),
+            axum::Json(payload.clone()),
+        )
+        .await;
+        assert_eq!(response.unwrap(), r#"{"status": "ok"}"#);
+        assert_eq!(fixture.read(), payload);
+        let invalid = ConfigFixture::payload("<script>");
+        let response =
+            crate::save_config(axum::extract::State(state), headers, axum::Json(invalid)).await;
+        assert_eq!(response.unwrap_err().0, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(fixture.read(), payload);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn r10_config_route_rejects_non_admin_before_storage_work(pool: sqlx::PgPool) {
+        let fixture = ConfigFixture::new();
+        let original = fixture.read();
+        let state = fixture.state(pool).await;
+        let user_headers = principal(&state, "user").await;
+        let (release, task) = pause_writer(state.config_store.clone()).await;
+        for (headers, expected) in [
+            (
+                axum::http::HeaderMap::new(),
+                axum::http::StatusCode::UNAUTHORIZED,
+            ),
+            (user_headers, axum::http::StatusCode::FORBIDDEN),
+        ] {
+            let response = crate::save_config(
+                axum::extract::State(state.clone()),
+                headers,
+                axum::Json(ConfigFixture::payload("Unauthorized")),
+            )
+            .await;
+            assert_eq!(response.unwrap_err().0, expected);
+        }
+        assert_eq!(fixture.read(), original);
+        release.send(()).unwrap();
+        task.await.unwrap().unwrap();
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn r10_config_route_returns_503_while_destination_is_busy_then_recovers(
+        pool: sqlx::PgPool,
+    ) {
+        let fixture = ConfigFixture::new();
+        let original = fixture.read();
+        let state = fixture.state(pool).await;
+        let headers = principal(&state, "admin").await;
+        let (release, task) = pause_writer(state.config_store.clone()).await;
+        let response = crate::save_config(
+            axum::extract::State(state.clone()),
+            headers.clone(),
+            axum::Json(ConfigFixture::payload("Busy")),
+        )
+        .await;
+        assert_eq!(
+            response.unwrap_err().0,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(fixture.read(), original);
+        release.send(()).unwrap();
+        task.await.unwrap().unwrap();
+        crate::save_config(
+            axum::extract::State(state),
+            headers,
+            axum::Json(ConfigFixture::payload("Recovered")),
+        )
+        .await
+        .unwrap();
+        assert_eq!(fixture.read(), ConfigFixture::payload("Recovered"));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn r10_config_route_reports_storage_failure_without_exposing_paths(pool: sqlx::PgPool) {
+        let fixture = ConfigFixture::new();
+        let state = fixture.state(pool).await;
+        let headers = principal(&state, "admin").await;
+        let config = fixture.0.join("config.json");
+        std::fs::remove_file(&config).unwrap();
+        std::fs::create_dir(&config).unwrap();
+        let response = crate::save_config(
+            axum::extract::State(state.clone()),
+            headers.clone(),
+            axum::Json(ConfigFixture::payload("Failure")),
+        )
+        .await;
+        let (status, message) = response.unwrap_err();
+        assert_eq!(status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!message.contains(fixture.0.to_str().unwrap()));
+        assert!(config.is_dir());
+        assert_eq!(std::fs::read_dir(&fixture.0).unwrap().count(), 2);
+        std::fs::remove_dir(&config).unwrap();
+        crate::save_config(
+            axum::extract::State(state),
+            headers,
+            axum::Json(ConfigFixture::payload("Recovered")),
+        )
+        .await
+        .unwrap();
+        assert_eq!(fixture.read(), ConfigFixture::payload("Recovered"));
+    }
+
+    #[tokio::test]
+    async fn r10_started_publication_completes_after_caller_cancellation() {
+        let fixture = ConfigFixture::new();
+        let store = LocalConfigStore::new(&fixture.0);
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let (published, completed) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            store
+                .run_write(move |directory| {
+                    let _ = started.send(());
+                    wait.recv().map_err(io::Error::other)?;
+                    let result = crate::site_config::save_parking_config(
+                        &directory,
+                        &ConfigFixture::payload("Published"),
+                    );
+                    let _ = published.send(result.is_ok());
+                    result
+                })
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), ready)
+            .await
+            .unwrap()
+            .unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        release.send(()).unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), completed)
+                .await
+                .unwrap()
+                .unwrap()
+        );
+        assert_eq!(fixture.read(), ConfigFixture::payload("Published"));
+    }
 }
