@@ -23,7 +23,7 @@ pub struct NodeId(pub usize);
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct DuplicateNodeName {
-    name: String,
+    pub(crate) name: String,
 }
 
 impl std::fmt::Display for DuplicateNodeName {
