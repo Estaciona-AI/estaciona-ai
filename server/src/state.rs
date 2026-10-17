@@ -84,7 +84,14 @@ pub async fn init_state(
                     format!("path_node_{}", node_counter)
                 };
 
-                let graph_node = graph.add_node(&node_id, px as f32, pz as f32);
+                let graph_node =
+                    graph
+                        .add_node(&node_id, px as f32, pz as f32)
+                        .map_err(|error| {
+                            crate::site_reconciliation::ReconcileError::InvalidMap(
+                                error.to_string(),
+                            )
+                        })?;
                 node_map.insert(node_id.clone(), graph_node);
 
                 if let Some(prev_id) = &prev_node_id {
@@ -106,7 +113,11 @@ pub async fn init_state(
     let spots_3d = site.spots;
 
     for spot in spots_3d {
-        let spot_node = graph.add_node(&spot.id, spot.center_3d.x as f32, spot.center_3d.z as f32);
+        let spot_node = graph
+            .add_node(&spot.id, spot.center_3d.x as f32, spot.center_3d.z as f32)
+            .map_err(|error| {
+                crate::site_reconciliation::ReconcileError::InvalidMap(error.to_string())
+            })?;
 
         if let Some(parking) = parkings.first()
             && !parking.path.is_empty()

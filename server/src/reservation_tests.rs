@@ -510,9 +510,9 @@ async fn assert_recommendation_ignores_retired(pool: PgPool, branch: &str) {
         }
     }
     let mut graph = ParkingGraph::new();
-    let cam = graph.add_node("cam-01", 0.0, 0.0);
-    let old = graph.add_node(retired, 1.0, 0.0);
-    let current = graph.add_node("C-01", 10.0, 0.0);
+    let cam = graph.add_node("cam-01", 0.0, 0.0).unwrap();
+    let old = graph.add_node(retired, 1.0, 0.0).unwrap();
+    let current = graph.add_node("C-01", 10.0, 0.0).unwrap();
     graph.add_edge(cam, old, 1, true);
     graph.add_edge(cam, current, 10, true);
     *f.state.graph.write().await = graph;
@@ -544,8 +544,8 @@ async fn closest_recommendation_excludes_retired_spots(pool: PgPool) {
 async fn recommendation_fixture(pool: PgPool) -> Fixture {
     let f = Fixture::new(pool).await.unwrap();
     let mut graph = ParkingGraph::new();
-    let camera = graph.add_node("cam-01", 0.0, 0.0);
-    let spot = graph.add_node(&f.spot_id, 1.0, 0.0);
+    let camera = graph.add_node("cam-01", 0.0, 0.0).unwrap();
+    let spot = graph.add_node(&f.spot_id, 1.0, 0.0).unwrap();
     graph.add_edge(camera, spot, 1, true);
     *f.state.graph.write().await = graph;
     f
@@ -677,9 +677,9 @@ async fn add_preferred_spot(f: &Fixture, spot_id: &str) {
         .await
         .unwrap();
     let mut graph = ParkingGraph::new();
-    let camera = graph.add_node("cam-01", 0.0, 0.0);
-    let ordinary = graph.add_node(&f.spot_id, 1.0, 0.0);
-    let preferred = graph.add_node(spot_id, 10.0, 0.0);
+    let camera = graph.add_node("cam-01", 0.0, 0.0).unwrap();
+    let ordinary = graph.add_node(&f.spot_id, 1.0, 0.0).unwrap();
+    let preferred = graph.add_node(spot_id, 10.0, 0.0).unwrap();
     graph.add_edge(camera, ordinary, 1, true);
     graph.add_edge(camera, preferred, 10, true);
     *f.state.graph.write().await = graph;

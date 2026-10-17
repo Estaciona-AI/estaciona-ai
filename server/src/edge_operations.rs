@@ -241,9 +241,9 @@ mod tests {
             .bind(crate::security::hash_plate("ABC1D23", "fixture-pepper"))
             .execute(&pool).await.unwrap();
         let mut graph = ParkingGraph::new();
-        let camera = graph.add_node("cam-01", 0.0, 0.0);
-        let outside = graph.add_node("outside", 1.0, 0.0);
-        let allowed = graph.add_node("allowed", 10.0, 0.0);
+        let camera = graph.add_node("cam-01", 0.0, 0.0).unwrap();
+        let outside = graph.add_node("outside", 1.0, 0.0).unwrap();
+        let allowed = graph.add_node("allowed", 10.0, 0.0).unwrap();
         graph.add_edge(camera, outside, 1, true);
         graph.add_edge(camera, allowed, 10, true);
         let (tx, updates) = broadcast::channel(100);
@@ -538,8 +538,9 @@ mod tests {
         .await
         .unwrap();
         let mut graph = ParkingGraph::new();
-        let camera = (missing != "camera").then(|| graph.add_node("cam-01", 0.0, 0.0));
-        let target = (missing != "destination").then(|| graph.add_node("allowed", 10.0, 0.0));
+        let camera = (missing != "camera").then(|| graph.add_node("cam-01", 0.0, 0.0).unwrap());
+        let target =
+            (missing != "destination").then(|| graph.add_node("allowed", 10.0, 0.0).unwrap());
         if let (Some(camera), Some(target)) = (camera, target) {
             graph.add_edge(camera, target, 10, true);
             graph.set_edge_status("cam-01", "allowed", false);
@@ -582,8 +583,8 @@ mod tests {
         );
         // Restoring the route resumes navigation to the very same reservation.
         let mut graph = ParkingGraph::new();
-        let camera = graph.add_node("cam-01", 0.0, 0.0);
-        let target = graph.add_node("allowed", 10.0, 0.0);
+        let camera = graph.add_node("cam-01", 0.0, 0.0).unwrap();
+        let target = graph.add_node("allowed", 10.0, 0.0).unwrap();
         graph.add_edge(camera, target, 10, true);
         *f.state.graph.write().await = graph;
         car_detected(&f.state, &f.principal, "ABC1D23", "cam-01")
