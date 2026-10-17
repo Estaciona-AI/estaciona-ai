@@ -160,6 +160,7 @@ async fn main() {
         .route("/reservations/recommend", get(reservations::recommend_spot))
         .route("/spots/{id}/status", put(reservations::update_spot_status))
         .merge(auth_routes(parking_state.clone()))
+        .merge(vehicles::routes(lpr_mode))
         .route("/users/{id}", get(users::get_user))
         .route("/config", post(save_config))
         .with_state(parking_state.clone())

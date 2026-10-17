@@ -15,8 +15,10 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 // ==============================================================================
 
+mod api;
 mod store;
 
+pub use api::routes;
 pub use store::{approved_user, request_binding};
 
 #[cfg(test)]
