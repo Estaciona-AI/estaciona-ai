@@ -21,6 +21,19 @@ use std::collections::{BinaryHeap, HashMap};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NodeId(pub usize);
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct DuplicateNodeName {
+    pub(crate) name: String,
+}
+
+impl std::fmt::Display for DuplicateNodeName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Duplicate navigation node name: {}", self.name)
+    }
+}
+
+impl std::error::Error for DuplicateNodeName {}
+
 #[derive(Debug, Clone)]
 pub struct Node {
     pub name: String,
@@ -72,7 +85,12 @@ impl ParkingGraph {
         }
     }
 
-    pub fn add_node(&mut self, name: &str, x: f32, y: f32) -> NodeId {
+    pub fn add_node(&mut self, name: &str, x: f32, y: f32) -> Result<NodeId, DuplicateNodeName> {
+        if self.name_to_id.contains_key(name) {
+            return Err(DuplicateNodeName {
+                name: name.to_owned(),
+            });
+        }
         let id = NodeId(self.next_id);
         self.next_id += 1;
 
@@ -87,7 +105,7 @@ impl ParkingGraph {
         self.name_to_id.insert(name.to_string(), id);
         self.edges.insert(id, Vec::new());
 
-        id
+        Ok(id)
     }
 
     pub fn add_edge(&mut self, from: NodeId, to: NodeId, cost: u32, bidirectional: bool) {
@@ -251,10 +269,10 @@ mod tests {
     fn build_test_graph() -> ParkingGraph {
         let mut graph = ParkingGraph::new();
 
-        let in_node = graph.add_node("entrada", 0.0, 0.0);
-        let mid1_node = graph.add_node("meio-1", 1.0, 0.0);
-        let mid2_node = graph.add_node("meio-2", 1.0, 1.0);
-        let park_node = graph.add_node("vaga-1", 2.0, 0.0);
+        let in_node = graph.add_node("entrada", 0.0, 0.0).unwrap();
+        let mid1_node = graph.add_node("meio-1", 1.0, 0.0).unwrap();
+        let mid2_node = graph.add_node("meio-2", 1.0, 1.0).unwrap();
+        let park_node = graph.add_node("vaga-1", 2.0, 0.0).unwrap();
 
         graph.add_edge(in_node, mid1_node, 10, true);
         graph.add_edge(in_node, mid2_node, 15, true);
@@ -276,9 +294,9 @@ mod tests {
     #[test]
     fn shortest_path_uses_edge_cost_even_when_coordinates_are_misleading() {
         let mut graph = ParkingGraph::new();
-        let start = graph.add_node("start", 0.0, 0.0);
-        let waypoint = graph.add_node("waypoint", 100.0, 100.0);
-        let goal = graph.add_node("goal", 1.0, 0.0);
+        let start = graph.add_node("start", 0.0, 0.0).unwrap();
+        let waypoint = graph.add_node("waypoint", 100.0, 100.0).unwrap();
+        let goal = graph.add_node("goal", 1.0, 0.0).unwrap();
         graph.add_edge(start, goal, 10, false);
         graph.add_edge(start, waypoint, 1, false);
         graph.add_edge(waypoint, goal, 1, false);
@@ -293,8 +311,8 @@ mod tests {
     #[test]
     fn add_node_increments_id() {
         let mut graph = ParkingGraph::new();
-        let n1 = graph.add_node("a", 0.0, 0.0);
-        let n2 = graph.add_node("b", 1.0, 1.0);
+        let n1 = graph.add_node("a", 0.0, 0.0).unwrap();
+        let n2 = graph.add_node("b", 1.0, 1.0).unwrap();
         assert_eq!(n1, NodeId(0));
         assert_eq!(n2, NodeId(1));
     }
@@ -302,7 +320,7 @@ mod tests {
     #[test]
     fn add_node_stores_name_and_coords() {
         let mut graph = ParkingGraph::new();
-        let id = graph.add_node("test-node", 3.5, 7.2);
+        let id = graph.add_node("test-node", 3.5, 7.2).unwrap();
         let node = graph.nodes.get(&id).unwrap();
         assert_eq!(node.name, "test-node");
         assert_eq!(node.x, 3.5);
@@ -312,8 +330,8 @@ mod tests {
     #[test]
     fn add_edge_bidirectional_creates_both_directions() {
         let mut graph = ParkingGraph::new();
-        let a = graph.add_node("a", 0.0, 0.0);
-        let b = graph.add_node("b", 1.0, 0.0);
+        let a = graph.add_node("a", 0.0, 0.0).unwrap();
+        let b = graph.add_node("b", 1.0, 0.0).unwrap();
         graph.add_edge(a, b, 10, true);
 
         let a_neighbors = graph.edges.get(&a).unwrap();
@@ -328,8 +346,8 @@ mod tests {
     #[test]
     fn add_edge_unidirectional_creates_one_direction() {
         let mut graph = ParkingGraph::new();
-        let a = graph.add_node("a", 0.0, 0.0);
-        let b = graph.add_node("b", 1.0, 0.0);
+        let a = graph.add_node("a", 0.0, 0.0).unwrap();
+        let b = graph.add_node("b", 1.0, 0.0).unwrap();
         graph.add_edge(a, b, 10, false);
 
         let a_neighbors = graph.edges.get(&a).unwrap();
@@ -419,11 +437,11 @@ mod tests {
     #[test]
     fn route_through_longer_chain() {
         let mut graph = ParkingGraph::new();
-        let a = graph.add_node("a", 0.0, 0.0);
-        let b = graph.add_node("b", 1.0, 0.0);
-        let c = graph.add_node("c", 2.0, 0.0);
-        let d = graph.add_node("d", 3.0, 0.0);
-        let e = graph.add_node("e", 4.0, 0.0);
+        let a = graph.add_node("a", 0.0, 0.0).unwrap();
+        let b = graph.add_node("b", 1.0, 0.0).unwrap();
+        let c = graph.add_node("c", 2.0, 0.0).unwrap();
+        let d = graph.add_node("d", 3.0, 0.0).unwrap();
+        let e = graph.add_node("e", 4.0, 0.0).unwrap();
 
         graph.add_edge(a, b, 1, true);
         graph.add_edge(b, c, 1, true);
@@ -437,9 +455,9 @@ mod tests {
     #[test]
     fn isolated_node_has_no_route_to_others() {
         let mut graph = ParkingGraph::new();
-        graph.add_node("island", 0.0, 0.0);
-        let a = graph.add_node("a", 1.0, 0.0);
-        let b = graph.add_node("b", 2.0, 0.0);
+        graph.add_node("island", 0.0, 0.0).unwrap();
+        let a = graph.add_node("a", 1.0, 0.0).unwrap();
+        let b = graph.add_node("b", 2.0, 0.0).unwrap();
         graph.add_edge(a, b, 10, true);
 
         assert!(graph.calculate_route("island", "a").is_none());
@@ -449,9 +467,9 @@ mod tests {
     #[test]
     fn route_prefers_lower_cost_path() {
         let mut graph = ParkingGraph::new();
-        let a = graph.add_node("a", 0.0, 0.0);
-        let b = graph.add_node("b", 0.0, 0.0);
-        let c = graph.add_node("c", 0.0, 0.0);
+        let a = graph.add_node("a", 0.0, 0.0).unwrap();
+        let b = graph.add_node("b", 0.0, 0.0).unwrap();
+        let c = graph.add_node("c", 0.0, 0.0).unwrap();
 
         graph.add_edge(a, b, 100, false);
         graph.add_edge(a, c, 1, false);
@@ -459,5 +477,20 @@ mod tests {
 
         let route = graph.calculate_route("a", "b").unwrap();
         assert_eq!(route, vec!["a", "c", "b"]);
+    }
+
+    #[test]
+    fn r11_duplicate_name_does_not_replace_an_existing_route_origin() {
+        let mut graph = ParkingGraph::new();
+        let origin = graph.add_node("cam-01", 0.0, 0.0).unwrap();
+        let spot = graph.add_node("spot", 1.0, 0.0).unwrap();
+        graph.add_edge(origin, spot, 1000, true);
+        let error = graph.add_node("cam-01", 99.0, 99.0).unwrap_err();
+        assert_eq!(error.name, "cam-01");
+        assert_eq!(
+            graph.calculate_route("cam-01", "spot"),
+            Some(vec!["cam-01".into(), "spot".into()])
+        );
+        assert_eq!(graph.nodes.len(), 2);
     }
 }

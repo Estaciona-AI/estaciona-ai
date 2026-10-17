@@ -35,6 +35,7 @@ mod reservation_tests;
 mod reservations;
 mod security;
 mod site_config;
+mod site_graph;
 mod site_reconciliation;
 #[cfg(test)]
 mod site_reconciliation_tests;

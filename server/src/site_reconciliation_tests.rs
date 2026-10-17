@@ -344,3 +344,51 @@ async fn downgrade_refuses_retired_spots_and_upgrade_preserves_legacy_rows(pool:
         .unwrap();
     assert_eq!(row, (2.0, true));
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn r11_navigation_collision_does_not_reconcile_any_database_changes(pool: PgPool) {
+    crate::state::init_state(
+        pool.clone(),
+        "test".into(),
+        "test".into(),
+        site(&[("R11-A", 2.0)]),
+    )
+    .await
+    .unwrap();
+    let before: Vec<(String, f64, bool)> =
+        sqlx::query_as("SELECT id,x,is_active FROM spots ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    let revisions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM site_map_revisions")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    for collision in ["cam-01", "path_node_1"] {
+        let result = crate::state::init_state(
+            pool.clone(),
+            "test".into(),
+            "test".into(),
+            site(&[("R11-A", 9.0), (collision, 3.0), ("R11-new", 4.0)]),
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(crate::site_reconciliation::ReconcileError::InvalidMap(_))
+        ));
+        let after: Vec<(String, f64, bool)> =
+            sqlx::query_as("SELECT id,x,is_active FROM spots ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            after, before,
+            "invalid graph must not move, add, or retire spots"
+        );
+        let after_revisions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM site_map_revisions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(after_revisions, revisions);
+    }
+}
