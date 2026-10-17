@@ -259,7 +259,7 @@ mod tests {
             jwt_secret: "unused".into(),
             plate_pepper: "fixture-pepper".into(),
             last_trend_prediction: Mutex::new(None),
-            site_data_dir: std::env::temp_dir(),
+            config_store: crate::config_store::LocalConfigStore::new(std::env::temp_dir()),
         });
         Fixture {
             state,

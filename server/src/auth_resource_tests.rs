@@ -42,7 +42,9 @@ fn fixture(pool: PgPool) -> SharedState {
         plate_pepper: "r04-disposable-plate-pepper".to_owned(),
         auth_limits: Default::default(),
         last_trend_prediction: Mutex::new(None),
-        site_data_dir: std::env::temp_dir().join(format!("r04-auth-{}", Uuid::new_v4())),
+        config_store: crate::config_store::LocalConfigStore::new(
+            std::env::temp_dir().join(format!("r04-auth-{}", Uuid::new_v4())),
+        ),
     })
 }
 

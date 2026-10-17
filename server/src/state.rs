@@ -34,7 +34,7 @@ pub struct AppState {
     pub jwt_secret: String,
     pub plate_pepper: String,
     pub last_trend_prediction: Mutex<Option<String>>,
-    pub site_data_dir: std::path::PathBuf,
+    pub config_store: crate::config_store::LocalConfigStore,
 }
 
 pub type SharedState = Arc<AppState>;
@@ -139,6 +139,6 @@ pub async fn init_state(
         jwt_secret,
         plate_pepper,
         last_trend_prediction: Mutex::new(None),
-        site_data_dir: site.directory,
+        config_store: crate::config_store::LocalConfigStore::new(site.directory),
     }))
 }
