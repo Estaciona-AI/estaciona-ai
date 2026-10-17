@@ -806,12 +806,6 @@ def test_reserved_arrival_reports_unavailable_without_replacing_reservation(
     user_id = car_user(server)
     reservation_id = str(uuid4())
     server.query(
-        "INSERT INTO reservations (id,user_id,spot_id,expires_at) "
-        "VALUES (%s,%s,'R02-A',NOW()+INTERVAL '15 minutes')",
-        (reservation_id, str(user_id)),
-    )
-    server.query("UPDATE spots SET status='reserved' WHERE id='R02-A'")
-    server.query(
         "UPDATE edge_gateways SET path_update=TRUE WHERE id=%s", (server.gateway_id,)
     )
     event = car_detected()
@@ -825,6 +819,16 @@ def test_reserved_arrival_reports_unavailable_without_replacing_reservation(
         server.stop()
         (server.root / "site" / "spots_3d.json").write_text("[]")
         server.start()
+        # R07 refuses to remove a spot with an active claim. Reintroduce a
+        # legacy inconsistent DB row only after a valid empty-map startup;
+        # this still exercises R06's missing graph destination safeguard.
+        server.query("UPDATE spots SET is_active=TRUE WHERE id='R02-A'")
+    server.query(
+        "INSERT INTO reservations (id,user_id,spot_id,expires_at) "
+        "VALUES (%s,%s,'R02-A',NOW()+INTERVAL '15 minutes')",
+        (reservation_id, str(user_id)),
+    )
+    server.query("UPDATE spots SET status='reserved' WHERE id='R02-A'")
     app_url = websocket_url(
         server, "app", user_id, token(user_id, "user", int(time.time()) + 60)
     )

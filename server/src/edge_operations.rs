@@ -39,7 +39,7 @@ pub async fn car_detected(
     .await?;
     let (spot_id, route, newly_reserved) = if let Some(spot) = reserved {
         let granted: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM edge_camera_spots WHERE gateway_id = $1 AND spot_id = $2)",
+            "SELECT EXISTS(SELECT 1 FROM edge_camera_spots AS grants JOIN spots ON spots.id=grants.spot_id WHERE gateway_id = $1 AND spot_id = $2 AND spots.is_active)",
         )
         .bind(principal.gateway_id)
         .bind(&spot)
@@ -53,7 +53,7 @@ pub async fn car_detected(
         (spot, route, false)
     } else {
         let free: Vec<String> = sqlx::query_scalar(
-            "SELECT id FROM spots WHERE status = 'free' AND EXISTS( \
+            "SELECT id FROM spots WHERE status = 'free' AND is_active AND EXISTS( \
              SELECT 1 FROM edge_camera_spots WHERE gateway_id = $1 AND spot_id = spots.id)",
         )
         .bind(principal.gateway_id)
@@ -613,5 +613,27 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn reserved_arrival_reports_missing_destination_without_fabricating_route(pool: PgPool) {
         assert_reserved_navigation_unavailable(pool, "destination").await;
+    }
+    #[sqlx::test(migrations = "./migrations")]
+    async fn retired_granted_spot_is_not_a_destination_for_automatic_arrival(pool: PgPool) {
+        let mut f = fixture(pool).await;
+        sqlx::query("UPDATE spots SET is_active=FALSE WHERE id='allowed'")
+            .execute(&f.state.pool)
+            .await
+            .unwrap();
+        assert!(
+            car_detected(&f.state, &f.principal, "ABC1D23", "cam-01")
+                .await
+                .unwrap()
+        );
+        assert!(f.nav.try_recv().is_err());
+        assert!(f.updates.try_recv().is_err());
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM reservations")
+                .fetch_one(&f.state.pool)
+                .await
+                .unwrap(),
+            0
+        );
     }
 }

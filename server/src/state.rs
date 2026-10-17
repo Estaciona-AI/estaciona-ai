@@ -44,7 +44,8 @@ pub async fn init_state(
     jwt_secret: String,
     plate_pepper: String,
     site: SiteConfig,
-) -> SharedState {
+) -> Result<SharedState, crate::site_reconciliation::ReconcileError> {
+    crate::site_reconciliation::apply(&pool, &site).await?;
     let (tx, _) = broadcast::channel(100);
 
     let mut graph = ParkingGraph::new();
@@ -105,21 +106,6 @@ pub async fn init_state(
     let spots_3d = site.spots;
 
     for spot in spots_3d {
-        sqlx::query!(
-            r#"
-            INSERT INTO spots (id, parking_lot, status, x, y, z, last_updated) 
-            VALUES ($1, 'Main', 'free', $2, $3, $4, NOW()) 
-            ON CONFLICT (id) DO NOTHING
-            "#,
-            spot.id,
-            spot.center_3d.x,
-            spot.center_3d.y,
-            spot.center_3d.z
-        )
-        .execute(&pool)
-        .await
-        .expect("Falha ao sincronizar vaga com o banco de dados");
-
         let spot_node = graph.add_node(&spot.id, spot.center_3d.x as f32, spot.center_3d.z as f32);
 
         if let Some(parking) = parkings.first()
@@ -144,7 +130,7 @@ pub async fn init_state(
         }
     }
 
-    Arc::new(AppState {
+    Ok(Arc::new(AppState {
         pool,
         auth_limits: Default::default(),
         tx,
@@ -154,5 +140,5 @@ pub async fn init_state(
         plate_pepper,
         last_trend_prediction: Mutex::new(None),
         site_data_dir: site.directory,
-    })
+    }))
 }

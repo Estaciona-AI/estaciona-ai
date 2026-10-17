@@ -62,7 +62,7 @@ pub async fn create_in_transaction(
 ) -> Result<Reservation, CreateError> {
     let claimed = sqlx::query(
         "UPDATE spots SET status = 'reserved', last_updated = NOW() \
-         WHERE id = $1 AND status = 'free'",
+         WHERE id = $1 AND status = 'free' AND is_active",
     )
     .bind(spot_id)
     .execute(&mut *connection)

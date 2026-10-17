@@ -34,6 +34,9 @@ mod reservation_tests;
 mod reservations;
 mod security;
 mod site_config;
+mod site_reconciliation;
+#[cfg(test)]
+mod site_reconciliation_tests;
 mod state;
 mod users;
 mod ws;
@@ -113,7 +116,9 @@ async fn main() {
         .expect("SITE_DATA_DIR required: directory containing config.json and spots_3d.json");
     let site = site_config::SiteConfig::load(site_data_dir)
         .expect("Failed to load installation maps from SITE_DATA_DIR");
-    let parking_state: SharedState = init_state(pool, jwt_secret, plate_pepper, site).await;
+    let parking_state: SharedState = init_state(pool, jwt_secret, plate_pepper, site)
+        .await
+        .expect("Failed to reconcile installation map");
 
     let cors = CorsLayer::new()
         .allow_origin(Any)

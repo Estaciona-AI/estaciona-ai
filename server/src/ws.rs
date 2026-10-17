@@ -90,7 +90,7 @@ async fn handle_app_socket(socket: WebSocket, state: SharedState, session: AuthS
     // Dropping these futures also cancels pending reads/writes; no detached tasks.
     let send_task = async {
         session.revalidate(&state.pool).await?;
-        let db_spots = sqlx::query!("SELECT id, status FROM spots")
+        let db_spots = sqlx::query!("SELECT id, status FROM spots WHERE is_active")
             .fetch_all(&state.pool)
             .await
             .unwrap_or_default();
@@ -261,7 +261,7 @@ async fn handle_dashboard_socket(socket: WebSocket, state: SharedState, session:
 
     let send_task = async {
         session.revalidate(&state.pool).await?;
-        let db_spots = sqlx::query!("SELECT id, status FROM spots")
+        let db_spots = sqlx::query!("SELECT id, status FROM spots WHERE is_active")
             .fetch_all(&state.pool)
             .await
             .unwrap_or_default();

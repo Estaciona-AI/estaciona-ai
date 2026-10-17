@@ -446,3 +446,95 @@ async fn occupied_observation_captures_the_reservation_that_owns_its_spot(
     assert_eq!(fixture.reservation_status(id).await?, "active");
     Ok(())
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn retired_spot_rejects_admin_mutation_without_releasing_history(pool: PgPool) {
+    let f = Fixture::new(pool).await.unwrap();
+    sqlx::query("UPDATE spots SET is_active=FALSE,status='occupied' WHERE id=$1")
+        .bind(&f.spot_id)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO user_occupancy_history (user_id,spot_id) VALUES ($1,$2)")
+        .bind(f.owner)
+        .bind(&f.spot_id)
+        .execute(&f.state.pool)
+        .await
+        .unwrap();
+    let mut updates = f.state.tx.subscribe();
+    let response = reservations::update_spot_status(
+        State(f.state.clone()),
+        Path(f.spot_id.clone()),
+        f.headers(f.admin, "admin"),
+        Json(UpdateSpotStatus {
+            status: "free".into(),
+        }),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert!(updates.try_recv().is_err());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM user_occupancy_history WHERE spot_id=$1 AND released_at IS NULL"
+        )
+        .bind(&f.spot_id)
+        .fetch_one(&f.state.pool)
+        .await
+        .unwrap(),
+        1
+    );
+}
+
+async fn assert_recommendation_ignores_retired(pool: PgPool, branch: &str) {
+    let f = Fixture::new(pool).await.unwrap();
+    let retired = if branch == "priority" { "A-01" } else { "B-07" };
+    sqlx::query("INSERT INTO spots (id,status,x,y,is_active) VALUES ($1,'free',1,0,FALSE),('C-01','free',10,0,TRUE)").bind(retired).execute(&f.state.pool).await.unwrap();
+    if branch == "priority" {
+        sqlx::query("UPDATE users SET pcd_status=TRUE WHERE id=$1")
+            .bind(f.owner)
+            .execute(&f.state.pool)
+            .await
+            .unwrap();
+    }
+    if branch == "history" {
+        for _ in 0..3 {
+            sqlx::query("INSERT INTO user_occupancy_history (user_id,spot_id) VALUES ($1,$2)")
+                .bind(f.owner)
+                .bind(retired)
+                .execute(&f.state.pool)
+                .await
+                .unwrap();
+        }
+    }
+    let mut graph = ParkingGraph::new();
+    let cam = graph.add_node("cam-01", 0.0, 0.0);
+    let old = graph.add_node(retired, 1.0, 0.0);
+    let current = graph.add_node("C-01", 10.0, 0.0);
+    graph.add_edge(cam, old, 1, true);
+    graph.add_edge(cam, current, 10, true);
+    *f.state.graph.write().await = graph;
+    let response = reservations::recommend_spot(
+        State(f.state.clone()),
+        f.headers(f.owner, "user"),
+        axum::extract::Query(reservations::RecommendQuery { user_id: f.owner }),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 16384).await.unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["recommended_spot"], "C-01");
+}
+#[sqlx::test(migrations = "./migrations")]
+async fn priority_recommendation_excludes_retired_spots(pool: PgPool) {
+    assert_recommendation_ignores_retired(pool, "priority").await;
+}
+#[sqlx::test(migrations = "./migrations")]
+async fn historical_recommendation_excludes_retired_spots(pool: PgPool) {
+    assert_recommendation_ignores_retired(pool, "history").await;
+}
+#[sqlx::test(migrations = "./migrations")]
+async fn closest_recommendation_excludes_retired_spots(pool: PgPool) {
+    assert_recommendation_ignores_retired(pool, "closest").await;
+}
