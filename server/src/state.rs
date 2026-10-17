@@ -19,7 +19,7 @@ use dashmap::DashMap;
 use sqlx::PgPool;
 use std::sync::Arc;
 use std::sync::Mutex;
-use tokio::sync::{RwLock, broadcast, mpsc};
+use tokio::sync::{RwLock, broadcast};
 use uuid::Uuid;
 
 use crate::pathfinding::ParkingGraph;
@@ -29,7 +29,7 @@ pub struct AppState {
     pub pool: PgPool,
     pub auth_limits: crate::auth_limits::AuthLimits,
     pub tx: broadcast::Sender<String>,
-    pub user_sessions: DashMap<Uuid, mpsc::UnboundedSender<String>>,
+    pub user_sessions: DashMap<Uuid, crate::ws::private_session::PrivateSession>,
     pub graph: RwLock<ParkingGraph>,
     pub jwt_secret: String,
     pub plate_pepper: String,

@@ -625,3 +625,46 @@ def test_older_socket_does_not_remove_the_newer_private_channel(server, terminat
                     }
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("endpoint,role", [("app", "user"), ("dashboard", "admin")])
+def test_r09_snapshot_database_failure_closes_instead_of_serving_empty_state(
+    server, endpoint, role
+):
+    user_id = insert_user(server, role)
+    signed = token(user_id, role, int(time.time()) + 60)
+    server.query("ALTER TABLE spots RENAME TO r09_unavailable_spots")
+
+    async def run():
+        async with websockets.connect(
+            websocket_url(server, endpoint, user_id, signed), close_timeout=0.5
+        ) as connection:
+            await asyncio.wait_for(connection.wait_closed(), timeout=2)
+
+    try:
+        asyncio.run(run())
+    finally:
+        server.query("ALTER TABLE r09_unavailable_spots RENAME TO spots")
+
+
+@pytest.mark.parametrize("endpoint,role", [("app", "user"), ("dashboard", "admin")])
+def test_r09_reconnection_reads_current_database_state(server, endpoint, role):
+    user_id = insert_user(server, role)
+    signed = token(user_id, role, int(time.time()) + 60)
+
+    async def run():
+        url = websocket_url(server, endpoint, user_id, signed)
+        async with websockets.connect(url, close_timeout=0.5) as first:
+            await consume_snapshot(first)
+        # No broadcast is published: the next connection must load its snapshot.
+        server.query("UPDATE spots SET status='occupied' WHERE id='R02-A'")
+        async with websockets.connect(url, close_timeout=0.5) as reconnected:
+            assert json.loads(
+                await asyncio.wait_for(reconnected.recv(), timeout=3)
+            ) == {
+                "type": "SPOT_UPDATE",
+                "spot_id": "R02-A",
+                "status": "occupied",
+            }
+
+    asyncio.run(run())

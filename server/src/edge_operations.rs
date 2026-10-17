@@ -123,7 +123,7 @@ pub async fn car_detected(
             },
         };
         if let Ok(json) = serde_json::to_string(&navigation) {
-            let _ = session.send(json);
+            let _ = session.try_send(json);
         }
     }
     Ok(true)
@@ -207,7 +207,7 @@ mod tests {
         state: SharedState,
         principal: Principal,
         user: Uuid,
-        nav: mpsc::UnboundedReceiver<String>,
+        nav: mpsc::Receiver<String>,
         updates: broadcast::Receiver<String>,
     }
 
@@ -247,7 +247,7 @@ mod tests {
         graph.add_edge(camera, outside, 1, true);
         graph.add_edge(camera, allowed, 10, true);
         let (tx, updates) = broadcast::channel(100);
-        let (nav_tx, nav) = mpsc::unbounded_channel();
+        let (nav_tx, nav, _) = crate::ws::private_session::channel();
         let sessions = DashMap::new();
         sessions.insert(user, nav_tx);
         let state = Arc::new(AppState {
@@ -735,5 +735,50 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn r08_arrival_free_spots_lookup_failure_has_no_effects(pool: PgPool) {
         assert_arrival_database_failure(pool, "free").await;
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn r09_full_private_queue_does_not_undo_committed_arrival_or_its_broadcast(pool: PgPool) {
+        let mut f = fixture(pool).await;
+        let session = f.state.user_sessions.get(&f.user).unwrap().clone();
+        for _ in 0..32 {
+            session.try_send("queued".into()).unwrap();
+        }
+        assert!(
+            car_detected(&f.state, &f.principal, "ABC1D23", "cam-01")
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            session.try_send("late".into()),
+            Err(crate::ws::private_session::PrivateSendError::Closed)
+        );
+        let claims: Vec<(String, String)> =
+            sqlx::query_as("SELECT spot_id,status FROM reservations WHERE user_id=$1")
+                .bind(f.user)
+                .fetch_all(&f.state.pool)
+                .await
+                .unwrap();
+        assert_eq!(claims, [("allowed".into(), "active".into())]);
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT status FROM spots WHERE id='allowed'")
+                .fetch_one(&f.state.pool)
+                .await
+                .unwrap(),
+            "reserved"
+        );
+        let update: serde_json::Value =
+            serde_json::from_str(&f.updates.try_recv().unwrap()).unwrap();
+        assert_eq!(
+            update,
+            serde_json::json!({"type":"SPOT_UPDATE","spot_id":"allowed","status":"reserved"})
+        );
+        for _ in 0..32 {
+            assert_eq!(f.nav.try_recv().unwrap(), "queued");
+        }
+        assert!(
+            f.nav.try_recv().is_err(),
+            "navigation must not grow an already full queue"
+        );
     }
 }

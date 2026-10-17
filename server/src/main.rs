@@ -195,7 +195,7 @@ async fn main() {
                             && let Some(user_id) = record.user_id
                             && let Some(user_tx) = state_for_bg_task.user_sessions.get(&user_id)
                         {
-                            let _ = user_tx.send(json);
+                            let _ = user_tx.try_send(json);
                         }
                         if let Some(status) = record.spot_status {
                             let update_msg = ServerToAppMsg::SpotUpdate {

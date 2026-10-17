@@ -16,6 +16,7 @@
 // ==============================================================================
 
 pub mod messages;
+pub(crate) mod private_session;
 pub mod ws_edge;
 
 pub use ws_edge::ws_edge_handler;
@@ -30,7 +31,6 @@ use axum::{
 use chrono::{Duration, Utc};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
-use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::reservation_store::{self, CreateError, FinishReason};
@@ -81,7 +81,7 @@ async fn handle_app_socket(socket: WebSocket, state: SharedState, session: AuthS
     let user_id = session.user_id;
     let (mut sender, mut receiver) = socket.split();
 
-    let (private_tx, mut private_rx) = mpsc::unbounded_channel::<String>();
+    let (private_tx, mut private_rx, mut private_closed) = private_session::channel();
     state.user_sessions.insert(user_id, private_tx.clone());
 
     let mut broadcast_rx = state.tx.subscribe();
@@ -93,7 +93,13 @@ async fn handle_app_socket(socket: WebSocket, state: SharedState, session: AuthS
         let db_spots = sqlx::query!("SELECT id, status FROM spots WHERE is_active")
             .fetch_all(&state.pool)
             .await
-            .unwrap_or_default();
+            .map_err(|error| {
+                tracing::error!(%error, "WebSocket snapshot query failed");
+                (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    "Snapshot unavailable".to_owned(),
+                )
+            })?;
         for row in db_spots {
             session.check_expiration()?;
             let msg = ServerToAppMsg::SpotUpdate {
@@ -101,7 +107,9 @@ async fn handle_app_socket(socket: WebSocket, state: SharedState, session: AuthS
                 status: row.status,
             };
             if let Ok(json_str) = serde_json::to_string(&msg)
-                && sender.send(Message::Text(json_str.into())).await.is_err()
+                && write_message(&mut sender, Message::Text(json_str.into()))
+                    .await
+                    .is_err()
             {
                 return Ok::<(), AuthError>(());
             }
@@ -109,19 +117,15 @@ async fn handle_app_socket(socket: WebSocket, state: SharedState, session: AuthS
 
         loop {
             tokio::select! {
-                received = broadcast_rx.recv() => match received {
-                    Ok(broadcast_msg) => {
-                        session.check_expiration()?;
-                        if sender.send(Message::Text(broadcast_msg.into())).await.is_err() {
-                            break;
-                        }
+                received = broadcast_rx.recv() => {
+                    session.check_expiration()?;
+                    if write_broadcast(&mut sender, received).await.is_err() {
+                        break;
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 },
                 Some(private_msg) = private_rx.recv() => {
                     session.check_expiration()?;
-                    if sender.send(Message::Text(private_msg.into())).await.is_err() {
+                    if write_message(&mut sender, Message::Text(private_msg.into())).await.is_err() {
                         break;
                     }
                 }
@@ -154,7 +158,7 @@ async fn handle_app_socket(socket: WebSocket, state: SharedState, session: AuthS
                                 };
 
                                 if let Ok(json) = serde_json::to_string(&confirm) {
-                                    let _ = private_tx.send(json);
+                                    let _ = private_tx.try_send(json);
                                 }
                                 if let Ok(json) = serde_json::to_string(&update) {
                                     let _ = value.tx.send(json);
@@ -166,7 +170,7 @@ async fn handle_app_socket(socket: WebSocket, state: SharedState, session: AuthS
                                     reason: "already_taken".to_string(),
                                 };
                                 if let Ok(json) = serde_json::to_string(&reject) {
-                                    let _ = private_tx.send(json);
+                                    let _ = private_tx.try_send(json);
                                 }
                             }
                             Err(CreateError::Database(error)) => {
@@ -209,6 +213,7 @@ async fn handle_app_socket(socket: WebSocket, state: SharedState, session: AuthS
         biased;
         _ = tokio::time::sleep_until(session.deadline) => Some((axum::http::StatusCode::UNAUTHORIZED, "Expired session".to_owned())),
         error = session.wait_for_invalidation(&state.pool) => Some(error),
+        _ = private_closed.wait_for(|closed| *closed) => None,
         result = send_task => result.err(),
         result = recv_task => result.err(),
     };
@@ -264,7 +269,13 @@ async fn handle_dashboard_socket(socket: WebSocket, state: SharedState, session:
         let db_spots = sqlx::query!("SELECT id, status FROM spots WHERE is_active")
             .fetch_all(&state.pool)
             .await
-            .unwrap_or_default();
+            .map_err(|error| {
+                tracing::error!(%error, "WebSocket snapshot query failed");
+                (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    "Snapshot unavailable".to_owned(),
+                )
+            })?;
         for row in db_spots {
             session.check_expiration()?;
             let msg = ServerToAppMsg::SpotUpdate {
@@ -272,7 +283,9 @@ async fn handle_dashboard_socket(socket: WebSocket, state: SharedState, session:
                 status: row.status,
             };
             if let Ok(json_str) = serde_json::to_string(&msg)
-                && sender.send(Message::Text(json_str.into())).await.is_err()
+                && write_message(&mut sender, Message::Text(json_str.into()))
+                    .await
+                    .is_err()
             {
                 return Ok::<(), AuthError>(());
             }
@@ -285,25 +298,19 @@ async fn handle_dashboard_socket(socket: WebSocket, state: SharedState, session:
             .and_then(|c| c.clone());
         if let Some(json_str) = cached_trend {
             session.check_expiration()?;
-            if sender.send(Message::Text(json_str.into())).await.is_err() {
+            if write_message(&mut sender, Message::Text(json_str.into()))
+                .await
+                .is_err()
+            {
                 return Ok::<(), AuthError>(());
             }
         }
 
         loop {
-            match broadcast_rx.recv().await {
-                Ok(broadcast_msg) => {
-                    session.check_expiration()?;
-                    if sender
-                        .send(Message::Text(broadcast_msg.into()))
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            let received = broadcast_rx.recv().await;
+            session.check_expiration()?;
+            if write_broadcast(&mut sender, received).await.is_err() {
+                break;
             }
         }
         Ok::<(), AuthError>(())
@@ -327,4 +334,182 @@ async fn handle_dashboard_socket(socket: WebSocket, state: SharedState, session:
         tracing::debug!(user_id = %session.user_id, "Closing invalid dashboard WebSocket session");
     }
     // Never flush an interrupted data send while invalidating authentication.
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum WriteError {
+    Timeout,
+    Transport,
+    Lagged,
+    Closed,
+}
+
+async fn write_message<S>(sink: &mut S, message: Message) -> Result<(), WriteError>
+where
+    S: futures_util::Sink<Message> + Unpin,
+{
+    match tokio::time::timeout(std::time::Duration::from_secs(5), sink.send(message)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_)) => Err(WriteError::Transport),
+        Err(_) => {
+            tracing::warn!("Closing WebSocket after write timeout");
+            Err(WriteError::Timeout)
+        }
+    }
+}
+
+async fn write_broadcast<S>(
+    sink: &mut S,
+    received: Result<String, tokio::sync::broadcast::error::RecvError>,
+) -> Result<(), WriteError>
+where
+    S: futures_util::Sink<Message> + Unpin,
+{
+    match received {
+        Ok(message) => write_message(sink, Message::Text(message.into())).await,
+        Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+            tracing::warn!(
+                missed,
+                "Closing lagged WebSocket; reconnect for a fresh snapshot"
+            );
+            Err(WriteError::Lagged)
+        }
+        Err(tokio::sync::broadcast::error::RecvError::Closed) => Err(WriteError::Closed),
+    }
+}
+
+#[cfg(test)]
+mod delivery_tests {
+    use super::*;
+    use futures_util::Sink;
+    use std::{
+        pin::Pin,
+        task::{Context, Poll},
+        time::{Duration, Instant},
+    };
+
+    struct TestSink {
+        blocked_before_send: bool,
+        blocked_on_flush: bool,
+        messages: Vec<Message>,
+    }
+
+    impl Sink<Message> for TestSink {
+        type Error = std::io::Error;
+
+        fn poll_ready(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            if self.blocked_before_send {
+                Poll::Pending
+            } else {
+                Poll::Ready(Ok(()))
+            }
+        }
+        fn start_send(mut self: Pin<&mut Self>, message: Message) -> Result<(), Self::Error> {
+            self.messages.push(message);
+            Ok(())
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            if self.blocked_on_flush {
+                Poll::Pending
+            } else {
+                Poll::Ready(Ok(()))
+            }
+        }
+        fn poll_close(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn r09_lagged_broadcast_requires_reconnection_instead_of_continuing() {
+        let (updates, mut receiver) = tokio::sync::broadcast::channel(2);
+        for message in ["old", "middle", "latest"] {
+            updates.send(message.to_owned()).unwrap();
+        }
+        let mut sink = TestSink {
+            blocked_before_send: false,
+            blocked_on_flush: false,
+            messages: vec![],
+        };
+        assert_eq!(
+            write_broadcast(&mut sink, receiver.recv().await).await,
+            Err(WriteError::Lagged)
+        );
+        assert!(
+            sink.messages.is_empty(),
+            "a partial stream is not a valid snapshot"
+        );
+    }
+
+    #[tokio::test]
+    async fn r09_closed_broadcast_ends_delivery_without_spinning() {
+        let (updates, mut receiver) = tokio::sync::broadcast::channel::<String>(2);
+        drop(updates);
+        let mut sink = TestSink {
+            blocked_before_send: false,
+            blocked_on_flush: false,
+            messages: vec![],
+        };
+        assert_eq!(
+            write_broadcast(&mut sink, receiver.recv().await).await,
+            Err(WriteError::Closed)
+        );
+        assert!(sink.messages.is_empty());
+    }
+
+    async fn assert_write_times_out(blocked_before_send: bool) {
+        let mut sink = TestSink {
+            blocked_before_send,
+            blocked_on_flush: !blocked_before_send,
+            messages: vec![],
+        };
+        let start = Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(7),
+            write_message(&mut sink, Message::Text("pending".into())),
+        )
+        .await;
+        assert_eq!(result.unwrap(), Err(WriteError::Timeout));
+        assert!(start.elapsed() >= Duration::from_millis(4900));
+    }
+
+    #[tokio::test]
+    async fn r09_write_timeout_covers_readiness() {
+        assert_write_times_out(true).await;
+    }
+
+    #[tokio::test]
+    async fn r09_write_timeout_covers_flush() {
+        assert_write_times_out(false).await;
+    }
+
+    #[tokio::test]
+    async fn r09_transport_write_can_be_canceled_before_its_timeout() {
+        let mut sink = TestSink {
+            blocked_before_send: true,
+            blocked_on_flush: false,
+            messages: vec![],
+        };
+        // The authentication supervisor must remain able to cancel a blocked send.
+        let result = tokio::time::timeout(
+            Duration::from_millis(20),
+            write_message(&mut sink, Message::Text("protected".into())),
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(sink.messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn r09_healthy_transport_delivers_normally() {
+        let mut sink = TestSink {
+            blocked_before_send: false,
+            blocked_on_flush: false,
+            messages: vec![],
+        };
+        write_message(&mut sink, Message::Text("delivered".into()))
+            .await
+            .unwrap();
+        assert_eq!(sink.messages, [Message::Text("delivered".into())]);
+    }
 }
