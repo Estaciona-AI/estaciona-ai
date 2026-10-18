@@ -24,6 +24,7 @@ mod edge_auth;
 mod edge_cli;
 mod edge_delivery;
 mod edge_operations;
+mod edge_state;
 mod lpr;
 mod pathfinding;
 #[cfg(test)]

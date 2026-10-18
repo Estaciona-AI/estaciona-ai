@@ -35,6 +35,7 @@ pub struct AppState {
     pub jwt_secret: String,
     pub plate_pepper: String,
     pub last_trend_prediction: Mutex<Option<String>>,
+    pub(crate) forecast_writer: tokio::sync::Mutex<()>,
     pub config_store: crate::config_store::LocalConfigStore,
 }
 
@@ -47,10 +48,13 @@ pub async fn init_state(
     site: SiteConfig,
     lpr_mode: crate::lpr::LprMode,
 ) -> Result<SharedState, crate::site_reconciliation::ReconcileError> {
-    let graph = crate::site_graph::build(&site).map_err(|error| {
+    let mut graph = crate::site_graph::build(&site).map_err(|error| {
         crate::site_reconciliation::ReconcileError::InvalidMap(error.to_string())
     })?;
     crate::site_reconciliation::apply(&pool, &site).await?;
+    let forecast = crate::edge_state::restore(&pool, &mut graph)
+        .await
+        .map_err(crate::site_reconciliation::ReconcileError::Database)?;
     let (tx, _) = broadcast::channel(100);
 
     Ok(Arc::new(AppState {
@@ -62,7 +66,8 @@ pub async fn init_state(
         graph: RwLock::new(graph),
         jwt_secret,
         plate_pepper,
-        last_trend_prediction: Mutex::new(None),
+        forecast_writer: Default::default(),
+        last_trend_prediction: Mutex::new(forecast),
         config_store: crate::config_store::LocalConfigStore::new(site.directory),
     }))
 }

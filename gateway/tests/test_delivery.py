@@ -52,10 +52,23 @@ async def until(predicate):
 
 
 class Cloud:
-    def __init__(self, on_send=None, version=1):
+    def __init__(self, on_send=None, version=1, durable_events=None):
         self.responses = asyncio.Queue()
         self.responses.put_nowait(
-            json.dumps({"type": "EDGE_READY", "delivery_version": version})
+            json.dumps(
+                {
+                    "type": "EDGE_READY",
+                    "delivery_version": version,
+                    "durable_events": durable_events
+                    if durable_events is not None
+                    else [
+                        "SPOT_UPDATE",
+                        "PATH_UPDATE",
+                        "TREND_PREDICTION",
+                        "CAR_DETECTED",
+                    ],
+                }
+            )
         )
         self.on_send, self.frames = on_send, []
         self.closed = asyncio.Event()
@@ -331,21 +344,22 @@ def test_failure_after_metrics_commit_keeps_outbox_replayable(tmp_path):
         ).fetchone() == (1, "applied")
 
 
-def test_legacy_delivery_does_not_fabricate_ack(tmp_path):
+@pytest.mark.parametrize("kind", ["PATH_UPDATE", "TREND_PREDICTION", "CAR_DETECTED"])
+def test_remaining_events_require_durable_ack(tmp_path, kind):
     db, metrics = setup(tmp_path)
-    event_id = enqueue(
-        db,
-        metrics,
-        {"type": "PATH_UPDATE", "from_node": "a", "to_node": "b", "is_active": True},
-    )
-    asyncio.run(sync(db, metrics, Cloud(), lambda: not gateway.pending_deliveries(db)))
-    with sqlite3.connect(db) as conn:
-        assert (
-            conn.execute(
-                "SELECT delivery_result FROM fallback_events WHERE event_uuid = ?",
-                (event_id,),
-            ).fetchone()[0]
-            == "legacy_forwarded"
-        )
+    event_id = enqueue(db, metrics, {"type": kind})
+    cloud = Cloud(lambda cloud, frame: cloud.ack(frame))
+    asyncio.run(sync(db, metrics, cloud, lambda: not gateway.pending_deliveries(db)))
+    assert cloud.frames[0]["type"] == "EDGE_EVENT"
+    assert cloud.frames[0]["event_id"] == event_id
     with sqlite3.connect(metrics) as conn:
-        assert conn.execute("SELECT cloud_ack FROM metrics").fetchone()[0] == 0
+        assert conn.execute("SELECT cloud_ack FROM metrics").fetchone()[0] == 1
+
+
+def test_old_server_keeps_unsupported_event_pending(tmp_path):
+    db, metrics = setup(tmp_path)
+    event_id = enqueue(db, metrics, {"type": "PATH_UPDATE"})
+    cloud = Cloud(durable_events=["SPOT_UPDATE"])
+    asyncio.run(sync(db, metrics, cloud, cloud.closed.is_set))
+    assert gateway.pending_deliveries(db)[0][1] == event_id
+    assert cloud.frames == []

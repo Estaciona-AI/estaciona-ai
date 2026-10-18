@@ -47,7 +47,10 @@ pub enum EdgeTransportMsg {
 #[serde(tag = "type")]
 pub enum ServerToEdgeMsg {
     #[serde(rename = "EDGE_READY")]
-    Ready { delivery_version: u8 },
+    Ready {
+        delivery_version: u8,
+        durable_events: Vec<&'static str>,
+    },
     #[serde(rename = "EDGE_ACK")]
     Ack {
         version: u8,

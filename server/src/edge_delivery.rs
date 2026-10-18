@@ -142,8 +142,28 @@ pub async fn apply_legacy(
     Ok(observation)
 }
 
+#[cfg(test)]
 pub async fn apply(
     pool: &PgPool,
+    principal: &Principal,
+    event_id: Uuid,
+    payload: Value,
+) -> Result<Delivery, AuthError> {
+    apply_inner(pool, None, principal, event_id, payload).await
+}
+
+pub async fn apply_with_state(
+    state: &crate::state::SharedState,
+    principal: &Principal,
+    event_id: Uuid,
+    payload: Value,
+) -> Result<Delivery, AuthError> {
+    apply_inner(&state.pool, Some(state), principal, event_id, payload).await
+}
+
+async fn apply_inner(
+    pool: &PgPool,
+    state: Option<&crate::state::SharedState>,
     principal: &Principal,
     event_id: Uuid,
     payload: Value,
@@ -151,7 +171,13 @@ pub async fn apply(
     let has_null = contains_null_character(&payload);
     // JSONB cannot store NUL. The discriminated wrapper preserves even rejected
     // payloads as escaped JSON text, without colliding with valid payloads.
-    let receipt_payload = if has_null {
+    // Inactive LPR must not turn the receipt ledger into a raw-plate archive.
+    // A fingerprint still detects UUID/payload conflicts without retaining the plate.
+    let receipt_payload = if payload.get("type").and_then(Value::as_str) == Some("CAR_DETECTED") {
+        use sha2::{Digest, Sha256};
+        let digest: Vec<u8> = Sha256::digest(payload.to_string().as_bytes()).to_vec();
+        serde_json::json!({"sha256": digest})
+    } else if has_null {
         serde_json::json!({"json_text": payload.to_string()})
     } else {
         serde_json::json!({"json": &payload})
@@ -242,6 +268,7 @@ pub async fn apply(
     } else {
         serde_json::from_value::<crate::ws::messages::EdgeToServerMsg>(payload).ok()
     };
+    let mut projection = None;
     match parsed_payload {
         Some(crate::ws::messages::EdgeToServerMsg::SpotUpdate {
             camera_id,
@@ -259,6 +286,26 @@ pub async fn apply(
             delivery.spot_update = observation.spot_update;
             delivery.unconfirmed_reservation = observation.unconfirmed_reservation;
         }
+        Some(
+            message @ (crate::ws::messages::EdgeToServerMsg::PathUpdate { .. }
+            | crate::ws::messages::EdgeToServerMsg::TrendPrediction { .. }),
+        ) if state.is_some() => {
+            let effect = crate::edge_state::prepare(
+                &mut tx,
+                state.expect("checked state"),
+                principal,
+                message,
+            )
+            .await?;
+            (delivery.ack.outcome, delivery.ack.reason) = effect.outcome();
+            projection = Some(effect);
+        }
+        Some(crate::ws::messages::EdgeToServerMsg::CarDetected { .. })
+            if state.is_some_and(|state| state.lpr_mode == crate::lpr::LprMode::Disabled) =>
+        {
+            delivery.ack.outcome = Outcome::Ignored;
+            delivery.ack.reason = Some("lpr_disabled".into());
+        }
         Some(_) => delivery.ack.reason = Some("unsupported_event".to_owned()),
         None => {}
     }
@@ -274,6 +321,9 @@ pub async fn apply(
     .await?;
     // A receipt and its observation/history become durable together; no success on rollback.
     tx.commit().await?;
+    if let Some(effect) = projection {
+        effect.publish(state.expect("projection has an application state"));
+    }
     Ok(delivery)
 }
 
