@@ -700,4 +700,249 @@ mod tests {
         assert!(f.nav.try_recv().is_err());
         assert!(f.updates.try_recv().is_err());
     }
+    fn restart_graph() -> ParkingGraph {
+        let mut graph = ParkingGraph::new();
+        let camera = graph.add_node("cam-01", 0.0, 0.0).unwrap();
+        let outside = graph.add_node("outside", 1.0, 0.0).unwrap();
+        let allowed = graph.add_node("allowed", 10.0, 0.0).unwrap();
+        graph.add_edge(camera, outside, 1, true);
+        graph.add_edge(camera, allowed, 10, true);
+        graph
+    }
+
+    async fn grant_projections(f: &Fixture) {
+        sqlx::query("UPDATE edge_gateways SET path_update=true,trend_prediction=true WHERE id=$1")
+            .bind(f.principal.gateway_id)
+            .execute(&f.state.pool)
+            .await
+            .unwrap();
+    }
+
+    fn path_event(active: bool) -> serde_json::Value {
+        serde_json::json!({"type":"PATH_UPDATE", "from_node":"cam-01", "to_node":"allowed", "is_active":active})
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn r02b_path_receipt_restart_and_map_revision_are_consistent(pool: PgPool) {
+        let f = fixture(pool).await;
+        grant_projections(&f).await;
+        let id = Uuid::new_v4();
+        let result =
+            crate::edge_delivery::apply_with_state(&f.state, &f.principal, id, path_event(false))
+                .await
+                .unwrap();
+        assert_eq!(result.ack.outcome, crate::edge_delivery::Outcome::Applied);
+        let mut graph = restart_graph();
+        crate::edge_state::restore(&f.state.pool, &mut graph)
+            .await
+            .unwrap();
+        assert!(graph.calculate_route("cam-01", "allowed").is_none());
+        let mut changed = restart_graph();
+        changed.add_node("new-map-node", 3.0, 4.0).unwrap();
+        crate::edge_state::restore(&f.state.pool, &mut changed)
+            .await
+            .unwrap();
+        assert!(changed.calculate_route("cam-01", "allowed").is_some());
+        crate::edge_delivery::apply_with_state(
+            &f.state,
+            &f.principal,
+            Uuid::new_v4(),
+            path_event(true),
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE edge_gateways SET path_update=false WHERE id=$1")
+            .bind(f.principal.gateway_id)
+            .execute(&f.state.pool)
+            .await
+            .unwrap();
+        let duplicate =
+            crate::edge_delivery::apply_with_state(&f.state, &f.principal, id, path_event(false))
+                .await
+                .unwrap();
+        assert!(duplicate.ack.duplicate);
+        assert!(
+            f.state
+                .graph
+                .read()
+                .await
+                .calculate_route("cam-01", "allowed")
+                .is_some()
+        );
+        crate::edge_state::restore(&f.state.pool, &mut graph)
+            .await
+            .unwrap();
+        assert!(graph.calculate_route("cam-01", "allowed").is_some());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn r02b_receipt_failure_rolls_back_projection_before_publication(pool: PgPool) {
+        let f = fixture(pool).await;
+        grant_projections(&f).await;
+        sqlx::raw_sql("CREATE FUNCTION fail_receipt() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected receipt failure'; END $$; CREATE TRIGGER fail_receipt BEFORE UPDATE ON edge_event_receipts FOR EACH ROW EXECUTE FUNCTION fail_receipt();")
+            .execute(&f.state.pool).await.unwrap();
+        let id = Uuid::new_v4();
+        assert!(
+            crate::edge_delivery::apply_with_state(&f.state, &f.principal, id, path_event(false))
+                .await
+                .is_err()
+        );
+        assert!(
+            f.state
+                .graph
+                .read()
+                .await
+                .calculate_route("cam-01", "allowed")
+                .is_some()
+        );
+        let count: i64 = sqlx::query_scalar("SELECT (SELECT COUNT(*) FROM edge_path_state)+(SELECT COUNT(*) FROM edge_event_receipts)")
+            .fetch_one(&f.state.pool).await.unwrap();
+        assert_eq!(count, 0);
+        sqlx::query("DROP TRIGGER fail_receipt ON edge_event_receipts")
+            .execute(&f.state.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::edge_delivery::apply_with_state(&f.state, &f.principal, id, path_event(false))
+                .await
+                .unwrap()
+                .ack
+                .outcome,
+            crate::edge_delivery::Outcome::Applied
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn r02b_forecast_survives_restart_without_republishing_duplicates(pool: PgPool) {
+        let mut f = fixture(pool).await;
+        grant_projections(&f).await;
+        let id = Uuid::new_v4();
+        let payload = serde_json::to_value(prediction()).unwrap();
+        let result =
+            crate::edge_delivery::apply_with_state(&f.state, &f.principal, id, payload.clone())
+                .await
+                .unwrap();
+        assert_eq!(result.ack.outcome, crate::edge_delivery::Outcome::Applied);
+        let first = f.updates.try_recv().unwrap();
+        let restored = crate::edge_state::restore(&f.state.pool, &mut restart_graph())
+            .await
+            .unwrap();
+        assert_eq!(restored, Some(first));
+        let replay = crate::edge_delivery::apply_with_state(&f.state, &f.principal, id, payload)
+            .await
+            .unwrap();
+        assert!(replay.ack.duplicate);
+        assert!(f.updates.try_recv().is_err());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn r02b_concurrent_paths_project_the_last_committed_value(pool: PgPool) {
+        let f = fixture(pool).await;
+        grant_projections(&f).await;
+        let (a, b) = tokio::join!(
+            crate::edge_delivery::apply_with_state(
+                &f.state,
+                &f.principal,
+                Uuid::new_v4(),
+                path_event(false)
+            ),
+            crate::edge_delivery::apply_with_state(
+                &f.state,
+                &f.principal,
+                Uuid::new_v4(),
+                path_event(true)
+            )
+        );
+        assert_eq!(
+            a.unwrap().ack.outcome,
+            crate::edge_delivery::Outcome::Applied
+        );
+        assert_eq!(
+            b.unwrap().ack.outcome,
+            crate::edge_delivery::Outcome::Applied
+        );
+        let active: bool = sqlx::query_scalar("SELECT is_active FROM edge_path_state")
+            .fetch_one(&f.state.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            f.state
+                .graph
+                .read()
+                .await
+                .calculate_route("cam-01", "allowed")
+                .is_some(),
+            active
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn r02b_disabled_lpr_is_explicit_and_does_not_create_reservations(pool: PgPool) {
+        let mut f = fixture(pool).await;
+        Arc::get_mut(&mut f.state).unwrap().lpr_mode = crate::lpr::LprMode::Disabled;
+        let event = serde_json::json!({"type":"CAR_DETECTED", "plate":"ABC1D23", "camera_id":"cam-01", "timestamp":"2026-10-18T00:00:00Z"});
+        let ack =
+            crate::edge_delivery::apply_with_state(&f.state, &f.principal, Uuid::new_v4(), event)
+                .await
+                .unwrap()
+                .ack;
+        assert_eq!(ack.outcome, crate::edge_delivery::Outcome::Ignored);
+        assert_eq!(ack.reason.as_deref(), Some("lpr_disabled"));
+        let stored: String = sqlx::query_scalar("SELECT payload::text FROM edge_event_receipts")
+            .fetch_one(&f.state.pool)
+            .await
+            .unwrap();
+        assert!(
+            !stored.contains("ABC1D23"),
+            "inactive LPR must not archive raw plates"
+        );
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM reservations")
+            .fetch_one(&f.state.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+    #[sqlx::test(migrations = "./migrations")]
+    async fn r02b_forecast_publication_cannot_overtake_an_earlier_commit(pool: PgPool) {
+        let f = fixture(pool).await;
+        grant_projections(&f).await;
+        let mut first_tx = edge_auth::begin_authorized(&f.state.pool, &f.principal)
+            .await
+            .unwrap();
+        let first = crate::edge_state::prepare(&mut first_tx, &f.state, &f.principal, prediction())
+            .await
+            .unwrap();
+        first_tx.commit().await.unwrap();
+        // Simulate an earlier writer being descheduled after the DB commits,
+        // before it can publish its cache. The next writer must wait for publication.
+        let mut second_payload = serde_json::to_value(prediction()).unwrap();
+        second_payload["max_capacity"] = serde_json::json!(401);
+        let mut second = Box::pin(crate::edge_delivery::apply_with_state(
+            &f.state,
+            &f.principal,
+            Uuid::new_v4(),
+            second_payload,
+        ));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut second)
+                .await
+                .is_err(),
+            "later forecast overtook committed but unpublished state"
+        );
+        first.publish(&f.state);
+        assert_eq!(
+            second.await.unwrap().ack.outcome,
+            crate::edge_delivery::Outcome::Applied
+        );
+        let stored: serde_json::Value = serde_json::from_str(
+            f.state
+                .last_trend_prediction
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(stored["max_capacity"], 401);
+    }
 }
