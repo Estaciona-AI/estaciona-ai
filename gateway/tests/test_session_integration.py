@@ -9,7 +9,6 @@ import json
 import os
 import time
 from urllib.error import HTTPError
-from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
@@ -77,11 +76,29 @@ def insert_user(server, role="user", plate=None):
     return user_id
 
 
+class WebSocketTicketError(Exception):
+    def __init__(self, status):
+        self.status = status
+
+
 def websocket_url(server, endpoint, user_id, signed_token):
-    query = {"token": signed_token}
-    if endpoint == "app":
-        query["user_id"] = str(user_id)
-    return f"ws://{server.host}:8000/ws/{endpoint}?{urlencode(query)}"
+    del user_id  # Identity is taken from the authenticated bearer token.
+    request = Request(
+        f"http://{server.host}:8000/auth/ws-ticket",
+        data=json.dumps({"destination": endpoint}).encode(),
+        headers={
+            "Authorization": f"Bearer {signed_token}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        response = urlopen(request, timeout=6)
+    except HTTPError as error:
+        raise WebSocketTicketError(error.code) from None
+    with response:
+        payload = json.loads(response.read())
+    return f"ws://{server.host}:8000/ws/{endpoint}?ticket={payload['ticket']}"
 
 
 def request_status(
@@ -175,9 +192,11 @@ async def consume_snapshot(connection):
 
 async def handshake_status(server, endpoint, user_id, signed_token):
     try:
-        async with websockets.connect(
-            websocket_url(server, endpoint, user_id, signed_token), close_timeout=0.5
-        ):
+        url = websocket_url(server, endpoint, user_id, signed_token)
+    except WebSocketTicketError as error:
+        return error.status
+    try:
+        async with websockets.connect(url, close_timeout=0.5):
             return 101
     except InvalidStatus as error:
         return error.response.status_code
@@ -524,7 +543,7 @@ def test_dashboard_handshake_rejects_authenticated_non_admin(server):
     user_id = insert_user(server)
     signed_token = token(user_id, "user", int(time.time()) + 60)
     assert (
-        asyncio.run(handshake_status(server, "dashboard", user_id, signed_token)) == 401
+        asyncio.run(handshake_status(server, "dashboard", user_id, signed_token)) == 403
     )
 
 
@@ -673,12 +692,15 @@ def test_r09_reconnection_reads_current_database_state(server, endpoint, role):
     signed = token(user_id, role, int(time.time()) + 60)
 
     async def run():
-        url = websocket_url(server, endpoint, user_id, signed)
-        async with websockets.connect(url, close_timeout=0.5) as first:
+        async with websockets.connect(
+            websocket_url(server, endpoint, user_id, signed), close_timeout=0.5
+        ) as first:
             await consume_snapshot(first)
         # No broadcast is published: the next connection must load its snapshot.
         server.query("UPDATE spots SET status='occupied' WHERE id='R02-A'")
-        async with websockets.connect(url, close_timeout=0.5) as reconnected:
+        async with websockets.connect(
+            websocket_url(server, endpoint, user_id, signed), close_timeout=0.5
+        ) as reconnected:
             assert json.loads(
                 await asyncio.wait_for(reconnected.recv(), timeout=3)
             ) == {

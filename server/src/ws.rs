@@ -21,63 +21,16 @@ pub mod ws_edge;
 
 pub use ws_edge::ws_edge_handler;
 
-use axum::{
-    extract::{
-        Query, State, WebSocketUpgrade,
-        ws::{Message, WebSocket},
-    },
-    response::IntoResponse,
-};
+use axum::extract::ws::{Message, WebSocket};
 use chrono::{Duration, Utc};
 use futures_util::{SinkExt, StreamExt};
-use serde::Deserialize;
-use uuid::Uuid;
 
 use crate::reservation_store::{self, CreateError, FinishReason};
 use crate::security::{AuthError, AuthSession};
 use crate::state::SharedState;
 use crate::ws::messages::{AppToServerMsg, ServerToAppMsg};
 
-#[derive(Deserialize)]
-pub struct WsAppQuery {
-    pub user_id: Uuid,
-    pub token: String,
-}
-
-pub async fn ws_app_handler(
-    ws: WebSocketUpgrade,
-    Query(query): Query<WsAppQuery>,
-    State(state): State<SharedState>,
-) -> axum::response::Response {
-    let claims = match crate::security::verify_jwt(&query.token, &state.jwt_secret) {
-        Ok(c) => c,
-        Err(_) => {
-            return (
-                axum::http::StatusCode::UNAUTHORIZED,
-                "Invalid or expired JWT token",
-            )
-                .into_response();
-        }
-    };
-    if claims.sub != query.user_id.to_string() {
-        return (
-            axum::http::StatusCode::FORBIDDEN,
-            "Token does not match user_id",
-        )
-            .into_response();
-    }
-    let session = match AuthSession::from_claims(claims) {
-        Ok(session) => session,
-        Err(error) => return error.into_response(),
-    };
-    if let Err(error) = session.revalidate(&state.pool).await {
-        return error.into_response();
-    }
-    ws.on_upgrade(move |socket| handle_app_socket(socket, state, session))
-        .into_response()
-}
-
-async fn handle_app_socket(socket: WebSocket, state: SharedState, session: AuthSession) {
+pub(crate) async fn handle_app_socket(socket: WebSocket, state: SharedState, session: AuthSession) {
     let user_id = session.user_id;
     let (mut sender, mut receiver) = socket.split();
 
@@ -230,37 +183,11 @@ async fn handle_app_socket(socket: WebSocket, state: SharedState, session: AuthS
     // have protected data in its buffer, which must not be flushed after expiry.
 }
 
-pub async fn ws_dashboard_handler(
-    ws: WebSocketUpgrade,
-    Query(query): Query<DashboardQuery>,
-    headers: axum::http::HeaderMap,
-    State(state): State<SharedState>,
-) -> axum::response::Response {
-    let claims = query
-        .token
-        .as_deref()
-        .and_then(|token| crate::security::verify_jwt(token, &state.jwt_secret).ok())
-        .or_else(|| crate::security::authenticated_claims(&headers, &state.jwt_secret).ok());
-    let Some(claims) = claims.filter(|claims| claims.role == "admin") else {
-        return (axum::http::StatusCode::UNAUTHORIZED, "Admin required").into_response();
-    };
-    let session = match AuthSession::from_claims(claims) {
-        Ok(session) => session,
-        Err(error) => return error.into_response(),
-    };
-    if let Err(error) = session.revalidate(&state.pool).await {
-        return error.into_response();
-    }
-    ws.on_upgrade(move |socket| handle_dashboard_socket(socket, state, session))
-        .into_response()
-}
-
-#[derive(Deserialize)]
-pub struct DashboardQuery {
-    pub token: Option<String>,
-}
-
-async fn handle_dashboard_socket(socket: WebSocket, state: SharedState, session: AuthSession) {
+pub(crate) async fn handle_dashboard_socket(
+    socket: WebSocket,
+    state: SharedState,
+    session: AuthSession,
+) {
     let (mut sender, mut receiver) = socket.split();
     let mut broadcast_rx = state.tx.subscribe();
 

@@ -761,9 +761,8 @@ def trend_prediction():
 
 def test_trend_requires_explicit_permission_to_broadcast_and_cache(server):
     user_id = insert_user(server, "admin")
-    dashboard_url = websocket_url(
-        server, "dashboard", user_id, token(user_id, "admin", int(time.time()) + 60)
-    )
+    signed_token = token(user_id, "admin", int(time.time()) + 60)
+    dashboard_url = websocket_url(server, "dashboard", user_id, signed_token)
     prediction = trend_prediction()
 
     async def run():
@@ -787,7 +786,10 @@ def test_trend_requires_explicit_permission_to_broadcast_and_cache(server):
                     json.loads(await asyncio.wait_for(dashboard.recv(), timeout=3))
                     == prediction
                 )
-        async with websockets.connect(dashboard_url, close_timeout=0.5) as dashboard:
+        fresh_dashboard_url = websocket_url(server, "dashboard", user_id, signed_token)
+        async with websockets.connect(
+            fresh_dashboard_url, close_timeout=0.5
+        ) as dashboard:
             await consume_snapshot(dashboard)
             assert (
                 json.loads(await asyncio.wait_for(dashboard.recv(), timeout=3))
