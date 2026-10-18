@@ -59,6 +59,36 @@ def ws_url(server, endpoint, ticket):
     return f"ws://{server.host}:8000/ws/{endpoint}?ticket={ticket}"
 
 
+@pytest.mark.parametrize("endpoint,role", [("app", "user"), ("dashboard", "admin")])
+@pytest.mark.parametrize(
+    "origin", [None, "null", "http://localhost.evil", "http://localhost:5173"]
+)
+def test_denied_origin_preserves_ticket_for_allowed_browser(
+    server, endpoint, role, origin
+):
+    user_id = insert_user(server, role=role)
+    jwt = token(user_id, role, int(time.time()) + 120)
+    status, result, _ = issue(server, jwt, endpoint)
+    assert status == 201, result
+    ticket = result["ticket"]
+    digest = hashlib.sha256(ticket.encode()).digest()
+    url = ws_url(server, endpoint, ticket)
+
+    async def run():
+        with pytest.raises(InvalidStatus) as denied:
+            await websockets.connect(url, origin=origin)
+        assert denied.value.response.status_code == 403
+        assert server.query("SELECT 1 FROM ws_tickets WHERE digest=%s", (digest,)) == [
+            (1,)
+        ]
+
+        async with websockets.connect(url, origin="http://localhost"):
+            pass
+        assert server.query("SELECT 1 FROM ws_tickets WHERE digest=%s", (digest,)) == []
+
+    asyncio.run(run())
+
+
 def test_ticket_is_bearer_only_scoped_to_app_and_single_use(server):
     user_id = insert_user(server)
     jwt = token(user_id, "user", int(time.time()) + 120)
@@ -83,10 +113,14 @@ def test_ticket_is_bearer_only_scoped_to_app_and_single_use(server):
     assert stored == [(str(user_id), "app", int(time.time()) + 120)]
 
     async def run():
-        async with websockets.connect(ws_url(server, "app", ticket)):
+        async with websockets.connect(
+            ws_url(server, "app", ticket), origin="http://localhost"
+        ):
             pass
         with pytest.raises(InvalidStatus) as error:
-            await websockets.connect(ws_url(server, "app", ticket))
+            await websockets.connect(
+                ws_url(server, "app", ticket), origin="http://localhost"
+            )
         assert error.value.response.status_code == 401
 
     asyncio.run(run())
@@ -105,10 +139,14 @@ def test_wrong_destination_burns_ticket_and_dashboard_needs_admin(server):
 
     async def run():
         with pytest.raises(InvalidStatus) as wrong:
-            await websockets.connect(ws_url(server, "dashboard", ticket))
+            await websockets.connect(
+                ws_url(server, "dashboard", ticket), origin="http://localhost"
+            )
         assert wrong.value.response.status_code == 401
         with pytest.raises(InvalidStatus) as replay:
-            await websockets.connect(ws_url(server, "app", ticket))
+            await websockets.connect(
+                ws_url(server, "app", ticket), origin="http://localhost"
+            )
         assert replay.value.response.status_code == 401
 
     asyncio.run(run())
@@ -140,7 +178,9 @@ def test_legacy_jwt_query_parameter_is_not_accepted(server):
 
     async def run():
         with pytest.raises(InvalidStatus) as error:
-            await websockets.connect(f"ws://{server.host}:8000/ws/app?token={jwt}")
+            await websockets.connect(
+                f"ws://{server.host}:8000/ws/app?token={jwt}", origin="http://localhost"
+            )
         assert error.value.response.status_code == 400
 
     asyncio.run(run())
@@ -155,7 +195,9 @@ def test_role_change_invalidates_an_issued_dashboard_ticket(server):
 
     async def run():
         with pytest.raises(InvalidStatus) as error:
-            await websockets.connect(ws_url(server, "dashboard", result["ticket"]))
+            await websockets.connect(
+                ws_url(server, "dashboard", result["ticket"]), origin="http://localhost"
+            )
         assert error.value.response.status_code == 403
 
     asyncio.run(run())
@@ -171,7 +213,9 @@ def test_ticket_operations_fail_closed_when_ticket_store_is_unavailable(server):
 
     async def run():
         with pytest.raises(InvalidStatus) as error:
-            await websockets.connect(ws_url(server, "app", result["ticket"]))
+            await websockets.connect(
+                ws_url(server, "app", result["ticket"]), origin="http://localhost"
+            )
         assert error.value.response.status_code == 503
 
     asyncio.run(run())
@@ -198,7 +242,10 @@ def test_revoked_or_expired_sessions_cannot_use_issued_ticket(server):
 
     async def run():
         with pytest.raises(InvalidStatus) as error:
-            await websockets.connect(ws_url(server, "dashboard", expired["ticket"]))
+            await websockets.connect(
+                ws_url(server, "dashboard", expired["ticket"]),
+                origin="http://localhost",
+            )
         assert error.value.response.status_code == 401
 
     asyncio.run(run())
@@ -233,10 +280,10 @@ def test_ticket_remains_single_use_after_server_restart(server):
     server.start()
 
     async def run():
-        async with websockets.connect(url):
+        async with websockets.connect(url, origin="http://localhost"):
             pass
         with pytest.raises(InvalidStatus) as error:
-            await websockets.connect(url)
+            await websockets.connect(url, origin="http://localhost")
         assert error.value.response.status_code == 401
 
     asyncio.run(run())
@@ -251,7 +298,7 @@ def test_concurrent_handshakes_allow_exactly_one_use(server):
 
     async def connect():
         try:
-            async with websockets.connect(url):
+            async with websockets.connect(url, origin="http://localhost"):
                 return 101
         except InvalidStatus as error:
             return error.response.status_code

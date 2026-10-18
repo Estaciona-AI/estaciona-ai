@@ -196,7 +196,9 @@ async def handshake_status(server, endpoint, user_id, signed_token):
     except WebSocketTicketError as error:
         return error.status
     try:
-        async with websockets.connect(url, close_timeout=0.5):
+        async with websockets.connect(
+            url, origin="http://localhost", close_timeout=0.5
+        ):
             return 101
     except InvalidStatus as error:
         return error.response.status_code
@@ -226,6 +228,7 @@ def test_idle_websocket_closes_when_its_token_expires(server, endpoint, role):
         expires_at = int(time.time()) + 3
         async with websockets.connect(
             websocket_url(server, endpoint, user_id, token(user_id, role, expires_at)),
+            origin="http://localhost",
             close_timeout=0.5,
         ) as connection:
             await consume_snapshot(connection)
@@ -260,6 +263,7 @@ def test_websocket_expires_during_continuous_broadcasts(server, endpoint, role):
                 websocket_url(
                     server, endpoint, user_id, token(user_id, role, expires_at)
                 ),
+                origin="http://localhost",
                 close_timeout=0.5,
             ) as connection:
                 await consume_snapshot(connection)
@@ -323,6 +327,7 @@ def test_websocket_expires_while_initial_snapshot_is_blocked(server, endpoint, r
                 websocket_url(
                     server, endpoint, user_id, token(user_id, role, expires_at)
                 ),
+                origin="http://localhost",
                 close_timeout=0.5,
             ) as connection:
                 await wait_for_lock_waiter(
@@ -377,6 +382,7 @@ def test_blocked_app_reservation_does_not_write_after_session_invalidation(
         expires_at = int(time.time()) + (4 if invalidation == "expiration" else 60)
         async with websockets.connect(
             websocket_url(server, "app", user_id, token(user_id, "user", expires_at)),
+            origin="http://localhost",
             close_timeout=0.5,
         ) as connection:
             await consume_snapshot(connection)
@@ -436,7 +442,9 @@ def test_idle_websocket_revalidates_user_and_role(server, endpoint, role, change
 
     async def run():
         async with websockets.connect(
-            websocket_url(server, endpoint, user_id, signed_token), close_timeout=0.5
+            websocket_url(server, endpoint, user_id, signed_token),
+            origin="http://localhost",
+            close_timeout=0.5,
         ) as connection:
             await consume_snapshot(connection)
             if change == "delete":
@@ -459,7 +467,9 @@ def test_app_command_rechecks_principal_before_next_periodic_validation(server, 
 
     async def run():
         async with websockets.connect(
-            websocket_url(server, "app", user_id, signed_token), close_timeout=0.5
+            websocket_url(server, "app", user_id, signed_token),
+            origin="http://localhost",
+            close_timeout=0.5,
         ) as connection:
             await consume_snapshot(connection)
             if change == "delete":
@@ -583,7 +593,9 @@ def test_idle_websocket_fails_closed_when_principal_lookup_fails(
 
     async def run():
         async with websockets.connect(
-            websocket_url(server, endpoint, user_id, signed_token), close_timeout=0.5
+            websocket_url(server, endpoint, user_id, signed_token),
+            origin="http://localhost",
+            close_timeout=0.5,
         ) as connection:
             await consume_snapshot(connection)
             server.query("ALTER TABLE users RENAME TO session_test_unavailable_users")
@@ -610,6 +622,7 @@ def test_older_socket_does_not_remove_the_newer_private_channel(server, terminat
         expires_at = int(time.time()) + (3 if termination == "expiration" else 60)
         async with websockets.connect(
             websocket_url(server, "app", user_id, token(user_id, "user", expires_at)),
+            origin="http://localhost",
             close_timeout=0.5,
         ) as older:
             await consume_snapshot(older)
@@ -620,6 +633,7 @@ def test_older_socket_does_not_remove_the_newer_private_channel(server, terminat
                     user_id,
                     token(user_id, "user", int(time.time()) + 60),
                 ),
+                origin="http://localhost",
                 close_timeout=0.5,
             ) as newer:
                 await consume_snapshot(newer)
@@ -676,7 +690,9 @@ def test_r09_snapshot_database_failure_closes_instead_of_serving_empty_state(
 
     async def run():
         async with websockets.connect(
-            websocket_url(server, endpoint, user_id, signed), close_timeout=0.5
+            websocket_url(server, endpoint, user_id, signed),
+            origin="http://localhost",
+            close_timeout=0.5,
         ) as connection:
             await asyncio.wait_for(connection.wait_closed(), timeout=2)
 
@@ -693,13 +709,17 @@ def test_r09_reconnection_reads_current_database_state(server, endpoint, role):
 
     async def run():
         async with websockets.connect(
-            websocket_url(server, endpoint, user_id, signed), close_timeout=0.5
+            websocket_url(server, endpoint, user_id, signed),
+            origin="http://localhost",
+            close_timeout=0.5,
         ) as first:
             await consume_snapshot(first)
         # No broadcast is published: the next connection must load its snapshot.
         server.query("UPDATE spots SET status='occupied' WHERE id='R02-A'")
         async with websockets.connect(
-            websocket_url(server, endpoint, user_id, signed), close_timeout=0.5
+            websocket_url(server, endpoint, user_id, signed),
+            origin="http://localhost",
+            close_timeout=0.5,
         ) as reconnected:
             assert json.loads(
                 await asyncio.wait_for(reconnected.recv(), timeout=3)

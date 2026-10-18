@@ -591,7 +591,9 @@ def test_car_cannot_select_or_navigate_to_a_destination_outside_gateway_scope(
 
     async def run():
         async with (
-            websockets.connect(app_url, close_timeout=0.5) as app,
+            websockets.connect(
+                app_url, origin="http://localhost", close_timeout=0.5
+            ) as app,
             edge_connection(server) as edge,
         ):
             assert json.loads(await asyncio.wait_for(app.recv(), timeout=3)) == {
@@ -649,7 +651,9 @@ def test_car_requires_camera_and_operation_grants_before_private_or_database_eff
     )
 
     async def run():
-        async with websockets.connect(app_url, close_timeout=0.5) as app:
+        async with websockets.connect(
+            app_url, origin="http://localhost", close_timeout=0.5
+        ) as app:
             await consume_snapshot(app)
             async with edge_connection(server) as edge:
                 await receive_ready(edge)
@@ -710,7 +714,9 @@ def test_path_update_requires_permission_and_controls_the_actual_route(server):
             await edge.send(json.dumps(path))
             await expect_policy_close(edge)
         async with (
-            websockets.connect(app_url, close_timeout=0.5) as app,
+            websockets.connect(
+                app_url, origin="http://localhost", close_timeout=0.5
+            ) as app,
             edge_connection(server) as edge,
         ):
             await consume_snapshot(app)
@@ -771,7 +777,9 @@ def test_trend_requires_explicit_permission_to_broadcast_and_cache(server):
             await edge.send(json.dumps(prediction))
             await expect_policy_close(edge)
         # A denied prediction must not enter the cache sent to newly connected apps.
-        async with websockets.connect(dashboard_url, close_timeout=0.5) as dashboard:
+        async with websockets.connect(
+            dashboard_url, origin="http://localhost", close_timeout=0.5
+        ) as dashboard:
             await consume_snapshot(dashboard)
             with pytest.raises(asyncio.TimeoutError):
                 await asyncio.wait_for(dashboard.recv(), timeout=0.25)
@@ -788,7 +796,7 @@ def test_trend_requires_explicit_permission_to_broadcast_and_cache(server):
                 )
         fresh_dashboard_url = websocket_url(server, "dashboard", user_id, signed_token)
         async with websockets.connect(
-            fresh_dashboard_url, close_timeout=0.5
+            fresh_dashboard_url, origin="http://localhost", close_timeout=0.5
         ) as dashboard:
             await consume_snapshot(dashboard)
             assert (
@@ -837,7 +845,9 @@ def test_reserved_arrival_reports_unavailable_without_replacing_reservation(
 
     async def run():
         async with (
-            websockets.connect(app_url, close_timeout=0.5) as app,
+            websockets.connect(
+                app_url, origin="http://localhost", close_timeout=0.5
+            ) as app,
             edge_connection(server) as edge,
         ):
             assert json.loads(await asyncio.wait_for(app.recv(), timeout=3)) == {

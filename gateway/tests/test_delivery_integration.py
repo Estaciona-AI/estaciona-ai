@@ -72,6 +72,7 @@ class Server:
             "JWT_SECRET": "disposable-jwt",
             "LPR_ENABLED": "false",
             "PLATE_SECRET_PEPPER": "disposable-pepper",
+            "WS_ALLOWED_ORIGINS": "http://localhost",
         }
         self.environment.pop("EDGE_API_KEY", None)
 
@@ -112,6 +113,8 @@ class Server:
                 "JWT_SECRET=disposable-jwt",
                 "--env",
                 "PLATE_SECRET_PEPPER=disposable-pepper",
+                "--env",
+                f"WS_ALLOWED_ORIGINS={self.environment['WS_ALLOWED_ORIGINS']}",
                 "--entrypoint",
                 "/app/server",
                 IMAGE,
