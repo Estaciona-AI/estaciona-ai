@@ -113,7 +113,7 @@ async fn removing_active_reservation_rejects_the_whole_revision(pool: PgPool) {
         &pool,
         "R07-A",
         owner,
-        chrono::Utc::now() + chrono::Duration::minutes(15),
+        &crate::reservation_policy::ReservationPolicy::default(),
     )
     .await
     .unwrap();
@@ -223,7 +223,7 @@ async fn retired_spot_cannot_be_claimed_even_if_it_is_free(pool: PgPool) {
             &pool,
             "R07-A",
             owner,
-            chrono::Utc::now() + chrono::Duration::minutes(15)
+            &crate::reservation_policy::ReservationPolicy::default()
         )
         .await,
         Err(crate::reservation_store::CreateError::Unavailable)
@@ -272,7 +272,7 @@ async fn reconciliation_waits_for_in_flight_reservation_then_refuses_retirement(
         &mut tx,
         "R07-A",
         owner,
-        chrono::Utc::now() + chrono::Duration::minutes(15),
+        &crate::reservation_policy::ReservationPolicy::default(),
     )
     .await
     .unwrap();

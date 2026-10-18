@@ -31,6 +31,7 @@ mod pathfinding;
 mod postgres_tests;
 #[cfg(test)]
 mod reservation_concurrency_tests;
+mod reservation_policy;
 mod reservation_store;
 #[cfg(test)]
 mod reservation_tests;
