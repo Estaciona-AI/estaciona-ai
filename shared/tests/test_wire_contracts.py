@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Guilherme Pedroza
+# SPDX-License-Identifier: Apache-2.0
+
 """Cross-language artifacts must be useful schemas, not a dictionary of unchecked definitions."""
 
 import json

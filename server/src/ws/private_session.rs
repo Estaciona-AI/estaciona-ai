@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Guilherme Pedroza
+// SPDX-License-Identifier: Apache-2.0
+
 //! Bounded delivery for one app connection; slow clients must reconnect.
 
 use tokio::sync::{mpsc, watch};

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Guilherme Pedroza
+# SPDX-License-Identifier: Apache-2.0
+
 """Real restart applies maps without exposing retired spots to clients."""
 
 import asyncio

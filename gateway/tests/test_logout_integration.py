@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Guilherme Pedroza
+# SPDX-License-Identifier: Apache-2.0
+
 """Real login sessions: logout revokes one session and all its WS tickets."""
 
 import asyncio

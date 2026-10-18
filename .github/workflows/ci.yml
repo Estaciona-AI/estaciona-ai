@@ -151,13 +151,13 @@ jobs:
         run: uv python install
 
       - name: Run Ruff Check
-        run: uv run ruff check
+        run: uv run --locked ruff check
 
       - name: Run Ruff Format Check
-        run: uv run ruff format --check
+        run: uv run --locked ruff format --check
 
       - name: Run Pytest
-        run: uv run pytest
+        run: uv run --locked pytest
 
   contracts-ci:
     name: Contract compatibility CI
@@ -172,6 +172,8 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: "shared/uv.lock"
+      - name: Check first-party licensing policy
+        run: python ../scripts/check_licenses.py
       - name: Lint contract checks
         run: uv run --locked ruff check . && uv run --locked ruff format --check .
       - name: Validate generated schemas and Python producers

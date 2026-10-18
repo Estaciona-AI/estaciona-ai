@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Guilherme Pedroza
+# SPDX-License-Identifier: Apache-2.0
+
 """Versioned HTTP routes share sessions, limits and state with legacy consumers."""
 
 import asyncio

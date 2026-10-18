@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Guilherme Pedroza
+// SPDX-License-Identifier: Apache-2.0
+
 //! HTTP version boundary; existing endpoints keep their legacy wire responses.
 use std::{collections::BTreeMap, sync::OnceLock};
 

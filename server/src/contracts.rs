@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Guilherme Pedroza
+// SPDX-License-Identifier: Apache-2.0
+
 //! Versioned wire artifacts generated from the same DTOs used by the server.
 use std::{collections::BTreeMap, io, path::Path};
 

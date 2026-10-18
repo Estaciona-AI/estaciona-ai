@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Guilherme Pedroza
+# SPDX-License-Identifier: Apache-2.0
+
 """CI must exercise the real server instead of silently skipping integration."""
 
 import os

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Guilherme Pedroza
+// SPDX-License-Identifier: Apache-2.0
+
 //! Installation-owned policy, passed explicitly to the reservation service.
 //! A future tenant resolver can supply this value without transport-specific rules.
 use serde::Deserialize;

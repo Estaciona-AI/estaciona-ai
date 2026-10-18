@@ -1,19 +1,6 @@
-# ==============================================================================
-# Copyright (C) 2026 Guilherme Pedroza
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU Affero General Public License as
-# published by the Free Software Foundation, either version 3 of the
-# License, or (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU Affero General Public License for more details.
-#
-# You should have received a copy of the GNU Affero General Public License
-# along with this program.  If not, see <https://www.gnu.org/licenses/>.
-# ==============================================================================
+# SPDX-FileCopyrightText: 2026 Guilherme Pedroza
+# SPDX-License-Identifier: Apache-2.0
+
 #
 
 import os
@@ -224,9 +211,9 @@ def train_forecasting_model(df):
 if __name__ == "__main__":
     print("Estaciona AI - Inteligência Preditiva")
     print("Copyright (C) 2026 Guilherme Pedroza")
-    print("This program comes with ABSOLUTELY NO WARRANTY; for details see LICENSE.")
-    print("This is free software, and you are welcome to redistribute it under")
-    print("certain conditions; see the GNU Affero General Public License v3.\n")
+    print("Licensed under Apache-2.0; provided AS IS, without warranties.")
+    print("Redistribution is permitted under Apache License 2.0;")
+    print("see LICENSE for conditions and attribution requirements.\n")
     df = load_and_preprocess_data()
     train_duration_model(df)
     train_forecasting_model(df)

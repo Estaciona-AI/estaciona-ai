@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Guilherme Pedroza
+# SPDX-License-Identifier: Apache-2.0
+
 """Optional LPR must be inert by default and require explicit vehicle approval."""
 
 import asyncio
