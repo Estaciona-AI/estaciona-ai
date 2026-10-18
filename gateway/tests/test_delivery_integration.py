@@ -42,16 +42,27 @@ class Server:
         self.postgres_container = os.environ.get("ESTACIONA_TEST_POSTGRES_CONTAINER")
         self.host = "127.0.0.1"
         if self.postgres_container:
-            self.host = subprocess.check_output(
+            network_mode = subprocess.check_output(
                 [
                     "docker",
                     "inspect",
                     self.postgres_container,
                     "--format",
-                    "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+                    "{{.HostConfig.NetworkMode}}",
                 ],
                 text=True,
             ).strip()
+            if network_mode != "host":
+                self.host = subprocess.check_output(
+                    [
+                        "docker",
+                        "inspect",
+                        self.postgres_container,
+                        "--format",
+                        "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+                    ],
+                    text=True,
+                ).strip()
         self.url = f"ws://{self.host}:8000/ws/edge"
         self.log = (root / "server.log").open("a")
         (root / "server").mkdir()
@@ -85,7 +96,9 @@ class Server:
     def start(self):
         if self.postgres_container:
             parsed = urlsplit(self.db_url)
-            netloc = parsed.netloc.rsplit("@", 1)[0] + "@127.0.0.1:5432"
+            netloc = (
+                parsed.netloc.rsplit("@", 1)[0] + f"@127.0.0.1:{parsed.port or 5432}"
+            )
             database_url = urlunsplit(parsed._replace(netloc=netloc))
             args = [
                 "docker",
@@ -245,10 +258,11 @@ async def until(predicate):
 
 
 async def receive_ready(connection):
-    assert json.loads(await asyncio.wait_for(connection.recv(), timeout=3)) == {
-        "type": "EDGE_READY",
-        "delivery_version": 1,
-    }
+    ready = json.loads(await asyncio.wait_for(connection.recv(), timeout=3))
+    assert ready["type"] == "EDGE_READY"
+    assert ready["delivery_version"] == 1
+    active = ["SPOT_UPDATE", "PATH_UPDATE", "TREND_PREDICTION"]
+    assert ready["durable_events"] in (active, [*active, "CAR_DETECTED"])
 
 
 @pytest.mark.parametrize("rotate_credential", [False, True])
@@ -392,3 +406,93 @@ def test_unauthorized_edge_has_no_protocol_or_receipt(server):
 
     asyncio.run(run())
     assert server.query("SELECT COUNT(*) FROM edge_event_receipts") == [(0,)]
+
+
+@pytest.mark.parametrize("kind", ["PATH_UPDATE", "TREND_PREDICTION"])
+def test_durable_projection_ack_survives_real_server_restart(server, kind):
+    server.query(
+        "UPDATE edge_gateways SET path_update=TRUE,trend_prediction=TRUE WHERE id=%s",
+        (server.gateway_id,),
+    )
+    payload = (
+        {
+            "type": "PATH_UPDATE",
+            "from_node": "cam-01",
+            "to_node": "path_node_1",
+            "is_active": False,
+        }
+        if kind == "PATH_UPDATE"
+        else {
+            "type": "TREND_PREDICTION",
+            "timestamp": "2026-10-18T12:00:00Z",
+            "avg_stay_duration_mins": 40.0,
+            "stay_duration_distribution": [1, 2],
+            "max_capacity": 400,
+            "model_health": {
+                "r2_score": 0.9,
+                "mae": 1.0,
+                "rmse": 2.0,
+                "inference_time_ms": 10.0,
+            },
+            "next_24h_occupancy": [
+                {"timestamp": "2026-10-18T13:00:00Z", "occupancy": 100}
+            ],
+        }
+    )
+    frame = {
+        "type": "EDGE_EVENT",
+        "version": 1,
+        "event_id": str(uuid4()),
+        "payload": payload,
+    }
+
+    async def send():
+        async with websockets.connect(
+            server.url, additional_headers={"Authorization": f"Bearer {KEY}"}
+        ) as connection:
+            await receive_ready(connection)
+            await connection.send(json.dumps(frame))
+            return json.loads(await asyncio.wait_for(connection.recv(), timeout=5))
+
+    first = asyncio.run(send())
+    assert first["outcome"] == "applied", first
+    assert first["duplicate"] is False
+    server.stop()
+    server.start()
+    replay = asyncio.run(send())
+    assert replay["outcome"] == "applied", replay
+    assert replay["duplicate"] is True
+    assert server.query(
+        "SELECT COUNT(*) FROM edge_event_receipts WHERE event_id=%s",
+        (frame["event_id"],),
+    ) == [(1,)]
+    if kind == "TREND_PREDICTION":
+        from test_ws_tickets_integration import http, issue, ws_url
+
+        email = f"{uuid4()}@example.invalid"
+        credentials = {"email": email, "password": "disposable-r02b-password"}
+        status, user, _ = http(
+            server, "/users", payload={"name": "R02b", **credentials}
+        )
+        assert status == 201, user
+        server.query("UPDATE users SET role='admin' WHERE email=%s", (email,))
+        status, login, _ = http(server, "/login", payload=credentials)
+        assert status == 200, login
+        status, ticket, _ = issue(server, login["token"], "dashboard")
+        assert status == 201, ticket
+
+        async def read_restored_forecast():
+            async with websockets.connect(
+                ws_url(server, "dashboard", ticket["ticket"]),
+                origin="http://localhost",
+            ) as dashboard:
+                for _ in range(4):
+                    message = json.loads(
+                        await asyncio.wait_for(dashboard.recv(), timeout=3)
+                    )
+                    if message.get("type") == "TREND_PREDICTION":
+                        assert message["max_capacity"] == 400
+                        return
+                pytest.fail("restored forecast was not delivered to the dashboard")
+
+        asyncio.run(read_restored_forecast())
