@@ -59,6 +59,36 @@ def ws_url(server, endpoint, ticket):
     return f"ws://{server.host}:8000/ws/{endpoint}?ticket={ticket}"
 
 
+@pytest.mark.parametrize("endpoint,role", [("app", "user"), ("dashboard", "admin")])
+@pytest.mark.parametrize(
+    "origin", [None, "null", "http://localhost.evil", "http://localhost:5173"]
+)
+def test_denied_origin_preserves_ticket_for_allowed_browser(
+    server, endpoint, role, origin
+):
+    user_id = insert_user(server, role=role)
+    jwt = token(user_id, role, int(time.time()) + 120)
+    status, result, _ = issue(server, jwt, endpoint)
+    assert status == 201, result
+    ticket = result["ticket"]
+    digest = hashlib.sha256(ticket.encode()).digest()
+    url = ws_url(server, endpoint, ticket)
+
+    async def run():
+        with pytest.raises(InvalidStatus) as denied:
+            await websockets.connect(url, origin=origin)
+        assert denied.value.response.status_code == 403
+        assert server.query("SELECT 1 FROM ws_tickets WHERE digest=%s", (digest,)) == [
+            (1,)
+        ]
+
+        async with websockets.connect(url, origin="http://localhost"):
+            pass
+        assert server.query("SELECT 1 FROM ws_tickets WHERE digest=%s", (digest,)) == []
+
+    asyncio.run(run())
+
+
 def test_ticket_is_bearer_only_scoped_to_app_and_single_use(server):
     user_id = insert_user(server)
     jwt = token(user_id, "user", int(time.time()) + 120)
