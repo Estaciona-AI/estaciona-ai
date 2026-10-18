@@ -1,7 +1,7 @@
 use crate::{
-    edge_auth::{self, AuthError, GlobalOperation, Principal},
+    edge_auth::{self, AuthError, Principal},
     state::SharedState,
-    ws::messages::{EdgeToServerMsg, ServerToAppMsg},
+    ws::messages::EdgeToServerMsg,
 };
 
 pub use crate::lpr::car_detected;
@@ -13,17 +13,16 @@ pub async fn path_update(
     to: &str,
     active: bool,
 ) -> Result<bool, AuthError> {
-    let mut tx = edge_auth::begin_authorized(&state.pool, principal).await?;
-    if !edge_auth::global_allowed(&mut tx, principal, GlobalOperation::PathUpdate).await? {
-        tx.rollback().await?;
-        return Ok(false);
-    }
-    // Acquire the graph before committing authorization; cancellation/DB failure
-    // cannot leave a graph edit behind. The edit after commit has no await.
-    let mut graph = state.graph.write().await;
-    tx.commit().await?;
-    graph.set_edge_status(from, to, active);
-    Ok(true)
+    legacy_projection(
+        state,
+        principal,
+        EdgeToServerMsg::PathUpdate {
+            from_node: from.into(),
+            to_node: to.into(),
+            is_active: active,
+        },
+    )
+    .await
 }
 
 pub async fn forecast(
@@ -31,42 +30,20 @@ pub async fn forecast(
     principal: &Principal,
     prediction: EdgeToServerMsg,
 ) -> Result<bool, AuthError> {
+    legacy_projection(state, principal, prediction).await
+}
+
+async fn legacy_projection(
+    state: &SharedState,
+    principal: &Principal,
+    message: EdgeToServerMsg,
+) -> Result<bool, AuthError> {
     let mut tx = edge_auth::begin_authorized(&state.pool, principal).await?;
-    if !edge_auth::global_allowed(&mut tx, principal, GlobalOperation::TrendPrediction).await? {
-        tx.rollback().await?;
-        return Ok(false);
-    }
-    let EdgeToServerMsg::TrendPrediction {
-        timestamp,
-        avg_stay_duration_mins,
-        stay_duration_distribution,
-        max_capacity,
-        model_health,
-        next_24h_occupancy,
-    } = prediction
-    else {
-        return Ok(false);
-    };
-    let frame = ServerToAppMsg::TrendPrediction {
-        timestamp,
-        avg_stay_duration_mins,
-        stay_duration_distribution,
-        max_capacity,
-        model_health,
-        next_24h_occupancy,
-    };
-    let json = serde_json::to_string(&frame)
-        .map_err(|_| sqlx::Error::Protocol("Invalid forecast payload".into()))?;
+    let effect = crate::edge_state::prepare(&mut tx, state, principal, message).await?;
+    let allowed = effect.outcome().0 != crate::edge_delivery::Outcome::Rejected;
     tx.commit().await?;
-    // There is no await between committed authorization, cache replacement and broadcast.
-    let mut cache = state
-        .last_trend_prediction
-        .lock()
-        .map_err(|_| sqlx::Error::Protocol("Forecast cache unavailable".into()))?;
-    *cache = Some(json.clone());
-    drop(cache);
-    let _ = state.tx.send(json);
-    Ok(true)
+    effect.publish(state);
+    Ok(allowed)
 }
 
 #[cfg(test)]
@@ -153,6 +130,7 @@ mod tests {
             graph: RwLock::new(graph),
             jwt_secret: "unused".into(),
             plate_pepper: "fixture-pepper".into(),
+            forecast_writer: Default::default(),
             last_trend_prediction: Mutex::new(None),
             config_store: crate::config_store::LocalConfigStore::new(std::env::temp_dir()),
         });

@@ -42,6 +42,7 @@ fn fixture(pool: PgPool) -> SharedState {
         jwt_secret: "r04-disposable-jwt-secret".to_owned(),
         plate_pepper: "r04-disposable-plate-pepper".to_owned(),
         auth_limits: Default::default(),
+        forecast_writer: Default::default(),
         last_trend_prediction: Mutex::new(None),
         config_store: crate::config_store::LocalConfigStore::new(
             std::env::temp_dir().join(format!("r04-auth-{}", Uuid::new_v4())),

@@ -125,6 +125,47 @@ impl ParkingGraph {
         }
     }
 
+    /// Identifies topology and geometry, independently of transient edge status.
+    pub(crate) fn revision(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let mut nodes: Vec<_> = self
+            .nodes
+            .values()
+            .map(|node| (&node.name, node.x.to_bits(), node.y.to_bits()))
+            .collect();
+        nodes.sort();
+        let mut edges: Vec<_> = self
+            .edges
+            .iter()
+            .flat_map(|(from, edges)| {
+                edges.iter().map(move |edge| {
+                    (
+                        &self.nodes[from].name,
+                        &self.nodes[&edge.target].name,
+                        edge.cost,
+                    )
+                })
+            })
+            .collect();
+        edges.sort();
+        let bytes = serde_json::to_vec(&(1u8, nodes, edges)).expect("graph primitives serialize");
+        use std::fmt::Write;
+        let mut revision = String::with_capacity(64);
+        for byte in Sha256::digest(bytes) {
+            write!(&mut revision, "{byte:02x}").expect("String writes are infallible");
+        }
+        revision
+    }
+
+    pub(crate) fn has_edge(&self, from: &str, to: &str) -> bool {
+        let (Some(from), Some(to)) = (self.name_to_id.get(from), self.name_to_id.get(to)) else {
+            return false;
+        };
+        self.edges
+            .get(from)
+            .is_some_and(|edges| edges.iter().any(|edge| edge.target == *to))
+    }
+
     pub fn set_edge_status(&mut self, from: &str, to: &str, active: bool) {
         let from_id = self.name_to_id.get(from).copied();
         let to_id = self.name_to_id.get(to).copied();
