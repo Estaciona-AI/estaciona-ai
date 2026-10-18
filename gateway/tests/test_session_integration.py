@@ -1,6 +1,7 @@
 """Opt-in session lifecycle checks against Rust and disposable PostgreSQL."""
 
 import asyncio
+import datetime
 import base64
 from contextlib import contextmanager, suppress
 import hashlib
@@ -287,22 +288,23 @@ def test_websocket_expires_during_continuous_broadcasts(server, endpoint, role):
                 close_timeout=0.5,
             ) as connection:
                 await consume_snapshot(connection)
-                frame = json.dumps(
-                    {
-                        "type": "SPOT_UPDATE",
-                        "spot_id": "R02-A",
-                        "status": "free",
-                        "camera_id": "session-camera",
-                        "confidence": 0.9,
-                        "timestamp": "2026-10-11T12:00:00Z",
-                    }
-                )
+                frame = {
+                    "type": "SPOT_UPDATE",
+                    "spot_id": "R02-A",
+                    "status": "free",
+                    "camera_id": "session-camera",
+                    "confidence": 0.9,
+                    "timestamp": "2026-10-11T12:00:00Z",
+                }
                 sent = 0
 
                 async def publish():
                     nonlocal sent
                     while True:
-                        await edge.send(frame)
+                        frame["timestamp"] = datetime.datetime.now(
+                            datetime.UTC
+                        ).isoformat()
+                        await edge.send(json.dumps(frame))
                         sent += 1
                         await asyncio.sleep(1 / 60)
 

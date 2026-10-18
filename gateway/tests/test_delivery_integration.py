@@ -1,4 +1,5 @@
 import datetime
+from functools import lru_cache
 
 """Opt-in integration against the built Rust server and a disposable PostgreSQL DB."""
 
@@ -235,6 +236,12 @@ def server(tmp_path):
                 )
 
 
+@lru_cache(maxsize=1024)
+def observation_timestamp(event_id):
+    # A replay is the same observation, including its original source time.
+    return datetime.datetime.now(datetime.UTC).isoformat()
+
+
 def message(event_id):
     return {
         "type": "EDGE_EVENT",
@@ -246,7 +253,7 @@ def message(event_id):
             "status": "occupied",
             "camera_id": "test-camera",
             "confidence": 0.9,
-            "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
+            "timestamp": observation_timestamp(event_id),
         },
     }
 
