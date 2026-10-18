@@ -234,7 +234,9 @@ mod tests {
         let id = uuid::Uuid::new_v4();
         sqlx::query("INSERT INTO users (id, name, email, password_hash, role) VALUES ($1, 'R10 fixture', $2, 'unused-hash', $3)")
             .bind(id).bind(format!("{id}@example.invalid")).bind(role).execute(&state.pool).await.unwrap();
-        let token = crate::security::create_jwt(&id.to_string(), role, &state.jwt_secret).unwrap();
+        let token = crate::sessions::issue(&state.pool, id, role, &state.jwt_secret)
+            .await
+            .unwrap();
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(
             axum::http::header::AUTHORIZATION,

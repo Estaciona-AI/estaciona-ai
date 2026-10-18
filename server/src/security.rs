@@ -187,6 +187,7 @@ pub async fn verify_password_async(
 // Autenticação de sessão com JWT
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
+    pub jti: Uuid,    // One independently revokable login session.
     pub sub: String,  // ID
     pub role: String, // Função
     pub exp: usize,   // Timestamp
@@ -203,6 +204,7 @@ pub fn create_jwt(
         .timestamp() as usize;
 
     let claims = Claims {
+        jti: Uuid::new_v4(),
         sub: subject.to_owned(),
         role: role.to_owned(),
         exp: expiration,
@@ -239,6 +241,7 @@ const SESSION_RECHECK_INTERVAL: StdDuration = StdDuration::from_secs(5);
 
 #[derive(Debug)]
 pub struct AuthSession {
+    pub session_id: Uuid,
     pub user_id: Uuid,
     pub role: String,
     expires_at: usize,
@@ -272,6 +275,7 @@ impl AuthSession {
             .checked_add(remaining)
             .ok_or_else(expired_session)?;
         Ok(Self {
+            session_id: claims.jti,
             user_id,
             role: claims.role,
             expires_at: claims.exp,
@@ -297,8 +301,11 @@ impl AuthSession {
         let query_deadline = self.deadline.min(Instant::now() + AUTHORIZATION_TIMEOUT);
         let result = timeout_at(
             query_deadline,
-            sqlx::query_scalar::<_, String>("SELECT role FROM users WHERE id = $1")
+            sqlx::query_scalar::<_, String>("SELECT u.role FROM auth_sessions s JOIN users u ON u.id=s.user_id WHERE s.id=$1 AND s.user_id=$2 AND s.role=$3 AND s.expires_at=$4 AND s.expires_at>NOW() AND s.revoked_at IS NULL")
+                .bind(self.session_id)
                 .bind(self.user_id)
+                .bind(&self.role)
+                .bind(crate::sessions::expires_at(self)?)
                 .fetch_optional(pool),
         )
         .await;
@@ -790,6 +797,7 @@ mod tests {
     fn verify_jwt_expired_token_fails() {
         let secret = "test_secret";
         let claims = Claims {
+            jti: Uuid::new_v4(),
             sub: "user".to_owned(),
             role: "admin".to_owned(),
             exp: 0,
@@ -808,6 +816,7 @@ mod tests {
     fn verify_jwt_rejects_expiration_without_grace_period() {
         for seconds_ago in [0, 1, 30] {
             let claims = Claims {
+                jti: Uuid::new_v4(),
                 sub: Uuid::new_v4().to_string(),
                 role: "user".to_owned(),
                 exp: (Utc::now().timestamp() - seconds_ago) as usize,
@@ -823,5 +832,22 @@ mod tests {
                 "a token expired {seconds_ago} seconds ago must be rejected"
             );
         }
+    }
+    #[sqlx::test(migrations = "./migrations")]
+    async fn r03b_signed_but_unregistered_session_is_not_authorization(pool: PgPool) {
+        let user = Uuid::new_v4();
+        sqlx::query("INSERT INTO users (id,name,email,password_hash,role) VALUES ($1,'R03b',$2,'unused','user')")
+            .bind(user).bind(format!("{user}@example.invalid")).execute(&pool).await.unwrap();
+        let token = create_jwt(&user.to_string(), "user", "r03b-secret").unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {token}").parse().unwrap(),
+        );
+        let result = authenticated_session(&headers, "r03b-secret", &pool).await;
+        assert!(
+            result.is_err(),
+            "a signature alone must not authorize a session absent from the registry"
+        );
     }
 }

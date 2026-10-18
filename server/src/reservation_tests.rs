@@ -16,7 +16,6 @@ use uuid::Uuid;
 use crate::{
     pathfinding::ParkingGraph,
     reservations::{self, CreateReservation, UpdateSpotStatus},
-    security,
     state::{AppState, SharedState},
 };
 
@@ -102,8 +101,9 @@ impl Fixture {
         .await?)
     }
 
-    fn headers(&self, user_id: Uuid, role: &str) -> HeaderMap {
-        let token = security::create_jwt(&user_id.to_string(), role, &self.state.jwt_secret)
+    async fn headers(&self, user_id: Uuid, role: &str) -> HeaderMap {
+        let token = crate::sessions::issue(&self.state.pool, user_id, role, &self.state.jwt_secret)
+            .await
             .expect("fixture JWT must be valid");
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -118,7 +118,7 @@ impl Fixture {
     async fn create(&self, user_id: Uuid) -> Response {
         reservations::create_reservation(
             State(self.state.clone()),
-            self.headers(user_id, "user"),
+            self.headers(user_id, "user").await,
             Json(CreateReservation {
                 spot_id: self.spot_id.clone(),
                 expires_at: Utc::now() + Duration::minutes(15),
@@ -144,7 +144,7 @@ impl Fixture {
         let response = reservations::update_spot_status(
             State(self.state.clone()),
             Path(self.spot_id.clone()),
-            self.headers(self.admin, "admin"),
+            self.headers(self.admin, "admin").await,
             Json(UpdateSpotStatus {
                 status: status.to_owned(),
             }),
@@ -181,7 +181,7 @@ impl Fixture {
 #[sqlx::test(migrations = "./migrations")]
 async fn r03_demoted_admin_cannot_mutate_a_spot(pool: PgPool) -> Result<(), sqlx::Error> {
     let fixture = Fixture::new(pool).await?;
-    let headers = fixture.headers(fixture.admin, "admin");
+    let headers = fixture.headers(fixture.admin, "admin").await;
     sqlx::query("UPDATE users SET role = 'user' WHERE id = $1")
         .bind(fixture.admin)
         .execute(&fixture.state.pool)
@@ -204,11 +204,21 @@ async fn r03_demoted_admin_cannot_mutate_a_spot(pool: PgPool) -> Result<(), sqlx
 #[sqlx::test(migrations = "./migrations")]
 async fn r03_deleted_user_cannot_create_a_reservation(pool: PgPool) -> Result<(), sqlx::Error> {
     let fixture = Fixture::new(pool).await?;
+    let headers = fixture.headers(fixture.owner, "user").await;
     sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(fixture.owner)
         .execute(&fixture.state.pool)
         .await?;
-    let response = fixture.create(fixture.owner).await;
+    let response = reservations::create_reservation(
+        State(fixture.state.clone()),
+        headers,
+        Json(CreateReservation {
+            spot_id: fixture.spot_id.clone(),
+            expires_at: Utc::now() + Duration::minutes(15),
+        }),
+    )
+    .await
+    .into_response();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(fixture.spot_status().await?, "free");
     assert_eq!(fixture.active_count().await?, 0);
@@ -226,7 +236,7 @@ async fn r03_authorization_database_failure_denies_admin_mutation(
     let response = reservations::update_spot_status(
         State(fixture.state.clone()),
         Path(fixture.spot_id.clone()),
-        fixture.headers(fixture.admin, "admin"),
+        fixture.headers(fixture.admin, "admin").await,
         Json(UpdateSpotStatus {
             status: "occupied".to_owned(),
         }),
@@ -305,7 +315,7 @@ async fn rest_cancel_denies_a_different_owner_without_releasing_the_spot(
     let response = reservations::cancel_reservation(
         State(fixture.state.clone()),
         Path(reservation_id),
-        fixture.headers(fixture.other, "user"),
+        fixture.headers(fixture.other, "user").await,
     )
     .await
     .into_response();
@@ -341,7 +351,7 @@ async fn rest_cancel_rolls_back_when_releasing_the_spot_fails(
     let response = reservations::cancel_reservation(
         State(fixture.state.clone()),
         Path(reservation_id),
-        fixture.headers(fixture.owner, "user"),
+        fixture.headers(fixture.owner, "user").await,
     )
     .await
     .into_response();
@@ -468,7 +478,7 @@ async fn retired_spot_rejects_admin_mutation_without_releasing_history(pool: PgP
     let response = reservations::update_spot_status(
         State(f.state.clone()),
         Path(f.spot_id.clone()),
-        f.headers(f.admin, "admin"),
+        f.headers(f.admin, "admin").await,
         Json(UpdateSpotStatus {
             status: "free".into(),
         }),
@@ -519,7 +529,7 @@ async fn assert_recommendation_ignores_retired(pool: PgPool, branch: &str) {
     *f.state.graph.write().await = graph;
     let response = reservations::recommend_spot(
         State(f.state.clone()),
-        f.headers(f.owner, "user"),
+        f.headers(f.owner, "user").await,
         axum::extract::Query(reservations::RecommendQuery { user_id: f.owner }),
     )
     .await
@@ -555,7 +565,7 @@ async fn recommendation_fixture(pool: PgPool) -> Fixture {
 async fn recommendation_response(f: &Fixture) -> Response {
     reservations::recommend_spot(
         State(f.state.clone()),
-        f.headers(f.owner, "user"),
+        f.headers(f.owner, "user").await,
         axum::extract::Query(reservations::RecommendQuery { user_id: f.owner }),
     )
     .await

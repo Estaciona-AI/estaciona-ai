@@ -167,6 +167,13 @@ async fn issue(
             return Err((StatusCode::FORBIDDEN, "Admin required"));
         }
 
+        if !crate::sessions::lock_active(&mut tx, &session)
+            .await
+            .map_err(service_unavailable)?
+        {
+            return Err((StatusCode::UNAUTHORIZED, "Invalid or revoked session"));
+        }
+
         sqlx::query("DELETE FROM ws_tickets WHERE user_id=$1 AND expires_at <= NOW()")
             .bind(session.user_id)
             .execute(&mut *tx)
@@ -183,13 +190,14 @@ async fn issue(
             return Err((StatusCode::TOO_MANY_REQUESTS, "Too many pending tickets"));
         }
 
-        sqlx::query("INSERT INTO ws_tickets (digest,user_id,role,destination,session_expires_at,expires_at) VALUES ($1,$2,$3,$4,$5,$6)")
+        sqlx::query("INSERT INTO ws_tickets (digest,user_id,role,destination,session_expires_at,expires_at,session_id) VALUES ($1,$2,$3,$4,$5,$6,$7)")
             .bind(&digest)
             .bind(session.user_id)
             .bind(&session.role)
             .bind(request.destination.as_str())
             .bind(session.expires_at() as i64)
             .bind(expires_at)
+            .bind(session.session_id)
             .execute(&mut *tx)
             .await
             .map_err(service_unavailable)?;
@@ -233,6 +241,7 @@ async fn set_transaction_limits(tx: &mut Transaction<'_, Postgres>) -> Result<()
 
 #[derive(FromRow)]
 struct ConsumedTicket {
+    session_id: Uuid,
     user_id: Uuid,
     role: String,
     destination: String,
@@ -258,7 +267,7 @@ async fn consume(
         set_transaction_limits(&mut tx)
             .await
             .map_err(service_unavailable)?;
-        let row: Option<ConsumedTicket> = sqlx::query_as("DELETE FROM ws_tickets WHERE digest=$1 RETURNING user_id,role,destination,session_expires_at,expires_at")
+        let row: Option<ConsumedTicket> = sqlx::query_as("DELETE FROM ws_tickets WHERE digest=$1 RETURNING session_id,user_id,role,destination,session_expires_at,expires_at")
             .bind(digest)
             .fetch_optional(&mut *tx)
             .await
@@ -272,6 +281,7 @@ async fn consume(
             return Err((StatusCode::UNAUTHORIZED, "Invalid ticket"));
         }
         let session = AuthSession::from_claims(Claims {
+            jti: row.session_id,
             sub: row.user_id.to_string(),
             role: row.role,
             exp: row.session_expires_at as usize,
@@ -317,6 +327,16 @@ pub fn spawn_cleanup(pool: PgPool) {
                 Ok(Ok(_)) => {}
                 Ok(Err(error)) => tracing::warn!(%error, "WebSocket ticket cleanup failed"),
                 Err(_) => tracing::warn!("WebSocket ticket cleanup timed out"),
+            }
+            match timeout(
+                Duration::from_secs(2),
+                crate::sessions::cleanup_expired(&pool),
+            )
+            .await
+            {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => tracing::warn!(%error, "Expired session cleanup failed"),
+                Err(_) => tracing::warn!("Expired session cleanup timed out"),
             }
         }
     });
@@ -406,13 +426,19 @@ mod postgres_tests {
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO ws_tickets (digest,user_id,role,destination,session_expires_at,expires_at) SELECT decode(lpad(to_hex(value),64,'0'),'hex'),$1,'user','app',0,NOW()-INTERVAL '1 second' FROM generate_series(1,1001) value")
+        let jwt = crate::sessions::issue(&pool, user_id, "user", "fixture")
+            .await
+            .unwrap();
+        let session_id = crate::security::verify_jwt(&jwt, "fixture").unwrap().jti;
+        sqlx::query("INSERT INTO ws_tickets (session_id,digest,user_id,role,destination,session_expires_at,expires_at) SELECT $2,decode(lpad(to_hex(value),64,'0'),'hex'),$1,'user','app',0,NOW()-INTERVAL '1 second' FROM generate_series(1,1001) value")
             .bind(user_id)
+            .bind(session_id)
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO ws_tickets (digest,user_id,role,destination,session_expires_at,expires_at) VALUES (decode(lpad(to_hex(1002),64,'0'),'hex'),$1,'user','app',0,NOW()+INTERVAL '1 minute')")
+        sqlx::query("INSERT INTO ws_tickets (session_id,digest,user_id,role,destination,session_expires_at,expires_at) VALUES ($2,decode(lpad(to_hex(1002),64,'0'),'hex'),$1,'user','app',0,NOW()+INTERVAL '1 minute')")
             .bind(user_id)
+            .bind(session_id)
             .execute(&pool)
             .await
             .unwrap();
@@ -492,14 +518,19 @@ mod origin_handshake_tests {
         .await
         .unwrap();
 
+        let jwt = crate::sessions::issue(pool, user_id, role, "fixture")
+            .await
+            .unwrap();
+        let claims = crate::security::verify_jwt(&jwt, "fixture").unwrap();
         let (ticket, digest) = new_ticket();
-        sqlx::query("INSERT INTO ws_tickets (digest,user_id,role,destination,session_expires_at,expires_at) VALUES ($1,$2,$3,$4,$5,$6)")
+        sqlx::query("INSERT INTO ws_tickets (digest,user_id,role,destination,session_expires_at,expires_at,session_id) VALUES ($1,$2,$3,$4,$5,$6,$7)")
             .bind(digest)
             .bind(user_id)
             .bind(role)
             .bind(destination)
-            .bind(Utc::now().timestamp() + 300)
+            .bind(claims.exp as i64)
             .bind(Utc::now() + ChronoDuration::seconds(30))
+            .bind(claims.jti)
             .execute(pool)
             .await
             .unwrap();

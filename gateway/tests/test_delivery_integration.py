@@ -42,16 +42,27 @@ class Server:
         self.postgres_container = os.environ.get("ESTACIONA_TEST_POSTGRES_CONTAINER")
         self.host = "127.0.0.1"
         if self.postgres_container:
-            self.host = subprocess.check_output(
+            network_mode = subprocess.check_output(
                 [
                     "docker",
                     "inspect",
                     self.postgres_container,
                     "--format",
-                    "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+                    "{{.HostConfig.NetworkMode}}",
                 ],
                 text=True,
             ).strip()
+            if network_mode != "host":
+                self.host = subprocess.check_output(
+                    [
+                        "docker",
+                        "inspect",
+                        self.postgres_container,
+                        "--format",
+                        "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+                    ],
+                    text=True,
+                ).strip()
         self.url = f"ws://{self.host}:8000/ws/edge"
         self.log = (root / "server.log").open("a")
         (root / "server").mkdir()
@@ -85,7 +96,9 @@ class Server:
     def start(self):
         if self.postgres_container:
             parsed = urlsplit(self.db_url)
-            netloc = parsed.netloc.rsplit("@", 1)[0] + "@127.0.0.1:5432"
+            netloc = (
+                parsed.netloc.rsplit("@", 1)[0] + f"@127.0.0.1:{parsed.port or 5432}"
+            )
             database_url = urlunsplit(parsed._replace(netloc=netloc))
             args = [
                 "docker",

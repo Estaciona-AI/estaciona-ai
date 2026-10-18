@@ -586,7 +586,7 @@ def test_car_cannot_select_or_navigate_to_a_destination_outside_gateway_scope(
         server.query("UPDATE spots SET status = 'reserved' WHERE id = 'R02-A'")
     expected_status = "reserved" if has_reservation else "free"
     app_url = websocket_url(
-        server, "app", user_id, token(user_id, "user", int(time.time()) + 60)
+        server, "app", user_id, token(server, user_id, "user", int(time.time()) + 60)
     )
 
     async def run():
@@ -647,7 +647,7 @@ def test_car_requires_camera_and_operation_grants_before_private_or_database_eff
             (server.gateway_id,),
         )
     app_url = websocket_url(
-        server, "app", user_id, token(user_id, "user", int(time.time()) + 60)
+        server, "app", user_id, token(server, user_id, "user", int(time.time()) + 60)
     )
 
     async def run():
@@ -699,7 +699,7 @@ def test_path_update_requires_permission_and_controls_the_actual_route(server):
         (server.gateway_id,),
     )
     app_url = websocket_url(
-        server, "app", user_id, token(user_id, "user", int(time.time()) + 60)
+        server, "app", user_id, token(server, user_id, "user", int(time.time()) + 60)
     )
     path = {
         "type": "PATH_UPDATE",
@@ -767,7 +767,7 @@ def trend_prediction():
 
 def test_trend_requires_explicit_permission_to_broadcast_and_cache(server):
     user_id = insert_user(server, "admin")
-    signed_token = token(user_id, "admin", int(time.time()) + 60)
+    signed_token = token(server, user_id, "admin", int(time.time()) + 60)
     dashboard_url = websocket_url(server, "dashboard", user_id, signed_token)
     prediction = trend_prediction()
 
@@ -840,7 +840,7 @@ def test_reserved_arrival_reports_unavailable_without_replacing_reservation(
     )
     server.query("UPDATE spots SET status='reserved' WHERE id='R02-A'")
     app_url = websocket_url(
-        server, "app", user_id, token(user_id, "user", int(time.time()) + 60)
+        server, "app", user_id, token(server, user_id, "user", int(time.time()) + 60)
     )
 
     async def run():
