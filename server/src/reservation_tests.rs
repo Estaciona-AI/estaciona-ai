@@ -729,3 +729,137 @@ async fn r08_valid_empty_history_still_uses_distance(pool: PgPool) {
     add_preferred_spot(&f, "B-07").await;
     assert_recommended_spot(&f, "R01-01").await;
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn confirmation_before_observation_preserves_active_reservation(
+    pool: PgPool,
+) -> Result<(), sqlx::Error> {
+    let fixture = Fixture::new(pool).await?;
+    let id = fixture.create_for_owner().await;
+    let response = reservations::confirm_occupancy(
+        State(fixture.state.clone()),
+        Path(id),
+        fixture.headers(fixture.owner, "user").await,
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(fixture.reservation_status(id).await?, "active");
+    assert_eq!(fixture.spot_status().await?, "reserved");
+    let history: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM user_occupancy_history WHERE spot_id=$1")
+            .bind(&fixture.spot_id)
+            .fetch_one(&fixture.state.pool)
+            .await?;
+    assert_eq!(history, 0);
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn confirmation_rejects_expired_reservation_even_when_occupied(
+    pool: PgPool,
+) -> Result<(), sqlx::Error> {
+    let fixture = Fixture::new(pool).await?;
+    let id = fixture.create_for_owner().await;
+    fixture.update_spot("occupied").await;
+    sqlx::query("UPDATE reservations SET expires_at=NOW()-INTERVAL '1 second' WHERE id=$1")
+        .bind(id)
+        .execute(&fixture.state.pool)
+        .await?;
+    let response = reservations::confirm_occupancy(
+        State(fixture.state.clone()),
+        Path(id),
+        fixture.headers(fixture.owner, "user").await,
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(fixture.reservation_status(id).await?, "active");
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn confirmation_records_history_once_after_observation(
+    pool: PgPool,
+) -> Result<(), sqlx::Error> {
+    let fixture = Fixture::new(pool).await?;
+    let id = fixture.create_for_owner().await;
+    fixture.update_spot("occupied").await;
+    for expected in [StatusCode::OK, StatusCode::NOT_FOUND] {
+        let response = reservations::confirm_occupancy(
+            State(fixture.state.clone()),
+            Path(id),
+            fixture.headers(fixture.owner, "user").await,
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), expected);
+    }
+    assert_eq!(fixture.reservation_status(id).await?, "completed");
+    assert_eq!(fixture.spot_status().await?, "occupied");
+    let history: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM user_occupancy_history WHERE spot_id=$1")
+            .bind(&fixture.spot_id)
+            .fetch_one(&fixture.state.pool)
+            .await?;
+    assert_eq!(history, 1);
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn confirmation_rolls_back_when_history_insert_fails(
+    pool: PgPool,
+) -> Result<(), sqlx::Error> {
+    let fixture = Fixture::new(pool).await?;
+    let id = fixture.create_for_owner().await;
+    fixture.update_spot("occupied").await;
+    sqlx::raw_sql("CREATE FUNCTION reject_confirmation_history() RETURNS TRIGGER LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected history failure'; END; $$; CREATE TRIGGER reject_confirmation_history BEFORE INSERT ON user_occupancy_history FOR EACH ROW EXECUTE FUNCTION reject_confirmation_history();").execute(&fixture.state.pool).await?;
+    let response = reservations::confirm_occupancy(
+        State(fixture.state.clone()),
+        Path(id),
+        fixture.headers(fixture.owner, "user").await,
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(fixture.reservation_status(id).await?, "active");
+    assert_eq!(fixture.spot_status().await?, "occupied");
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn confirmation_and_cancellation_have_one_terminal_winner(
+    pool: PgPool,
+) -> Result<(), sqlx::Error> {
+    let fixture = Fixture::new(pool).await?;
+    let id = fixture.create_for_owner().await;
+    fixture.update_spot("occupied").await;
+    let (confirmation, cancellation) = tokio::join!(
+        crate::reservation_store::confirm(&fixture.state.pool, id, fixture.owner),
+        crate::reservation_store::finish(
+            &fixture.state.pool,
+            id,
+            crate::reservation_store::FinishReason::Cancel {
+                user_id: fixture.owner
+            }
+        )
+    );
+    let cancelled = cancellation?;
+    let terminal = fixture.reservation_status(id).await?;
+    let history: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM user_occupancy_history WHERE spot_id=$1")
+            .bind(&fixture.spot_id)
+            .fetch_one(&fixture.state.pool)
+            .await?;
+    if confirmation.is_ok() {
+        assert_eq!(terminal, "completed");
+        assert!(cancelled.is_none());
+        assert_eq!(history, 1);
+    } else {
+        assert!(cancelled.is_some());
+        assert_eq!(terminal, "cancelled");
+        assert_eq!(history, 0);
+    }
+    assert_eq!(fixture.spot_status().await?, "occupied");
+    Ok(())
+}

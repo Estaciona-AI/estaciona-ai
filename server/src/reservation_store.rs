@@ -176,3 +176,51 @@ pub async fn finish(
         spot_status: changed_status,
     }))
 }
+
+#[derive(Debug)]
+pub enum ConfirmError {
+    NotFound,
+    NotReady,
+    Database(sqlx::Error),
+}
+
+pub async fn confirm(
+    pool: &PgPool,
+    reservation_id: Uuid,
+    user_id: Uuid,
+) -> Result<(), ConfirmError> {
+    let mut tx = pool.begin().await.map_err(ConfirmError::Database)?;
+    let spot_id: Option<String> = sqlx::query_scalar(
+        "SELECT spot_id FROM reservations WHERE id=$1 AND user_id=$2 AND status='active'",
+    )
+    .bind(reservation_id)
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(ConfirmError::Database)?;
+    let spot_id = spot_id.ok_or(ConfirmError::NotFound)?;
+    // Match creation, observation and finish: acquire the spot lock first.
+    let spot: Option<(String, bool)> =
+        sqlx::query_as("SELECT status,is_active FROM spots WHERE id=$1 FOR NO KEY UPDATE")
+            .bind(&spot_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(ConfirmError::Database)?;
+    if !matches!(spot, Some((ref status, true)) if status == "occupied") {
+        return Err(ConfirmError::NotReady);
+    }
+    let updated = sqlx::query("UPDATE reservations SET status='completed',completed_at=NOW() WHERE id=$1 AND user_id=$2 AND status='active' AND expires_at>clock_timestamp()")
+        .bind(reservation_id).bind(user_id).execute(&mut *tx).await.map_err(ConfirmError::Database)?;
+    if updated.rows_affected() == 0 {
+        return Err(ConfirmError::NotReady);
+    }
+    sqlx::query("INSERT INTO user_occupancy_history (user_id,spot_id) VALUES ($1,$2)")
+        .bind(user_id)
+        .bind(&spot_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(ConfirmError::Database)?;
+    sqlx::query("DELETE FROM user_occupancy_history WHERE id IN (SELECT id FROM user_occupancy_history WHERE user_id=$1 ORDER BY occupied_at DESC OFFSET 30)")
+        .bind(user_id).execute(&mut *tx).await.map_err(ConfirmError::Database)?;
+    tx.commit().await.map_err(ConfirmError::Database)
+}
