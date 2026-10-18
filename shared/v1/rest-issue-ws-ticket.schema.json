@@ -1,0 +1,25 @@
+{
+  "$defs": {
+    "Destination": {
+      "enum": [
+        "app",
+        "dashboard"
+      ],
+      "type": "string"
+    }
+  },
+  "$id": "urn:estaciona-ai:rest:issue-ws-ticket:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "destination": {
+      "$ref": "#/$defs/Destination"
+    }
+  },
+  "required": [
+    "destination"
+  ],
+  "title": "IssueRequest",
+  "type": "object",
+  "x-contract-version": "1.1.0"
+}

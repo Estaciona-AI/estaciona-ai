@@ -149,3 +149,27 @@ def test_actual_python_outbox_and_gateway_encoder_match_rust_contracts(tmp_path)
         protocol.encode_edge_event("invalid", fixture, "now")
     with pytest.raises(ValueError):
         protocol.encode_edge_event(event_id, {"confidence": float("nan")}, "now")
+
+
+def test_rest_reservation_accepts_server_expiry_and_legacy_input():
+    check = validator("rest-create-reservation")
+    check.validate({"spot_id": "A-01"})
+    check.validate({"spot_id": "A-01", "expires_at": "2100-01-01T00:00:00Z"})
+    assert not check.is_valid({})
+    assert not check.is_valid({"spot_id": "A-01", "expires_at": "tomorrow"})
+
+
+def test_rest_errors_and_tickets_have_strict_identity_types():
+    error = {
+        "code": "UNAUTHORIZED",
+        "message": "Unauthorized",
+        "request_id": "00000000-0000-4000-8000-000000000001",
+    }
+    validator("rest-api-error").validate(error)
+    assert not validator("rest-api-error").is_valid({**error, "code": "made_up"})
+    assert not validator("rest-api-error").is_valid({**error, "request_id": "invalid"})
+    validator("rest-issue-ws-ticket").validate({"destination": "app"})
+    assert not validator("rest-issue-ws-ticket").is_valid({"destination": "edge"})
+    assert not validator("rest-issue-ws-ticket").is_valid(
+        {"destination": "app", "user_id": "other"}
+    )

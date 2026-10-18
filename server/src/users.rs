@@ -29,7 +29,7 @@ use crate::auth::AuthError;
 use crate::security::{hash_password_async, hash_plate};
 use crate::state::SharedState;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 pub struct CreateUser {
     pub name: String,
     pub email: String,
@@ -39,7 +39,7 @@ pub struct CreateUser {
     pub plate: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct UserResponse {
     pub id: Uuid,
     pub name: String,

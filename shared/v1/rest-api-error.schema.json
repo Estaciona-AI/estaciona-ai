@@ -1,0 +1,43 @@
+{
+  "$defs": {
+    "ErrorCode": {
+      "enum": [
+        "BAD_REQUEST",
+        "UNAUTHORIZED",
+        "FORBIDDEN",
+        "NOT_FOUND",
+        "METHOD_NOT_ALLOWED",
+        "CONFLICT",
+        "PAYLOAD_TOO_LARGE",
+        "UNPROCESSABLE_ENTITY",
+        "TOO_MANY_REQUESTS",
+        "SERVICE_UNAVAILABLE",
+        "INTERNAL_ERROR",
+        "HTTP_ERROR"
+      ],
+      "type": "string"
+    }
+  },
+  "$id": "urn:estaciona-ai:rest:api-error:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "code": {
+      "$ref": "#/$defs/ErrorCode"
+    },
+    "message": {
+      "type": "string"
+    },
+    "request_id": {
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "required": [
+    "code",
+    "message",
+    "request_id"
+  ],
+  "title": "ErrorEnvelope",
+  "type": "object",
+  "x-contract-version": "1.1.0"
+}

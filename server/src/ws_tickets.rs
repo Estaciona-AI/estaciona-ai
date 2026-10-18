@@ -54,13 +54,13 @@ pub fn routes() -> Router<SharedState> {
         .layer(RequestBodyLimitLayer::new(1024))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct IssueRequest {
+pub(crate) struct IssueRequest {
     destination: Destination,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum Destination {
     App,
@@ -76,8 +76,8 @@ impl Destination {
     }
 }
 
-#[derive(Serialize)]
-struct IssuedTicket {
+#[derive(Serialize, schemars::JsonSchema)]
+pub(crate) struct IssuedTicket {
     ticket: String,
     expires_at: DateTime<Utc>,
 }

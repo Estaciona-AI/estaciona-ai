@@ -1,0 +1,58 @@
+{
+  "$id": "urn:estaciona-ai:rest:user-response:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "created_at": {
+      "format": "date-time",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "date_of_birth": {
+      "format": "date",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "email": {
+      "type": "string"
+    },
+    "id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "name": {
+      "type": "string"
+    },
+    "pcd_status": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "plate": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "role": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "id",
+    "name",
+    "email",
+    "date_of_birth",
+    "pcd_status",
+    "plate",
+    "role",
+    "created_at"
+  ],
+  "title": "UserResponse",
+  "type": "object",
+  "x-contract-version": "1.1.0"
+}

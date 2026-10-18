@@ -1,0 +1,24 @@
+{
+  "$id": "urn:estaciona-ai:rest:create-reservation:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "expires_at": {
+      "default": null,
+      "description": "Compatibility input only; the server determines the actual expiration.",
+      "format": "date-time",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "spot_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "spot_id"
+  ],
+  "title": "CreateReservation",
+  "type": "object",
+  "x-contract-version": "1.1.0"
+}

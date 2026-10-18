@@ -124,7 +124,7 @@ impl Fixture {
             self.headers(user_id, "user").await,
             Json(CreateReservation {
                 spot_id: self.spot_id.clone(),
-                expires_at: Utc::now() + Duration::minutes(15),
+                expires_at: Some(Utc::now() + Duration::minutes(15)),
             }),
         )
         .await
@@ -217,7 +217,7 @@ async fn r03_deleted_user_cannot_create_a_reservation(pool: PgPool) -> Result<()
         headers,
         Json(CreateReservation {
             spot_id: fixture.spot_id.clone(),
-            expires_at: Utc::now() + Duration::minutes(15),
+            expires_at: Some(Utc::now() + Duration::minutes(15)),
         }),
     )
     .await
@@ -742,9 +742,11 @@ async fn server_ignores_client_expiry_and_uses_its_hold_period(
         fixture.headers(fixture.owner, "user").await,
         Json(CreateReservation {
             spot_id: fixture.spot_id.clone(),
-            expires_at: chrono::DateTime::parse_from_rfc3339("2100-01-01T00:00:00Z")
-                .unwrap()
-                .with_timezone(&Utc),
+            expires_at: Some(
+                chrono::DateTime::parse_from_rfc3339("2100-01-01T00:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+            ),
         }),
     )
     .await
@@ -774,7 +776,7 @@ async fn concurrent_same_user_cannot_reserve_two_distinct_spots(
         fixture.headers(fixture.owner, "user").await,
         Json(CreateReservation {
             spot_id: fixture.spot_id.clone(),
-            expires_at: Utc::now() + Duration::minutes(15),
+            expires_at: Some(Utc::now() + Duration::minutes(15)),
         }),
     );
     let second = reservations::create_reservation(
@@ -782,7 +784,7 @@ async fn concurrent_same_user_cannot_reserve_two_distinct_spots(
         fixture.headers(fixture.owner, "user").await,
         Json(CreateReservation {
             spot_id: "policy-second".into(),
-            expires_at: Utc::now() + Duration::minutes(15),
+            expires_at: Some(Utc::now() + Duration::minutes(15)),
         }),
     );
     let (first, second) = tokio::join!(first, second);
@@ -1008,5 +1010,25 @@ async fn confirmation_and_cancellation_have_one_terminal_winner(
         assert_eq!(history, 0);
     }
     assert_eq!(fixture.spot_status().await?, "occupied");
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn admin_spot_status_rejects_values_outside_the_wire_contract(
+    pool: PgPool,
+) -> Result<(), sqlx::Error> {
+    let fixture = Fixture::new(pool).await?;
+    let response = reservations::update_spot_status(
+        State(fixture.state.clone()),
+        Path(fixture.spot_id.clone()),
+        fixture.headers(fixture.admin, "admin").await,
+        Json(UpdateSpotStatus {
+            status: "hovering".into(),
+        }),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(fixture.spot_status().await?, "free");
     Ok(())
 }

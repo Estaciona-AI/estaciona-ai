@@ -1,0 +1,53 @@
+{
+  "$id": "urn:estaciona-ai:rest:reservation-response:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "completed_at": {
+      "format": "date-time",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "created_at": {
+      "format": "date-time",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "expires_at": {
+      "format": "date-time",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "spot_id": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string"
+    },
+    "user_id": {
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "required": [
+    "id",
+    "user_id",
+    "spot_id",
+    "status",
+    "created_at",
+    "expires_at",
+    "completed_at"
+  ],
+  "title": "ReservationResponse",
+  "type": "object",
+  "x-contract-version": "1.1.0"
+}

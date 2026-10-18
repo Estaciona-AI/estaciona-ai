@@ -1,0 +1,20 @@
+{
+  "$id": "urn:estaciona-ai:rest:update-spot-status:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "status": {
+      "enum": [
+        "free",
+        "occupied",
+        "reserved"
+      ],
+      "type": "string"
+    }
+  },
+  "required": [
+    "status"
+  ],
+  "title": "UpdateSpotStatus",
+  "type": "object",
+  "x-contract-version": "1.1.0"
+}

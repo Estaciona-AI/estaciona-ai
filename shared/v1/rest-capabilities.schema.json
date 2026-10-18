@@ -1,0 +1,63 @@
+{
+  "$defs": {
+    "AuthenticationCapabilities": {
+      "properties": {
+        "browser_websocket": {
+          "type": "string"
+        },
+        "edge_authentication": {
+          "type": "string"
+        },
+        "human_sessions": {
+          "type": "string"
+        },
+        "logout_scope": {
+          "type": "string"
+        },
+        "sso": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "human_sessions",
+        "browser_websocket",
+        "edge_authentication",
+        "logout_scope",
+        "sso"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "urn:estaciona-ai:rest:capabilities:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "api_version": {
+      "type": "string"
+    },
+    "authentication": {
+      "$ref": "#/$defs/AuthenticationCapabilities"
+    },
+    "contract_version": {
+      "type": "string"
+    },
+    "paths": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "type": "object"
+    },
+    "tenancy_mode": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "api_version",
+    "contract_version",
+    "tenancy_mode",
+    "authentication",
+    "paths"
+  ],
+  "title": "Capabilities",
+  "type": "object",
+  "x-contract-version": "1.1.0"
+}
