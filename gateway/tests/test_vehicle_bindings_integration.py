@@ -50,7 +50,7 @@ def request(server, path, signed=None, *, method="GET", payload=None):
 
 def signed(server, role="admin"):
     identity = insert_user(server, role=role)
-    return identity, token(identity, role, int(time.time()) + 120)
+    return identity, token(server, identity, role, int(time.time()) + 120)
 
 
 def declaration(server, signed_token, user):

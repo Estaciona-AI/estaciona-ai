@@ -34,8 +34,8 @@ def test_restart_retires_spot_without_deleting_history_or_exposing_it_in_snapsho
         json.dumps([{"id": "R07-B", "center3D": {"x": 2, "y": 0, "z": 1}}])
     )
     server.start()
-    signed = token(owner, "user", int(time.time()) + 60)
-    admin_token = token(admin, "admin", int(time.time()) + 60)
+    signed = token(server, owner, "user", int(time.time()) + 60)
+    admin_token = token(server, admin, "admin", int(time.time()) + 60)
 
     async def run():
         async with (

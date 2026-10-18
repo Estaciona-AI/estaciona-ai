@@ -67,7 +67,7 @@ def test_denied_origin_preserves_ticket_for_allowed_browser(
     server, endpoint, role, origin
 ):
     user_id = insert_user(server, role=role)
-    jwt = token(user_id, role, int(time.time()) + 120)
+    jwt = token(server, user_id, role, int(time.time()) + 120)
     status, result, _ = issue(server, jwt, endpoint)
     assert status == 201, result
     ticket = result["ticket"]
@@ -91,7 +91,7 @@ def test_denied_origin_preserves_ticket_for_allowed_browser(
 
 def test_ticket_is_bearer_only_scoped_to_app_and_single_use(server):
     user_id = insert_user(server)
-    jwt = token(user_id, "user", int(time.time()) + 120)
+    jwt = token(server, user_id, "user", int(time.time()) + 120)
     status, _, _ = http(
         server,
         "/auth/ws-ticket",
@@ -128,11 +128,11 @@ def test_ticket_is_bearer_only_scoped_to_app_and_single_use(server):
 
 def test_wrong_destination_burns_ticket_and_dashboard_needs_admin(server):
     user_id = insert_user(server)
-    jwt = token(user_id, "user", int(time.time()) + 120)
+    jwt = token(server, user_id, "user", int(time.time()) + 120)
     assert issue(server, jwt, "dashboard")[0] == 403
 
     admin_id = insert_user(server, role="admin")
-    admin = token(admin_id, "admin", int(time.time()) + 120)
+    admin = token(server, admin_id, "admin", int(time.time()) + 120)
     status, result, _ = issue(server, admin, "app")
     assert status == 201, result
     ticket = result["ticket"]
@@ -154,7 +154,7 @@ def test_wrong_destination_burns_ticket_and_dashboard_needs_admin(server):
 
 def test_ticket_issue_rejects_unknown_fields_and_oversized_json(server):
     user_id = insert_user(server)
-    jwt = token(user_id, "user", int(time.time()) + 120)
+    jwt = token(server, user_id, "user", int(time.time()) + 120)
     status, _, _ = http(
         server,
         "/auth/ws-ticket",
@@ -174,7 +174,7 @@ def test_ticket_issue_rejects_unknown_fields_and_oversized_json(server):
 
 def test_legacy_jwt_query_parameter_is_not_accepted(server):
     user_id = insert_user(server)
-    jwt = token(user_id, "user", int(time.time()) + 120)
+    jwt = token(server, user_id, "user", int(time.time()) + 120)
 
     async def run():
         with pytest.raises(InvalidStatus) as error:
@@ -188,7 +188,7 @@ def test_legacy_jwt_query_parameter_is_not_accepted(server):
 
 def test_role_change_invalidates_an_issued_dashboard_ticket(server):
     admin_id = insert_user(server, role="admin")
-    admin = token(admin_id, "admin", int(time.time()) + 120)
+    admin = token(server, admin_id, "admin", int(time.time()) + 120)
     status, result, _ = issue(server, admin, "dashboard")
     assert status == 201, result
     server.query("UPDATE users SET role='user' WHERE id=%s", (str(admin_id),))
@@ -205,7 +205,7 @@ def test_role_change_invalidates_an_issued_dashboard_ticket(server):
 
 def test_ticket_operations_fail_closed_when_ticket_store_is_unavailable(server):
     user_id = insert_user(server)
-    jwt = token(user_id, "user", int(time.time()) + 120)
+    jwt = token(server, user_id, "user", int(time.time()) + 120)
     status, result, _ = issue(server, jwt)
     assert status == 201, result
     server.query("DROP TABLE ws_tickets")
@@ -223,7 +223,7 @@ def test_ticket_operations_fail_closed_when_ticket_store_is_unavailable(server):
 
 def test_revoked_or_expired_sessions_cannot_use_issued_ticket(server):
     user_id = insert_user(server)
-    jwt = token(user_id, "user", int(time.time()) + 120)
+    jwt = token(server, user_id, "user", int(time.time()) + 120)
     status, result, _ = issue(server, jwt)
     assert status == 201, result
     digest = hashlib.sha256(result["ticket"].encode()).digest()
@@ -231,7 +231,7 @@ def test_revoked_or_expired_sessions_cannot_use_issued_ticket(server):
     assert server.query("SELECT 1 FROM ws_tickets WHERE digest=%s", (digest,)) == []
 
     admin_id = insert_user(server, role="admin")
-    admin = token(admin_id, "admin", int(time.time()) + 120)
+    admin = token(server, admin_id, "admin", int(time.time()) + 120)
     status, expired, _ = issue(server, admin, "dashboard")
     assert status == 201, expired
     expired_digest = hashlib.sha256(expired["ticket"].encode()).digest()
@@ -253,7 +253,7 @@ def test_revoked_or_expired_sessions_cannot_use_issued_ticket(server):
 
 def test_at_most_five_unconsumed_tickets_per_user(server):
     user_id = insert_user(server)
-    jwt = token(user_id, "user", int(time.time()) + 120)
+    jwt = token(server, user_id, "user", int(time.time()) + 120)
     for _ in range(5):
         status, result, _ = issue(server, jwt)
         assert status == 201, result
@@ -263,7 +263,7 @@ def test_at_most_five_unconsumed_tickets_per_user(server):
 
 def test_concurrent_ticket_issuance_respects_per_user_limit(server):
     user_id = insert_user(server)
-    jwt = token(user_id, "user", int(time.time()) + 120)
+    jwt = token(server, user_id, "user", int(time.time()) + 120)
     with ThreadPoolExecutor(max_workers=8) as pool:
         statuses = list(pool.map(lambda _: issue(server, jwt)[0], range(8)))
     assert statuses.count(201) == 5
@@ -272,7 +272,7 @@ def test_concurrent_ticket_issuance_respects_per_user_limit(server):
 
 def test_ticket_remains_single_use_after_server_restart(server):
     user_id = insert_user(server)
-    jwt = token(user_id, "user", int(time.time()) + 120)
+    jwt = token(server, user_id, "user", int(time.time()) + 120)
     status, result, _ = issue(server, jwt)
     assert status == 201, result
     url = ws_url(server, "app", result["ticket"])
@@ -291,7 +291,7 @@ def test_ticket_remains_single_use_after_server_restart(server):
 
 def test_concurrent_handshakes_allow_exactly_one_use(server):
     user_id = insert_user(server)
-    jwt = token(user_id, "user", int(time.time()) + 120)
+    jwt = token(server, user_id, "user", int(time.time()) + 120)
     status, result, _ = issue(server, jwt)
     assert status == 201, result
     url = ws_url(server, "app", result["ticket"])
@@ -312,7 +312,7 @@ def test_concurrent_handshakes_allow_exactly_one_use(server):
 def test_ticket_expiry_never_exceeds_the_original_jwt(server):
     user_id = insert_user(server)
     session_expiry = int(time.time()) + 3
-    jwt = token(user_id, "user", session_expiry)
+    jwt = token(server, user_id, "user", session_expiry)
     status, result, _ = issue(server, jwt)
     assert status == 201, result
     digest = hashlib.sha256(result["ticket"].encode()).digest()
