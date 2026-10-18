@@ -35,6 +35,7 @@ mod reservation_store;
 mod reservation_tests;
 mod reservations;
 mod security;
+mod sessions;
 mod site_config;
 mod site_graph;
 mod site_reconciliation;
@@ -253,6 +254,7 @@ fn request_path_for_trace(uri: &axum::http::Uri) -> &str {
 
 fn auth_routes(state: SharedState) -> Router<SharedState> {
     Router::new()
+        .route("/auth/logout", post(sessions::logout))
         .route(
             "/login",
             post(auth::login_dashboard)

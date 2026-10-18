@@ -23,7 +23,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::security::{PasswordWorkError, create_jwt, verify_password_async};
+use crate::security::{PasswordWorkError, verify_password_async};
 use crate::state::SharedState;
 
 pub enum AuthError {
@@ -108,15 +108,18 @@ pub async fn login_dashboard(
         ));
     }
 
-    let token = create_jwt(
-        &user_record.id.to_string(),
+    let token = crate::sessions::issue(
+        &state.pool,
+        user_record.id,
         &user_record.role,
         &state.jwt_secret,
     )
-    .map_err(|_| {
+    .await
+    .map_err(|error| {
+        tracing::error!(%error, "Session creation failed");
         AuthError::Status(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed while generating access token",
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Session creation unavailable",
         )
     })?;
 
