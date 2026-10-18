@@ -796,6 +796,24 @@ async fn concurrent_same_user_cannot_reserve_two_distinct_spots(
     Ok(())
 }
 
+#[sqlx::test(migrations = "./migrations")]
+async fn extension_cannot_revive_expired_reservation(pool: PgPool) -> Result<(), sqlx::Error> {
+    let fixture = Fixture::new(pool).await?;
+    let id = fixture.create_for_owner().await;
+    sqlx::query("UPDATE reservations SET expires_at=NOW()-INTERVAL '1 second' WHERE id=$1")
+        .bind(id)
+        .execute(&fixture.state.pool)
+        .await?;
+    let response = reservations::extend_reservation(
+        State(fixture.state.clone()),
+        Path(id),
+        fixture.headers(fixture.owner, "user").await,
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    Ok(())
+}
 
 #[sqlx::test(migrations = "./migrations")]
 async fn policy_can_allow_two_reservations_without_a_global_user_constraint(
@@ -825,3 +843,35 @@ async fn policy_can_allow_two_reservations_without_a_global_user_constraint(
     Ok(())
 }
 
+#[sqlx::test(migrations = "./migrations")]
+async fn renewal_preserves_occupied_status_and_caps_total_lifetime(
+    pool: PgPool,
+) -> Result<(), sqlx::Error> {
+    let fixture = Fixture::new(pool).await?;
+    let id = fixture.create_for_owner().await;
+    fixture.update_spot("occupied").await;
+    sqlx::query("UPDATE reservations SET created_at=NOW()-INTERVAL '29 minutes 50 seconds',expires_at=NOW()+INTERVAL '5 seconds' WHERE id=$1").bind(id).execute(&fixture.state.pool).await?;
+    let headers = fixture.headers(fixture.owner, "user").await;
+    let response =
+        reservations::extend_reservation(State(fixture.state.clone()), Path(id), headers)
+            .await
+            .into_response();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(fixture.spot_status().await?, "occupied");
+    let lifetime: f64 = sqlx::query_scalar(
+        "SELECT EXTRACT(EPOCH FROM expires_at-created_at)::float8 FROM reservations WHERE id=$1",
+    )
+    .bind(id)
+    .fetch_one(&fixture.state.pool)
+    .await?;
+    assert_eq!(lifetime, 1800.0);
+    let response = reservations::extend_reservation(
+        State(fixture.state.clone()),
+        Path(id),
+        fixture.headers(fixture.owner, "user").await,
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    Ok(())
+}

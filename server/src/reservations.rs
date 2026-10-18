@@ -17,7 +17,7 @@
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
@@ -347,33 +347,31 @@ pub async fn extend_reservation(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     require_reservation_owner(&state, &headers, id).await?;
-    let result = sqlx::query!(
-        "UPDATE reservations SET expires_at = NOW() + INTERVAL '45 seconds' WHERE id = $1 AND status = 'active' RETURNING spot_id",
-        id
-    )
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
+    let user_id =
+        crate::security::authenticated_user(&headers, &state.jwt_secret, &state.pool).await?;
+    let result = reservation_store::extend(&state.pool, id, user_id, &state.reservation_policy)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error,"Failed to extend reservation");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Database error".to_owned(),
+            )
+        })?;
     match result {
-        Some(record) => {
-            let update_msg = ServerToAppMsg::SpotUpdate {
-                spot_id: record.spot_id,
-                status: "reserved".to_string(),
-            };
-            if let Ok(json_str) = serde_json::to_string(&update_msg) {
-                let _ = state.tx.send(json_str);
+        Some((spot_id, status)) => {
+            let update_msg = ServerToAppMsg::SpotUpdate { spot_id, status };
+            if let Ok(json) = serde_json::to_string(&update_msg) {
+                let _ = state.tx.send(json);
             }
-            Ok((StatusCode::OK, "Reservation extended.".to_string()))
+            Ok((StatusCode::OK, "Reservation extended.".to_owned()))
         }
         None => Err((
-            StatusCode::NOT_FOUND,
-            "Active reservation not found".to_string(),
+            StatusCode::CONFLICT,
+            "Reservation is expired, inactive or at its lifetime limit".to_owned(),
         )),
     }
 }
-
-use axum::extract::Query;
 
 #[derive(Deserialize)]
 pub struct RecommendQuery {

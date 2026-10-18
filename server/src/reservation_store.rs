@@ -200,3 +200,42 @@ pub async fn finish(
     }))
 }
 
+pub async fn extend(
+    pool: &PgPool,
+    reservation_id: Uuid,
+    user_id: Uuid,
+    policy: &ReservationPolicy,
+) -> Result<Option<(String, String)>, sqlx::Error> {
+    policy
+        .validate()
+        .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
+    let mut tx = pool.begin().await?;
+    let spot_id: Option<String> = sqlx::query_scalar(
+        "SELECT spot_id FROM reservations WHERE id=$1 AND user_id=$2 AND status='active'",
+    )
+    .bind(reservation_id)
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(spot_id) = spot_id else {
+        return Ok(None);
+    };
+    let spot: Option<(String, bool)> =
+        sqlx::query_as("SELECT status,is_active FROM spots WHERE id=$1 FOR NO KEY UPDATE")
+            .bind(&spot_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let Some((status, true)) = spot else {
+        return Ok(None);
+    };
+    if status != "reserved" && status != "occupied" {
+        return Ok(None);
+    }
+    let updated = sqlx::query("UPDATE reservations SET expires_at=LEAST(GREATEST(expires_at,clock_timestamp()+make_interval(secs => $3)),created_at+make_interval(secs => $4)) WHERE id=$1 AND user_id=$2 AND status='active' AND expires_at>clock_timestamp() AND expires_at<created_at+make_interval(secs => $4)")
+        .bind(reservation_id).bind(user_id).bind(policy.extension_seconds as f64).bind(policy.max_lifetime_seconds as f64).execute(&mut *tx).await?;
+    if updated.rows_affected() == 0 {
+        return Ok(None);
+    }
+    tx.commit().await?;
+    Ok(Some((spot_id, status)))
+}
