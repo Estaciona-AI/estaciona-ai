@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, Transaction};
@@ -65,6 +66,7 @@ async fn observe(
     spot_id: &str,
     status: &str,
     confidence: f64,
+    timestamp: DateTime<Utc>,
 ) -> Result<Observation, sqlx::Error> {
     let mut observation = Observation {
         outcome: Outcome::Rejected,
@@ -84,6 +86,10 @@ async fn observe(
         observation.reason = Some("low_confidence".to_owned());
         return Ok(observation);
     }
+    if timestamp > Utc::now() + chrono::Duration::seconds(30) {
+        observation.reason = Some("future_timestamp".to_owned());
+        return Ok(observation);
+    }
     let current = sqlx::query_as::<_, (String, bool)>(
         "SELECT status, is_active FROM spots WHERE id = $1 FOR NO KEY UPDATE",
     )
@@ -94,20 +100,24 @@ async fn observe(
         None => observation.reason = Some("unknown_spot".to_owned()),
         Some((_, false)) => observation.reason = Some("inactive_spot".to_owned()),
         Some((current, true)) => {
-            if current == "reserved" && status == "free" {
-                let active: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM reservations WHERE spot_id=$1 AND status='active')")
+            let protected = current == "reserved" && status == "free"
+                && sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM reservations WHERE spot_id=$1 AND status='active')")
                     .bind(spot_id).fetch_one(&mut **tx).await?;
-                if active {
-                    observation.outcome = Outcome::Ignored;
-                    observation.reason = Some("reservation_protected".to_owned());
-                    return Ok(observation);
-                }
+            // Compare in PostgreSQL, which normalizes to microsecond precision.
+            // Effect and watermark share the same UPDATE, transaction and lock.
+            let updated = sqlx::query("UPDATE spots SET observation_timestamp=$3,status=CASE WHEN $4 THEN status ELSE $2 END,last_updated=CASE WHEN $4 THEN last_updated ELSE NOW() END WHERE id=$1 AND (observation_timestamp IS NULL OR observation_timestamp<$3)")
+                .bind(spot_id).bind(status).bind(timestamp).bind(protected)
+                .execute(&mut **tx).await?;
+            if updated.rows_affected() == 0 {
+                observation.outcome = Outcome::Ignored;
+                observation.reason = Some("stale_observation".to_owned());
+                return Ok(observation);
             }
-            sqlx::query("UPDATE spots SET status = $2, last_updated = NOW() WHERE id = $1")
-                .bind(spot_id)
-                .bind(status)
-                .execute(&mut **tx)
-                .await?;
+            if protected {
+                observation.outcome = Outcome::Ignored;
+                observation.reason = Some("reservation_protected".to_owned());
+                return Ok(observation);
+            }
             if status == "free" {
                 sqlx::query(
                     "UPDATE user_occupancy_history SET released_at = NOW() \
@@ -139,9 +149,13 @@ pub async fn apply_legacy(
     spot_id: &str,
     status: &str,
     confidence: f64,
+    timestamp: DateTime<Utc>,
 ) -> Result<Observation, AuthError> {
     let mut tx = crate::edge_auth::begin_authorized(pool, principal).await?;
-    let observation = observe(&mut tx, principal, camera_id, spot_id, status, confidence).await?;
+    let observation = observe(
+        &mut tx, principal, camera_id, spot_id, status, confidence, timestamp,
+    )
+    .await?;
     // Raw observations have no synthetic event UUID, ledger entry or ACK.
     tx.commit().await?;
     Ok(observation)
@@ -280,10 +294,10 @@ async fn apply_inner(
             spot_id,
             status,
             confidence,
-            ..
+            timestamp,
         }) => {
             let observation = observe(
-                &mut tx, principal, &camera_id, &spot_id, &status, confidence,
+                &mut tx, principal, &camera_id, &spot_id, &status, confidence, timestamp,
             )
             .await?;
             delivery.ack.outcome = observation.outcome;
@@ -368,7 +382,7 @@ mod tests {
             "status": status,
             "camera_id": "test-camera",
             "confidence": 1.0,
-            "timestamp": "2026-10-11T12:00:00Z"
+            "timestamp": Utc::now()
         })
     }
 
@@ -1113,7 +1127,16 @@ mod tests {
             assert_eq!(delivery.ack.outcome, Outcome::Rejected);
             assert_eq!(delivery.ack.reason.as_deref(), Some("scope_forbidden"));
             assert_no_effects(&delivery);
-            let legacy = apply_legacy(&pool, &principal, camera_id, spot_id, "free", 1.0).await?;
+            let legacy = apply_legacy(
+                &pool,
+                &principal,
+                camera_id,
+                spot_id,
+                "free",
+                1.0,
+                Utc::now(),
+            )
+            .await?;
             assert_eq!(legacy.outcome, Outcome::Rejected);
             assert_eq!(legacy.reason.as_deref(), Some("scope_forbidden"));
             assert_eq!(legacy.spot_update, None);
@@ -1173,8 +1196,16 @@ mod tests {
         authorized_spot(&pool, &principal, "free").await?;
         let foreign_spot = spot(&pool, "occupied").await?;
         let history_id = history(&pool, &foreign_spot).await?;
-        let legacy =
-            apply_legacy(&pool, &principal, "test-camera", &foreign_spot, "free", 1.0).await?;
+        let legacy = apply_legacy(
+            &pool,
+            &principal,
+            "test-camera",
+            &foreign_spot,
+            "free",
+            1.0,
+            Utc::now(),
+        )
+        .await?;
         assert_eq!(legacy.outcome, Outcome::Rejected);
         assert_eq!(legacy.reason.as_deref(), Some("scope_forbidden"));
         assert_eq!(legacy.spot_update, None);
@@ -1212,8 +1243,16 @@ mod tests {
         assert_eq!(delivery.ack.outcome, Outcome::Rejected);
         assert_eq!(delivery.ack.reason.as_deref(), Some("scope_forbidden"));
         assert_no_effects(&delivery);
-        let legacy =
-            apply_legacy(&pool, &principal, "test-camera", &spot_id, "occupied", 1.0).await?;
+        let legacy = apply_legacy(
+            &pool,
+            &principal,
+            "test-camera",
+            &spot_id,
+            "occupied",
+            1.0,
+            Utc::now(),
+        )
+        .await?;
         assert_eq!(legacy.outcome, Outcome::Rejected);
         assert_eq!(legacy.reason.as_deref(), Some("scope_forbidden"));
         assert_eq!(legacy.spot_update, None);
@@ -1245,8 +1284,16 @@ mod tests {
         let new_event = apply(&pool, &principal, Uuid::new_v4(), event_payload).await?;
         assert_eq!(new_event.ack.outcome, Outcome::Rejected);
         assert_eq!(new_event.ack.reason.as_deref(), Some("scope_forbidden"));
-        let legacy =
-            apply_legacy(&pool, &principal, "test-camera", &spot_id, "occupied", 1.0).await?;
+        let legacy = apply_legacy(
+            &pool,
+            &principal,
+            "test-camera",
+            &spot_id,
+            "occupied",
+            1.0,
+            Utc::now(),
+        )
+        .await?;
         assert_eq!(legacy.outcome, Outcome::Rejected);
         assert_eq!(legacy.reason.as_deref(), Some("scope_forbidden"));
         assert_eq!(status(&pool, &spot_id).await?, "free");
@@ -1262,8 +1309,16 @@ mod tests {
             reservation_store::create(&pool, &spot_id, owner, Utc::now() + Duration::minutes(15))
                 .await
                 .expect("fixture reservation must be created");
-        let occupied =
-            apply_legacy(&pool, &principal, "test-camera", &spot_id, "occupied", 1.0).await?;
+        let occupied = apply_legacy(
+            &pool,
+            &principal,
+            "test-camera",
+            &spot_id,
+            "occupied",
+            1.0,
+            Utc::now(),
+        )
+        .await?;
         assert_eq!(occupied.outcome, Outcome::Applied);
         assert_eq!(occupied.unconfirmed_reservation, Some(reservation.id));
         assert_eq!(
@@ -1271,7 +1326,16 @@ mod tests {
             Some((spot_id.clone(), "occupied".to_owned()))
         );
         let history_id = history(&pool, &spot_id).await?;
-        let free = apply_legacy(&pool, &principal, "test-camera", &spot_id, "free", 1.0).await?;
+        let free = apply_legacy(
+            &pool,
+            &principal,
+            "test-camera",
+            &spot_id,
+            "free",
+            1.0,
+            Utc::now(),
+        )
+        .await?;
         assert_eq!(free.outcome, Outcome::Applied);
         assert_eq!(status(&pool, &spot_id).await?, "free");
         let released: bool = sqlx::query_scalar(
@@ -1290,7 +1354,16 @@ mod tests {
             .execute(&pool)
             .await?;
         assert!(matches!(
-            apply_legacy(&pool, &principal, "test-camera", &spot_id, "occupied", 1.0).await,
+            apply_legacy(
+                &pool,
+                &principal,
+                "test-camera",
+                &spot_id,
+                "occupied",
+                1.0,
+                Utc::now()
+            )
+            .await,
             Err(AuthError::Unauthenticated)
         ));
         Ok(())
@@ -1312,7 +1385,16 @@ mod tests {
         .execute(&pool)
         .await?;
         assert!(matches!(
-            apply_legacy(&pool, &principal, "test-camera", &spot_id, "free", 1.0).await,
+            apply_legacy(
+                &pool,
+                &principal,
+                "test-camera",
+                &spot_id,
+                "free",
+                1.0,
+                Utc::now()
+            )
+            .await,
             Err(AuthError::Database(_))
         ));
         assert_eq!(status(&pool, &spot_id).await?, "occupied");
@@ -1490,7 +1572,16 @@ mod tests {
         let fresh = apply(&pool, &principal, Uuid::new_v4(), payload(&spot_id, "free")).await?;
         assert_eq!(fresh.ack.outcome, Outcome::Rejected);
         assert_eq!(fresh.ack.reason.as_deref(), Some("inactive_spot"));
-        let legacy = apply_legacy(&pool, &principal, "test-camera", &spot_id, "free", 1.0).await?;
+        let legacy = apply_legacy(
+            &pool,
+            &principal,
+            "test-camera",
+            &spot_id,
+            "free",
+            1.0,
+            Utc::now(),
+        )
+        .await?;
         assert_eq!(legacy.reason.as_deref(), Some("inactive_spot"));
         assert!(legacy.spot_update.is_none());
         assert_eq!(status(&pool, &spot_id).await?, "occupied");
@@ -1503,6 +1594,102 @@ mod tests {
         let delivery = apply(&pool, &principal, Uuid::new_v4(), payload(&spot_id, "free")).await?;
         assert_eq!(delivery.ack.outcome, Outcome::Applied);
         assert_eq!(status(&pool, &spot_id).await?, "free");
+        Ok(())
+    }
+    #[sqlx::test(migrations = "./migrations")]
+    async fn older_observation_with_new_uuid_cannot_undo_newer_state(pool: PgPool) -> TestResult {
+        let principal = principal(&pool).await?;
+        let spot_id = authorized_spot(&pool, &principal, "free").await?;
+        let mut latest = payload(&spot_id, "occupied");
+        latest["timestamp"] = json!("2026-10-11T12:00:02Z");
+        assert_eq!(
+            apply(&pool, &principal, Uuid::new_v4(), latest)
+                .await?
+                .ack
+                .outcome,
+            Outcome::Applied
+        );
+        let mut old = payload(&spot_id, "free");
+        old["timestamp"] = json!("2026-10-11T12:00:01Z");
+        let event_id = Uuid::new_v4();
+        let stale = apply(&pool, &principal, event_id, old.clone()).await?;
+        assert_eq!(stale.ack.outcome, Outcome::Ignored);
+        assert_eq!(stale.ack.reason.as_deref(), Some("stale_observation"));
+        assert_eq!(status(&pool, &spot_id).await?, "occupied");
+        assert!(apply(&pool, &principal, event_id, old).await?.ack.duplicate);
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn future_timestamp_does_not_poison_observation_order(pool: PgPool) -> TestResult {
+        let principal = principal(&pool).await?;
+        let spot_id = authorized_spot(&pool, &principal, "free").await?;
+        let mut future = payload(&spot_id, "occupied");
+        future["timestamp"] = json!("2100-01-01T00:00:00Z");
+        let result = apply(&pool, &principal, Uuid::new_v4(), future).await?;
+        assert_eq!(result.ack.outcome, Outcome::Rejected);
+        assert_eq!(result.ack.reason.as_deref(), Some("future_timestamp"));
+        assert_eq!(status(&pool, &spot_id).await?, "free");
+        Ok(())
+    }
+    #[sqlx::test(migrations = "./migrations")]
+    async fn equal_timestamp_conflict_is_ignored_at_postgres_precision(pool: PgPool) -> TestResult {
+        let principal = principal(&pool).await?;
+        let spot_id = authorized_spot(&pool, &principal, "free").await?;
+        let mut first = payload(&spot_id, "occupied");
+        first["timestamp"] = json!("2026-10-11T12:00:02.123456789Z");
+        assert_eq!(
+            apply(&pool, &principal, Uuid::new_v4(), first.clone())
+                .await?
+                .ack
+                .outcome,
+            Outcome::Applied
+        );
+        first["status"] = json!("free");
+        let equal = apply(&pool, &principal, Uuid::new_v4(), first).await?;
+        assert_eq!(equal.ack.reason.as_deref(), Some("stale_observation"));
+        assert_eq!(status(&pool, &spot_id).await?, "occupied");
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn concurrent_new_and_old_observations_end_in_the_newer_state(
+        pool: PgPool,
+    ) -> TestResult {
+        let principal = principal(&pool).await?;
+        let spot_id = authorized_spot(&pool, &principal, "free").await?;
+        let mut old = payload(&spot_id, "free");
+        old["timestamp"] = json!("2026-10-11T12:00:01Z");
+        let mut new = payload(&spot_id, "occupied");
+        new["timestamp"] = json!("2026-10-11T12:00:02Z");
+        let (old, new) = tokio::join!(
+            apply(&pool, &principal, Uuid::new_v4(), old),
+            apply(&pool, &principal, Uuid::new_v4(), new)
+        );
+        let old = old?;
+        assert!(matches!(
+            old.ack.outcome,
+            Outcome::Applied | Outcome::Ignored
+        ));
+        assert_eq!(new?.ack.outcome, Outcome::Applied);
+        assert_eq!(status(&pool, &spot_id).await?, "occupied");
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn legacy_observation_cannot_bypass_the_durable_watermark(pool: PgPool) -> TestResult {
+        let principal = principal(&pool).await?;
+        let spot_id = authorized_spot(&pool, &principal, "free").await?;
+        let mut new = payload(&spot_id, "occupied");
+        new["timestamp"] = json!("2026-10-11T12:00:02Z");
+        apply(&pool, &principal, Uuid::new_v4(), new).await?;
+        let old = DateTime::parse_from_rfc3339("2026-10-11T12:00:01Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let result =
+            apply_legacy(&pool, &principal, "test-camera", &spot_id, "free", 1.0, old).await?;
+        assert_eq!(result.reason.as_deref(), Some("stale_observation"));
+        assert_eq!(status(&pool, &spot_id).await?, "occupied");
         Ok(())
     }
 }

@@ -1,3 +1,5 @@
+import datetime
+
 """Opt-in integration against the built Rust server and a disposable PostgreSQL DB."""
 
 import asyncio
@@ -244,7 +246,7 @@ def message(event_id):
             "status": "occupied",
             "camera_id": "test-camera",
             "confidence": 0.9,
-            "timestamp": "2026-10-11T12:00:00Z",
+            "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
         },
     }
 
@@ -496,3 +498,36 @@ def test_durable_projection_ack_survives_real_server_restart(server, kind):
                 pytest.fail("restored forecast was not delivered to the dashboard")
 
         asyncio.run(read_restored_forecast())
+
+
+def test_freshness_survives_restart_and_rejects_future_poisoning(server):
+    now = datetime.datetime.now(datetime.UTC)
+    latest = message(str(uuid4()))
+    latest["payload"]["timestamp"] = (now - datetime.timedelta(seconds=2)).isoformat()
+
+    async def deliver(event):
+        async with websockets.connect(
+            server.url, additional_headers={"Authorization": f"Bearer {KEY}"}
+        ) as conn:
+            await receive_ready(conn)
+            await conn.send(json.dumps(event))
+            return json.loads(await asyncio.wait_for(conn.recv(), 3))
+
+    assert asyncio.run(deliver(latest))["outcome"] == "applied"
+    server.stop()
+    server.start()
+    older = message(str(uuid4()))
+    older["payload"].update(
+        status="free", timestamp=(now - datetime.timedelta(seconds=3)).isoformat()
+    )
+    ack = asyncio.run(deliver(older))
+    assert (ack["outcome"], ack["reason"]) == ("ignored", "stale_observation")
+    assert asyncio.run(deliver(older))["duplicate"] is True
+    assert server.query("SELECT status FROM spots WHERE id='R02-A'") == [("occupied",)]
+    future = message(str(uuid4()))
+    future["payload"]["timestamp"] = (now + datetime.timedelta(days=1)).isoformat()
+    assert asyncio.run(deliver(future))["reason"] == "future_timestamp"
+    newer = message(str(uuid4()))
+    newer["payload"]["status"] = "free"
+    assert asyncio.run(deliver(newer))["outcome"] == "applied"
+    assert server.query("SELECT status FROM spots WHERE id='R02-A'") == [("free",)]
