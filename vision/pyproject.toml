@@ -1,14 +1,19 @@
 [project]
 name = "estaciona-ai-vision"
 version = "0.1.0"
+license = "Apache-2.0"
 description = "Computer vision module for Estaciona AI"
 requires-python = ">=3.14"
 dependencies = [
     "opencv-python>=4.13.0.92",
-    "ultralytics>=8.4.53",
+    "numpy>=2.4.6",
+    "onnxruntime-gpu==1.31.0",
     "websockets>=16.0",
     "python-dotenv>=1.0.1",
 ]
+
+[project.optional-dependencies]
+cuda = ["onnxruntime-gpu[cuda,cudnn]==1.31.0"]
 
 [dependency-groups]
 dev = [

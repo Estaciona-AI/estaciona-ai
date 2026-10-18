@@ -1,4 +1,7 @@
-"""Transport tests deliberately do not import CUDA, YOLO or OpenCV."""
+# SPDX-FileCopyrightText: 2026 Guilherme Pedroza
+# SPDX-License-Identifier: Apache-2.0
+
+"""Transport tests deliberately do not import CUDA, a detector or OpenCV."""
 
 import asyncio
 import json

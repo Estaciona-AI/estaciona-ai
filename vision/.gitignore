@@ -1,1 +1,7 @@
 data/
+
+*.onnx
+*.engine
+*.pdparams
+*.pdiparams
+*.pdmodel
