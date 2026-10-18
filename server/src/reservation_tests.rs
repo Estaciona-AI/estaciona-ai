@@ -99,6 +99,7 @@ impl Fixture {
             &self.spot_id,
             "occupied",
             1.0,
+            Utc::now(),
         )
         .await?)
     }

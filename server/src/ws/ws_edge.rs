@@ -231,7 +231,7 @@ async fn run_edge_socket(
                         status,
                         camera_id,
                         confidence,
-                        ..
+                        timestamp,
                     } => {
                         let observation = match crate::edge_delivery::apply_legacy(
                             &state.pool,
@@ -240,6 +240,7 @@ async fn run_edge_socket(
                             &spot_id,
                             &status,
                             confidence,
+                            timestamp,
                         )
                         .await
                         {
