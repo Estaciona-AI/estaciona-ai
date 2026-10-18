@@ -14,7 +14,7 @@ use crate::ws::messages::{
     AppToServerMsg, EdgeToServerMsg, EdgeTransportMsg, ServerToAppMsg, ServerToEdgeMsg,
 };
 
-pub const VERSION: &str = "1.0.0";
+pub const VERSION: &str = "1.1.0";
 
 pub fn physical_state_schema(_: &mut SchemaGenerator) -> Schema {
     json_schema!({"type":"string","enum":["free","occupied"]})
@@ -67,14 +67,65 @@ fn id(channel: &str) -> String {
     format!("urn:estaciona-ai:ws:{channel}:v1")
 }
 
-fn schema<T: JsonSchema>(channel: &str, contract: Contract) -> Value {
+fn typed_schema<T: JsonSchema>(id: String, contract: Contract) -> Value {
     let mut settings = SchemaSettings::draft2020_12();
     settings.contract = contract;
     let mut value = serde_json::to_value(settings.into_generator().into_root_schema_for::<T>())
         .expect("schema serializes");
-    value["$id"] = json!(id(channel));
+    value["$id"] = json!(id);
     value["x-contract-version"] = json!(VERSION);
     value
+}
+
+fn schema<T: JsonSchema>(channel: &str, contract: Contract) -> Value {
+    typed_schema::<T>(id(channel), contract)
+}
+
+pub fn rest_schemas() -> BTreeMap<&'static str, Value> {
+    macro_rules! rest {
+        ($name:literal, $dto:ty, $direction:ident) => {
+            (
+                $name,
+                typed_schema::<$dto>(
+                    format!("urn:estaciona-ai:rest:{}:v1", $name),
+                    Contract::$direction,
+                ),
+            )
+        };
+    }
+    BTreeMap::from([
+        rest!("login-request", crate::auth::LoginRequest, Deserialize),
+        rest!("login-response", crate::auth::LoginResponse, Serialize),
+        rest!("create-user", crate::users::CreateUser, Deserialize),
+        rest!("user-response", crate::users::UserResponse, Serialize),
+        rest!(
+            "create-reservation",
+            crate::reservations::CreateReservation,
+            Deserialize
+        ),
+        rest!(
+            "reservation-response",
+            crate::reservations::ReservationResponse,
+            Serialize
+        ),
+        rest!(
+            "update-spot-status",
+            crate::reservations::UpdateSpotStatus,
+            Deserialize
+        ),
+        rest!(
+            "issue-ws-ticket",
+            crate::ws_tickets::IssueRequest,
+            Deserialize
+        ),
+        rest!(
+            "issued-ws-ticket",
+            crate::ws_tickets::IssuedTicket,
+            Serialize
+        ),
+        rest!("api-error", crate::api_contract::ErrorEnvelope, Serialize),
+        rest!("capabilities", crate::api_contract::Capabilities, Serialize),
+    ])
 }
 
 pub fn schemas() -> BTreeMap<&'static str, Value> {
@@ -198,9 +249,20 @@ pub fn fixtures() -> Value {
 
 pub fn artifacts() -> BTreeMap<String, Value> {
     let schemas = schemas();
+    let rest = rest_schemas();
     let mut artifacts = BTreeMap::new();
     artifacts.insert("messages.json".into(), root_schema(&schemas));
     artifacts.insert("v1/manifest.json".into(),json!({"version":VERSION,"wire_version":1,"channels":schemas.keys().map(|name|(name.to_string(),id(name))).collect::<BTreeMap<_,_>>(),"compatibility":{"identity_source":"authenticated_session","tenant_scope":"single_installation","local_ack":"gateway_sqlite_commit","cloud_ack":"postgres_commit","freshness":"strictly_newer_source_timestamp","maximum_future_clock_skew_seconds":30}}));
+    artifacts.get_mut("v1/manifest.json").expect("manifest")["rest"] = json!({
+        "api_version":1,
+        "base_path":"/api/v1",
+        "legacy_routes_preserved":true,
+        "errors":"http_status_category_with_request_id",
+        "schemas":rest.iter().map(|(name, value)|(*name, json!({"id":value["$id"],"path":format!("v1/rest-{name}.schema.json")}))).collect::<BTreeMap<_,_>>()
+    });
+    for (name, schema) in rest {
+        artifacts.insert(format!("v1/rest-{name}.schema.json"), schema);
+    }
     artifacts.insert("v1/fixtures.json".into(), fixtures());
     for (name, schema) in schemas {
         artifacts.insert(format!("v1/{name}.schema.json"), schema);

@@ -15,6 +15,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 // ==============================================================================
 
+mod api_contract;
 mod auth;
 mod auth_limits;
 #[cfg(test)]
@@ -156,13 +157,14 @@ async fn main() {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
-        .allow_headers(Any);
+        .allow_headers(Any)
+        .expose_headers([
+            axum::http::HeaderName::from_static("x-request-id"),
+            axum::http::HeaderName::from_static("x-estaciona-api-version"),
+            axum::http::HeaderName::from_static("retry-after"),
+        ]);
 
-    let app = Router::new()
-        .route("/health", get(health_check))
-        .route("/ws/edge", get(ws::ws_edge_handler))
-        .route("/ws/app", get(ws_tickets::app_handler))
-        .route("/ws/dashboard", get(ws_tickets::dashboard_handler))
+    let api = Router::new()
         .route(
             "/reservations",
             post(reservations::create_reservation).get(reservations::get_reservations),
@@ -185,7 +187,20 @@ async fn main() {
         .merge(ws_tickets::routes())
         .merge(vehicles::routes(lpr_mode))
         .route("/users/{id}", get(users::get_user))
-        .route("/config", post(save_config))
+        .route("/config", post(save_config));
+    let versioned = api
+        .clone()
+        .route("/capabilities", get(api_contract::capabilities))
+        .route("/contracts/{*path}", get(api_contract::contract))
+        .fallback(|| async { StatusCode::NOT_FOUND })
+        .layer(axum::middleware::from_fn(api_contract::versioned_response));
+    let app = Router::new()
+        .route("/health", get(health_check))
+        .route("/ws/edge", get(ws::ws_edge_handler))
+        .route("/ws/app", get(ws_tickets::app_handler))
+        .route("/ws/dashboard", get(ws_tickets::dashboard_handler))
+        .nest("/api/v1", versioned)
+        .merge(api)
         .with_state(parking_state.clone())
         .layer(axum::extract::Extension(ws_origin_policy))
         .layer(cors)

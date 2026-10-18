@@ -46,13 +46,13 @@ impl IntoResponse for AuthError {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 pub struct LoginRequest {
     pub email: String,
     pub password: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct LoginResponse {
     pub token: String,
     pub role: String,
