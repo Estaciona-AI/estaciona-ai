@@ -57,6 +57,7 @@ def init_db(db_path):
                 "delivery_result",
                 "delivery_reason",
                 "forwarded_at",
+                "source_payload",
             ):
                 if column not in columns:
                     conn.execute(
@@ -271,6 +272,9 @@ async def handler(websocket, db_path, metrics_path, expected_key, sync_event):
         f"{datetime.datetime.now(datetime.UTC).strftime('%Y-%m-%d %H:%M:%S')} [INFO] EDGE_CONNECTED",
         flush=True,
     )
+    local_delivery = websocket.request.headers.get("X-Estaciona-Local-Delivery") == "1"
+    if local_delivery:
+        await websocket.send(json.dumps({"type": "LOCAL_READY", "delivery_version": 1}))
     db_conn = sqlite3.connect(db_path)
     metrics_conn = sqlite3.connect(metrics_path)
 
@@ -321,6 +325,29 @@ async def handler(websocket, db_path, metrics_path, expected_key, sync_event):
                 except json.JSONDecodeError, TypeError:
                     print("[WARN] INVALID_JSON dropped", flush=True)
                     continue
+                source_payload = None
+                event_uuid = str(uuid.uuid4())
+                if payload.get("type") == "LOCAL_EVENT":
+                    if (
+                        not local_delivery
+                        or type(payload.get("version")) is not int
+                        or payload["version"] != 1
+                        or not isinstance(payload.get("payload"), dict)
+                    ):
+                        await websocket.close(1008, "Invalid local delivery envelope")
+                        return
+                    try:
+                        event_uuid = str(uuid.UUID(payload["event_id"]))
+                    except KeyError, ValueError, TypeError, AttributeError:
+                        await websocket.close(1008, "Invalid event UUID")
+                        return
+                    payload = payload["payload"]
+                    source_payload = json.dumps(
+                        payload, sort_keys=True, separators=(",", ":")
+                    )
+                elif local_delivery:
+                    await websocket.close(1008, "Local delivery envelope required")
+                    return
                 now_str = (
                     datetime.datetime.now(datetime.UTC)
                     .isoformat(timespec="milliseconds")
@@ -328,8 +355,9 @@ async def handler(websocket, db_path, metrics_path, expected_key, sync_event):
                 )
                 payload["gateway_received_at"] = now_str
 
-                event_uuid = str(uuid.uuid4())
-                events_to_insert.append((json.dumps(payload), event_uuid))
+                events_to_insert.append(
+                    (json.dumps(payload), event_uuid, source_payload)
+                )
 
                 edge_id = payload.get("camera_id") or "unknown"
                 spot_id = payload.get("spot_id") or "unknown"
@@ -364,25 +392,52 @@ async def handler(websocket, db_path, metrics_path, expected_key, sync_event):
                     flush=True,
                 )
 
+            local_acks = []
+            fresh_metrics = []
             if events_to_insert:
-                db_conn.executemany(
-                    "INSERT INTO fallback_events (message_text, event_uuid) VALUES (?, ?)",
-                    events_to_insert,
-                )
-                db_conn.commit()
-                # Delivery must wake even if the separate metrics write fails.
+                with db_conn:
+                    for event, metric in zip(
+                        events_to_insert, metrics_to_insert, strict=True
+                    ):
+                        message_text, event_uuid, source_payload = event
+                        inserted = db_conn.execute(
+                            "INSERT INTO fallback_events (message_text, event_uuid, source_payload) VALUES (?, ?, ?) ON CONFLICT(event_uuid) DO NOTHING",
+                            event,
+                        ).rowcount
+                        if inserted:
+                            fresh_metrics.append(metric)
+                        if source_payload is not None:
+                            existing = db_conn.execute(
+                                "SELECT source_payload FROM fallback_events WHERE event_uuid=?",
+                                (event_uuid,),
+                            ).fetchone()[0]
+                            outcome = (
+                                ("persisted" if inserted else "duplicate")
+                                if existing == source_payload
+                                else "rejected"
+                            )
+                            local_acks.append(
+                                {
+                                    "type": "LOCAL_ACK",
+                                    "version": 1,
+                                    "event_id": event_uuid,
+                                    "outcome": outcome,
+                                }
+                            )
+                # Both local persistence ACK and cloud delivery happen only after
+                # commit. Metrics are diagnostic and cannot revoke persistence.
                 sync_event.set()
+                for ack in local_acks:
+                    await asyncio.wait_for(websocket.send(json.dumps(ack)), 3)
 
-            if metrics_to_insert:
-                metrics_conn.executemany(
-                    """
-                    INSERT INTO metrics (
-                        edge_id, spot_id, status, detection_ts, edge_sent_ts, gateway_received_ts, event_uuid
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                    metrics_to_insert,
-                )
-                metrics_conn.commit()
+            if fresh_metrics:
+                with metrics_conn:
+                    metrics_conn.executemany(
+                        """INSERT INTO metrics (
+                            edge_id, spot_id, status, detection_ts, edge_sent_ts, gateway_received_ts, event_uuid
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        fresh_metrics,
+                    )
 
             if disconnected:
                 break
