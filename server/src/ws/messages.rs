@@ -25,8 +25,12 @@ pub enum AppToServerMsg {
     #[serde(rename = "RESERVE_SPOT")]
     ReserveSpot {
         spot_id: String,
-        user_id: Uuid,
-        plate: String,
+        /// Legacy input only; the authenticated session determines ownership.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_id: Option<Uuid>,
+        /// Legacy input only; this command does not bind or authorize a vehicle.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plate: Option<String>,
     },
     #[serde(rename = "CANCEL_RESERVATION")]
     CancelReservation { reservation_id: Uuid },
@@ -241,7 +245,7 @@ mod tests {
         match msg {
             AppToServerMsg::ReserveSpot { spot_id, plate, .. } => {
                 assert_eq!(spot_id, "C-10");
-                assert_eq!(plate, "XYZ9876");
+                assert_eq!(plate.as_deref(), Some("XYZ9876"));
             }
             _ => panic!("wrong variant"),
         }
@@ -395,6 +399,16 @@ mod tests {
         assert!(
             matches!(decoded, ServerToAppMsg::NavigationUnavailable { spot_id, reason }
             if spot_id == "B-03" && reason == "route_unavailable")
+        );
+    }
+    #[test]
+    fn reservation_command_uses_session_identity_without_legacy_fields() {
+        let parsed = serde_json::from_value::<AppToServerMsg>(
+            serde_json::json!({"type":"RESERVE_SPOT","spot_id":"A-01"}),
+        );
+        assert!(
+            parsed.is_ok(),
+            "session identity makes user_id and plate unnecessary: {parsed:?}"
         );
     }
 }
