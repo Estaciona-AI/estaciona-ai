@@ -225,7 +225,9 @@ async def main():
                         "status": state["confirmed"],
                         "camera_id": CAMERA_ID,
                         "confidence": 1.0,
-                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                        "timestamp": datetime.datetime.now(datetime.UTC)
+                        .isoformat(timespec="microseconds")
+                        .replace("+00:00", "Z"),
                         "edge_sent_at": datetime.datetime.now(datetime.UTC)
                         .isoformat(timespec="milliseconds")
                         .replace("+00:00", "Z"),
@@ -302,7 +304,9 @@ async def main():
                     "status": raw_status,
                     "camera_id": CAMERA_ID,
                     "confidence": float(ratio) if raw_status == "occupied" else 1.0,
-                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "timestamp": datetime.datetime.now(datetime.UTC)
+                    .isoformat(timespec="microseconds")
+                    .replace("+00:00", "Z"),
                     "edge_sent_at": datetime.datetime.now(datetime.UTC)
                     .isoformat(timespec="milliseconds")
                     .replace("+00:00", "Z"),
