@@ -44,6 +44,7 @@ mod state;
 mod users;
 mod vehicles;
 mod ws;
+mod ws_origin;
 mod ws_tickets;
 
 use axum::{
@@ -128,6 +129,11 @@ async fn main() {
         Err(_) => Err("LPR_ENABLED must be UTF-8"),
     }
     .expect("Invalid optional LPR configuration");
+    let ws_origins = std::env::var("WS_ALLOWED_ORIGINS")
+        .expect("WS_ALLOWED_ORIGINS missing: configure exact HTTP(S) frontend origins");
+    let ws_origin_policy = ws_origin::WsOriginPolicy::parse(&ws_origins).expect(
+        "WS_ALLOWED_ORIGINS must be a comma-separated list of exact canonical HTTP(S) origins",
+    );
     let parking_state: SharedState = init_state(pool, jwt_secret, plate_pepper, site, lpr_mode)
         .await
         .expect("Failed to reconcile installation map");
@@ -166,6 +172,7 @@ async fn main() {
         .route("/users/{id}", get(users::get_user))
         .route("/config", post(save_config))
         .with_state(parking_state.clone())
+        .layer(axum::extract::Extension(ws_origin_policy))
         .layer(cors)
         .layer(TraceLayer::new_for_http().make_span_with(
             |request: &axum::http::Request<axum::body::Body>| {

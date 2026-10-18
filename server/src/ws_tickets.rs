@@ -17,7 +17,7 @@
 
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Query, State},
+    extract::{DefaultBodyLimit, Extension, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::IntoResponse,
     routing::post,
@@ -35,6 +35,7 @@ use uuid::Uuid;
 use crate::{
     security::{self, AuthSession, Claims},
     state::SharedState,
+    ws_origin::WsOriginPolicy,
 };
 
 const TICKET_TTL_SECONDS: i64 = 30;
@@ -329,9 +330,14 @@ pub struct TicketQuery {
 
 pub async fn app_handler(
     ws: axum::extract::ws::WebSocketUpgrade,
+    headers: HeaderMap,
+    Extension(origin_policy): Extension<WsOriginPolicy>,
     Query(query): Query<TicketQuery>,
     State(state): State<SharedState>,
 ) -> axum::response::Response {
+    if let Err(error) = origin_policy.authorize(&headers) {
+        return error.into_response();
+    }
     let session = match consume(&state.pool, &query.ticket, Destination::App).await {
         Ok(session) => session,
         Err((status, message)) => return (status, message).into_response(),
@@ -342,9 +348,14 @@ pub async fn app_handler(
 
 pub async fn dashboard_handler(
     ws: axum::extract::ws::WebSocketUpgrade,
+    headers: HeaderMap,
+    Extension(origin_policy): Extension<WsOriginPolicy>,
     Query(query): Query<TicketQuery>,
     State(state): State<SharedState>,
 ) -> axum::response::Response {
+    if let Err(error) = origin_policy.authorize(&headers) {
+        return error.into_response();
+    }
     let session = match consume(&state.pool, &query.ticket, Destination::Dashboard).await {
         Ok(session) => session,
         Err((status, message)) => return (status, message).into_response(),
@@ -413,5 +424,167 @@ mod postgres_tests {
             .await
             .unwrap();
         assert_eq!(remaining, (1, 1));
+    }
+}
+
+#[cfg(test)]
+mod origin_handshake_tests {
+    use super::{app_handler, dashboard_handler, new_ticket};
+    use crate::{
+        site_config::{ParkingLotConfig, PathNode, SiteConfig},
+        state::{self, SharedState},
+        ws_origin::WsOriginPolicy,
+    };
+    use axum::{Extension, Router, routing::get};
+    use chrono::{Duration as ChronoDuration, Utc};
+    use sqlx::PgPool;
+    use std::net::SocketAddr;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::{TcpListener, TcpStream},
+        task::JoinHandle,
+    };
+    use uuid::Uuid;
+
+    async fn test_state(pool: PgPool) -> SharedState {
+        state::init_state(
+            pool,
+            "r14-test-jwt".into(),
+            "r14-test-pepper".into(),
+            SiteConfig {
+                directory: std::env::temp_dir(),
+                parkings: vec![ParkingLotConfig {
+                    path: vec![PathNode { x: 0.0, z: 0.0 }, PathNode { x: 1.0, z: 0.0 }],
+                }],
+                spots: Vec::new(),
+            },
+            Default::default(),
+        )
+        .await
+        .unwrap()
+    }
+
+    async fn start_server(state: SharedState) -> (SocketAddr, JoinHandle<()>) {
+        let app = Router::new()
+            .route("/ws/app", get(app_handler))
+            .route("/ws/dashboard", get(dashboard_handler))
+            .with_state(state)
+            .layer(Extension(
+                WsOriginPolicy::parse("https://parking.example.edu").unwrap(),
+            ));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (address, server)
+    }
+
+    async fn insert_ticket(pool: &PgPool, destination: &str, role: &str) -> String {
+        let user_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id,name,email,password_hash,role) VALUES ($1,'R14 test',$2,'unused',$3)",
+        )
+        .bind(user_id)
+        .bind(format!("{user_id}@example.invalid"))
+        .bind(role)
+        .execute(pool)
+        .await
+        .unwrap();
+
+        let (ticket, digest) = new_ticket();
+        sqlx::query("INSERT INTO ws_tickets (digest,user_id,role,destination,session_expires_at,expires_at) VALUES ($1,$2,$3,$4,$5,$6)")
+            .bind(digest)
+            .bind(user_id)
+            .bind(role)
+            .bind(destination)
+            .bind(Utc::now().timestamp() + 300)
+            .bind(Utc::now() + ChronoDuration::seconds(30))
+            .execute(pool)
+            .await
+            .unwrap();
+        ticket
+    }
+
+    async fn ticket_exists(pool: &PgPool, ticket: &str) -> bool {
+        let digest = super::ticket_digest(ticket).unwrap();
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM ws_tickets WHERE digest=$1)")
+            .bind(digest)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn websocket_handshake(
+        address: SocketAddr,
+        path: &str,
+        ticket: &str,
+        origins: &[&str],
+    ) -> (u16, TcpStream) {
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        let origin_headers = origins
+            .iter()
+            .map(|origin| format!("Origin: {origin}\r\n"))
+            .collect::<String>();
+        let request = format!(
+            "GET /ws/{path}?ticket={ticket} HTTP/1.1\r\n\
+             Host: localhost\r\n\
+             Connection: Upgrade\r\n\
+             Upgrade: websocket\r\n\
+             Sec-WebSocket-Version: 13\r\n\
+             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+             {origin_headers}\r\n"
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+
+        let mut response = Vec::new();
+        while !response.ends_with(b"\r\n\r\n") {
+            let mut byte = [0_u8; 1];
+            if stream.read(&mut byte).await.unwrap() == 0 {
+                break;
+            }
+            response.push(byte[0]);
+        }
+        let response = String::from_utf8(response).unwrap();
+        let status = response
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_default();
+        (status, stream)
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn only_exact_origins_can_upgrade_app_and_dashboard_sockets(pool: PgPool) {
+        let state = test_state(pool.clone()).await;
+        let (address, server) = start_server(state).await;
+        let cases = [("app", "app", "user"), ("dashboard", "dashboard", "admin")];
+        let mut outcomes = Vec::new();
+
+        for (path, destination, role) in cases {
+            let ticket = insert_ticket(&pool, destination, role).await;
+            let (denied_status, denied_stream) =
+                websocket_handshake(address, path, &ticket, &["https://attacker.example"]).await;
+            drop(denied_stream);
+            outcomes.push((path, denied_status, ticket_exists(&pool, &ticket).await));
+
+            let (allowed_status, allowed_stream) =
+                websocket_handshake(address, path, &ticket, &["https://parking.example.edu"]).await;
+            drop(allowed_stream);
+            outcomes.push((path, allowed_status, ticket_exists(&pool, &ticket).await));
+        }
+
+        server.abort();
+        assert_eq!(
+            outcomes,
+            vec![
+                ("app", 403, true),
+                ("app", 101, false),
+                ("dashboard", 403, true),
+                ("dashboard", 101, false),
+            ],
+            "unlisted origins must be rejected without consuming the one-time ticket"
+        );
     }
 }
