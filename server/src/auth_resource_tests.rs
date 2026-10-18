@@ -41,6 +41,7 @@ fn fixture(pool: PgPool) -> SharedState {
         graph: RwLock::new(ParkingGraph::new()),
         jwt_secret: "r04-disposable-jwt-secret".to_owned(),
         plate_pepper: "r04-disposable-plate-pepper".to_owned(),
+        reservation_policy: Default::default(),
         auth_limits: Default::default(),
         forecast_writer: Default::default(),
         last_trend_prediction: Mutex::new(None),

@@ -15,7 +15,6 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 // ==============================================================================
 
-use chrono::{Duration, Utc};
 use sqlx::Acquire;
 
 use crate::{
@@ -116,7 +115,7 @@ pub async fn car_detected(
                 &mut attempt,
                 &spot,
                 user_id,
-                Utc::now() + Duration::minutes(15),
+                &state.reservation_policy,
             )
             .await
             {
@@ -124,6 +123,11 @@ pub async fn car_detected(
                     attempt.commit().await?;
                     claimed = Some((spot, Some(route), true));
                     break;
+                }
+                Err(CreateError::UserLimit) => {
+                    attempt.rollback().await?;
+                    tx.rollback().await?;
+                    return Ok(true);
                 }
                 Err(CreateError::Unavailable) => attempt.rollback().await?,
                 Err(CreateError::Database(error)) => return Err(error.into()),

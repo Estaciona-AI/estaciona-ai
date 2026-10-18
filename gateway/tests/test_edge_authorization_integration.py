@@ -1,6 +1,7 @@
 """Gateway credentials and scopes against Rust and disposable PostgreSQL."""
 
 import asyncio
+import datetime
 from contextlib import suppress
 import hashlib
 import hmac
@@ -167,9 +168,12 @@ def test_same_uuid_is_deduplicated_only_within_its_gateway_owner(server):
         for key in (KEY, other_key):
             async with edge_connection(server, key) as connection:
                 await receive_ready(connection)
-                first = await deliver(connection, event_id)
+                # Each gateway produces its own fresh observation, but its
+                # retries preserve that observation's exact timestamp.
+                timestamp = datetime.datetime.now(datetime.UTC).isoformat()
+                first = await deliver(connection, event_id, timestamp=timestamp)
                 assert (first["outcome"], first["duplicate"]) == ("applied", False)
-                repeated = await deliver(connection, event_id)
+                repeated = await deliver(connection, event_id, timestamp=timestamp)
                 assert (repeated["outcome"], repeated["duplicate"]) == ("applied", True)
 
     asyncio.run(run())

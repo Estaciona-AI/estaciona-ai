@@ -1,6 +1,5 @@
 use std::{sync::Arc, time::Duration};
 
-use chrono::{Duration as ChronoDuration, Utc};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::{sync::Barrier, task::JoinHandle, time::timeout};
 use uuid::Uuid;
@@ -117,7 +116,7 @@ async fn stale_terminal_operations_preserve_the_next_active_reservation(
         &pool,
         &fixture.spot_id,
         fixture.owner,
-        Utc::now() + ChronoDuration::hours(1),
+        &crate::reservation_policy::ReservationPolicy::default(),
     )
     .await
     .expect("first reservation must be created");
@@ -136,7 +135,7 @@ async fn stale_terminal_operations_preserve_the_next_active_reservation(
         &pool,
         &fixture.spot_id,
         fixture.other,
-        Utc::now() + ChronoDuration::hours(1),
+        &crate::reservation_policy::ReservationPolicy::default(),
     )
     .await
     .expect("the released spot must accept its next reservation");
@@ -173,10 +172,14 @@ async fn expiration_rechecks_an_extension_after_waiting_for_the_spot_lock(
         &pool,
         &fixture.spot_id,
         fixture.owner,
-        Utc::now() - ChronoDuration::hours(1),
+        &crate::reservation_policy::ReservationPolicy::default(),
     )
     .await
     .expect("expired fixture reservation must be created");
+    sqlx::query("UPDATE reservations SET expires_at=NOW()-INTERVAL '1 hour' WHERE id=$1")
+        .bind(reservation.id)
+        .execute(&pool)
+        .await?;
     let (worker, worker_pid) = worker_pool(&pool).await?;
     let mut coordinator = pool.begin().await?;
     let coordinator_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
@@ -230,7 +233,7 @@ async fn concurrent_creators_have_one_winner_without_a_partial_spot_update(
                 &worker,
                 &spot_id,
                 user_id,
-                Utc::now() + ChronoDuration::hours(1),
+                &crate::reservation_policy::ReservationPolicy::default(),
             )
             .await
         })
@@ -271,7 +274,7 @@ async fn confirmation_foreign_key_does_not_deadlock_with_creation_and_stale_canc
         &pool,
         &fixture.spot_id,
         fixture.owner,
-        Utc::now() + ChronoDuration::hours(1),
+        &crate::reservation_policy::ReservationPolicy::default(),
     )
     .await
     .expect("first reservation must be created");
@@ -302,7 +305,7 @@ async fn confirmation_foreign_key_does_not_deadlock_with_creation_and_stale_canc
             &creator_clone,
             &next_spot,
             next_owner,
-            Utc::now() + ChronoDuration::hours(1),
+            &crate::reservation_policy::ReservationPolicy::default(),
         )
         .await
     });
@@ -435,5 +438,50 @@ async fn uniqueness_migration_accepts_valid_legacy_reservations(
         .fetch_one(&pool)
         .await?;
     assert_eq!(total, 4);
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn quota_coordination_does_not_block_security_updates_while_waiting_for_a_spot(
+    pool: PgPool,
+) -> Result<(), sqlx::Error> {
+    let fixture = Fixture::new(&pool).await?;
+    let (worker, pid) = worker_pool(&pool).await?;
+    let mut coordinator = pool.begin().await?;
+    let coordinator_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *coordinator)
+        .await?;
+    sqlx::query("SELECT id FROM spots WHERE id=$1 FOR NO KEY UPDATE")
+        .bind(&fixture.spot_id)
+        .execute(&mut *coordinator)
+        .await?;
+    let cloned = worker.clone();
+    let spot = fixture.spot_id.clone();
+    let owner = fixture.owner;
+    let creation = tokio::spawn(async move {
+        reservation_store::create(
+            &cloned,
+            &spot,
+            owner,
+            &crate::reservation_policy::ReservationPolicy::default(),
+        )
+        .await
+    });
+    wait_until_blocked(&pool, pid, coordinator_pid).await?;
+    let updated = timeout(
+        Duration::from_secs(2),
+        sqlx::query("UPDATE users SET role='admin' WHERE id=$1")
+            .bind(owner)
+            .execute(&pool),
+    )
+    .await;
+    coordinator.rollback().await?;
+    let created = completed(creation).await;
+    assert!(
+        updated
+            .expect("quota lock must not block security updates")
+            .is_ok()
+    );
+    assert!(created.is_ok());
     Ok(())
 }
