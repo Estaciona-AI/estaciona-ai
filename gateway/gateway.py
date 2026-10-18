@@ -393,6 +393,11 @@ async def sync_loop(db_path, metrics_path, cloud_url, api_key, sync_event):
                         and ready["delivery_version"] == 1
                     ):
                         raise ValueError("Cloud does not support delivery version 1")
+                    durable_events = ready.get("durable_events", ["SPOT_UPDATE"])
+                    if not isinstance(durable_events, list) or not all(
+                        isinstance(kind, str) for kind in durable_events
+                    ):
+                        raise ValueError("Invalid durable event capabilities")
                     print("[INFO] CLOUD_CONNECTED delivery_version=1", flush=True)
 
                 for _, event_uuid, message_text in events:
@@ -421,7 +426,7 @@ async def sync_loop(db_path, metrics_path, cloud_url, api_key, sync_event):
                         .isoformat(timespec="milliseconds")
                         .replace("+00:00", "Z")
                     )
-                    if payload.get("type") == "SPOT_UPDATE":
+                    if payload.get("type") in durable_events:
                         frame = {
                             "type": "EDGE_EVENT",
                             "version": 1,
@@ -444,14 +449,10 @@ async def sync_loop(db_path, metrics_path, cloud_url, api_key, sync_event):
                             flush=True,
                         )
                     else:
-                        # These contracts remain best effort until their own durability plan.
-                        payload["gateway_forwarded_at"] = now_str
-                        await cloud_conn.send(json.dumps(payload))
-                        record_forwarding(db_path, metrics_path, event_uuid, now_str)
-                        finish_event(db_path, event_uuid, "legacy_forwarded")
-                        print(
-                            f"[INFO] LEGACY_FORWARDED event_id={event_uuid} durable_ack=false",
-                            flush=True,
+                        # Never turn a transport send into a claim of persistence.
+                        # Keep the UUID and payload intact until a capable server is available.
+                        raise ValueError(
+                            "Server does not support durable delivery for event type"
                         )
             except asyncio.CancelledError:
                 raise
