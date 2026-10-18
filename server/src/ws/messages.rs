@@ -16,58 +16,68 @@
 // ==============================================================================
 
 use chrono::{DateTime, Utc};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "type")]
 pub enum AppToServerMsg {
     #[serde(rename = "RESERVE_SPOT")]
     ReserveSpot {
         spot_id: String,
-        user_id: Uuid,
-        plate: String,
+        /// Legacy input only; the authenticated session determines ownership.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_id: Option<Uuid>,
+        /// Legacy input only; this command does not bind or authorize a vehicle.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plate: Option<String>,
     },
     #[serde(rename = "CANCEL_RESERVATION")]
     CancelReservation { reservation_id: Uuid },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "type")]
 pub enum EdgeTransportMsg {
     #[serde(rename = "EDGE_EVENT")]
     Event {
+        #[schemars(range(min = 1, max = 1))]
         version: u8,
         event_id: Uuid,
+        #[schemars(with = "EdgeToServerMsg")]
         payload: serde_json::Value,
     },
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 #[serde(tag = "type")]
 pub enum ServerToEdgeMsg {
     #[serde(rename = "EDGE_READY")]
     Ready {
+        #[schemars(range(min = 1, max = 1))]
         delivery_version: u8,
         durable_events: Vec<&'static str>,
     },
     #[serde(rename = "EDGE_ACK")]
     Ack {
+        #[schemars(range(min = 1, max = 1))]
         version: u8,
         event_id: Uuid,
+        #[schemars(with = "crate::edge_delivery::Outcome")]
         outcome: String,
         reason: Option<String>,
         duplicate: bool,
     },
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct HourlyOccupancy {
     pub timestamp: DateTime<Utc>,
     pub occupancy: i32,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct ModelHealth {
     pub r2_score: f64,
     pub mae: f64,
@@ -75,14 +85,16 @@ pub struct ModelHealth {
     pub inference_time_ms: f64,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "type")]
 pub enum EdgeToServerMsg {
     #[serde(rename = "SPOT_UPDATE")]
     SpotUpdate {
         spot_id: String,
+        #[schemars(schema_with = "crate::contracts::physical_state_schema")]
         status: String,
         camera_id: String,
+        #[schemars(range(min = 0.0, max = 1.0))]
         confidence: f64,
         timestamp: DateTime<Utc>,
     },
@@ -109,7 +121,7 @@ pub enum EdgeToServerMsg {
     },
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "type")]
 pub enum ServerToAppMsg {
     #[serde(rename = "NAVIGATION_START")]
@@ -127,7 +139,11 @@ pub enum ServerToAppMsg {
     #[serde(rename = "RESERVATION_REJECTED")]
     ReservationRejected { spot_id: String, reason: String },
     #[serde(rename = "SPOT_UPDATE")]
-    SpotUpdate { spot_id: String, status: String },
+    SpotUpdate {
+        spot_id: String,
+        #[schemars(schema_with = "crate::contracts::spot_status_schema")]
+        status: String,
+    },
     #[serde(rename = "TREND_PREDICTION")]
     TrendPrediction {
         timestamp: DateTime<Utc>,
@@ -241,7 +257,7 @@ mod tests {
         match msg {
             AppToServerMsg::ReserveSpot { spot_id, plate, .. } => {
                 assert_eq!(spot_id, "C-10");
-                assert_eq!(plate, "XYZ9876");
+                assert_eq!(plate.as_deref(), Some("XYZ9876"));
             }
             _ => panic!("wrong variant"),
         }
@@ -395,6 +411,16 @@ mod tests {
         assert!(
             matches!(decoded, ServerToAppMsg::NavigationUnavailable { spot_id, reason }
             if spot_id == "B-03" && reason == "route_unavailable")
+        );
+    }
+    #[test]
+    fn reservation_command_uses_session_identity_without_legacy_fields() {
+        let parsed = serde_json::from_value::<AppToServerMsg>(
+            serde_json::json!({"type":"RESERVE_SPOT","spot_id":"A-01"}),
+        );
+        assert!(
+            parsed.is_ok(),
+            "session identity makes user_id and plate unnecessary: {parsed:?}"
         );
     }
 }

@@ -1,0 +1,230 @@
+{
+  "$defs": {
+    "HourlyOccupancy": {
+      "properties": {
+        "occupancy": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "timestamp",
+        "occupancy"
+      ],
+      "type": "object"
+    },
+    "ModelHealth": {
+      "properties": {
+        "inference_time_ms": {
+          "format": "double",
+          "type": "number"
+        },
+        "mae": {
+          "format": "double",
+          "type": "number"
+        },
+        "r2_score": {
+          "format": "double",
+          "type": "number"
+        },
+        "rmse": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "r2_score",
+        "mae",
+        "rmse",
+        "inference_time_ms"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "urn:estaciona-ai:ws:server-to-app:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "properties": {
+        "route": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "spot_id": {
+          "type": "string"
+        },
+        "type": {
+          "const": "NAVIGATION_START",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "spot_id",
+        "route"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "reason": {
+          "type": "string"
+        },
+        "spot_id": {
+          "type": "string"
+        },
+        "type": {
+          "const": "NAVIGATION_UNAVAILABLE",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "spot_id",
+        "reason"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "expires_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "reservation_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "spot_id": {
+          "type": "string"
+        },
+        "type": {
+          "const": "RESERVATION_CONFIRMED",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "reservation_id",
+        "spot_id",
+        "expires_at"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "spot_id": {
+          "type": "string"
+        },
+        "type": {
+          "const": "RESERVATION_EXPIRED",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "spot_id"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "reason": {
+          "type": "string"
+        },
+        "spot_id": {
+          "type": "string"
+        },
+        "type": {
+          "const": "RESERVATION_REJECTED",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "spot_id",
+        "reason"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "spot_id": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "free",
+            "occupied",
+            "reserved"
+          ],
+          "type": "string"
+        },
+        "type": {
+          "const": "SPOT_UPDATE",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "spot_id",
+        "status"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "avg_stay_duration_mins": {
+          "format": "double",
+          "type": "number"
+        },
+        "max_capacity": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "model_health": {
+          "$ref": "#/$defs/ModelHealth"
+        },
+        "next_24h_occupancy": {
+          "items": {
+            "$ref": "#/$defs/HourlyOccupancy"
+          },
+          "type": "array"
+        },
+        "stay_duration_distribution": {
+          "items": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "type": {
+          "const": "TREND_PREDICTION",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "timestamp",
+        "avg_stay_duration_mins",
+        "stay_duration_distribution",
+        "max_capacity",
+        "model_health",
+        "next_24h_occupancy"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "ServerToAppMsg",
+  "x-contract-version": "1.0.0"
+}

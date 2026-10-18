@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::edge_auth::{AuthError, Principal};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Outcome {
     Applied,
@@ -79,6 +79,10 @@ async fn observe(
         return Ok(observation);
     }
     if status != "free" && status != "occupied" {
+        return Ok(observation);
+    }
+    if !confidence.is_finite() || !(0.0..=1.0).contains(&confidence) {
+        observation.reason = Some("invalid_confidence".to_owned());
         return Ok(observation);
     }
     if confidence < 0.20 {
@@ -1697,6 +1701,20 @@ mod tests {
             apply_legacy(&pool, &principal, "test-camera", &spot_id, "free", 1.0, old).await?;
         assert_eq!(result.reason.as_deref(), Some("stale_observation"));
         assert_eq!(status(&pool, &spot_id).await?, "occupied");
+        Ok(())
+    }
+    #[sqlx::test(migrations = "./migrations")]
+    async fn confidence_outside_probability_range_is_rejected(pool: PgPool) -> TestResult {
+        let principal = principal(&pool).await?;
+        let spot_id = authorized_spot(&pool, &principal, "free").await?;
+        for confidence in [-0.01, 1.01] {
+            let mut event = payload(&spot_id, "occupied");
+            event["confidence"] = json!(confidence);
+            let result = apply(&pool, &principal, Uuid::new_v4(), event).await?;
+            assert_eq!(result.ack.outcome, Outcome::Rejected);
+            assert_eq!(result.ack.reason.as_deref(), Some("invalid_confidence"));
+            assert_eq!(status(&pool, &spot_id).await?, "free");
+        }
         Ok(())
     }
 }

@@ -25,6 +25,7 @@ import asyncio
 import websockets
 
 from ml.inference import PredictiveEngine
+from protocol import encode_edge_event
 
 ACK_TIMEOUT_SECONDS = 5.0
 HANDSHAKE_TIMEOUT_SECONDS = 3.0
@@ -514,14 +515,9 @@ async def sync_loop(db_path, metrics_path, cloud_url, api_key, sync_event):
                         .replace("+00:00", "Z")
                     )
                     if payload.get("type") in durable_events:
-                        frame = {
-                            "type": "EDGE_EVENT",
-                            "version": 1,
-                            "event_id": event_uuid,
-                            "payload": payload,
-                            "gateway_forwarded_at": now_str,
-                        }
-                        await cloud_conn.send(json.dumps(frame))
+                        await cloud_conn.send(
+                            encode_edge_event(event_uuid, payload, now_str)
+                        )
                         record_forwarding(db_path, metrics_path, event_uuid, now_str)
                         ack = await receive_ack(cloud_conn, event_uuid)
                         acknowledge_event(

@@ -1,0 +1,65 @@
+{
+  "$defs": {
+    "LocalOutcome": {
+      "enum": [
+        "persisted",
+        "duplicate",
+        "rejected"
+      ],
+      "type": "string"
+    }
+  },
+  "$id": "urn:estaciona-ai:ws:gateway-to-vision:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "properties": {
+        "delivery_version": {
+          "format": "uint8",
+          "maximum": 1,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "type": {
+          "const": "LOCAL_READY",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "delivery_version"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "event_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "outcome": {
+          "$ref": "#/$defs/LocalOutcome"
+        },
+        "type": {
+          "const": "LOCAL_ACK",
+          "type": "string"
+        },
+        "version": {
+          "format": "uint8",
+          "maximum": 1,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "type",
+        "version",
+        "event_id",
+        "outcome"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "GatewayToVision",
+  "x-contract-version": "1.0.0"
+}

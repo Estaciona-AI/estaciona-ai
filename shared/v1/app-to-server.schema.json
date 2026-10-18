@@ -1,0 +1,56 @@
+{
+  "$id": "urn:estaciona-ai:ws:app-to-server:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "properties": {
+        "plate": {
+          "description": "Legacy input only; this command does not bind or authorize a vehicle.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "spot_id": {
+          "type": "string"
+        },
+        "type": {
+          "const": "RESERVE_SPOT",
+          "type": "string"
+        },
+        "user_id": {
+          "description": "Legacy input only; the authenticated session determines ownership.",
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "spot_id"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "reservation_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "type": {
+          "const": "CANCEL_RESERVATION",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "reservation_id"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "AppToServerMsg",
+  "x-contract-version": "1.0.0"
+}

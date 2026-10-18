@@ -1,0 +1,195 @@
+{
+  "app-to-server": [
+    {
+      "spot_id": "A-01",
+      "type": "RESERVE_SPOT"
+    },
+    {
+      "plate": "EXAMPLE",
+      "spot_id": "A-01",
+      "type": "RESERVE_SPOT",
+      "user_id": "00000000-0000-4000-8000-000000000001"
+    },
+    {
+      "reservation_id": "00000000-0000-4000-8000-000000000001",
+      "type": "CANCEL_RESERVATION"
+    }
+  ],
+  "edge-events": [
+    {
+      "camera_id": "camera-01",
+      "confidence": 0.9,
+      "spot_id": "A-01",
+      "status": "occupied",
+      "timestamp": "2026-10-01T12:00:00Z",
+      "type": "SPOT_UPDATE"
+    },
+    {
+      "camera_id": "camera-01",
+      "plate": "EXAMPLE",
+      "timestamp": "2026-10-01T12:00:00Z",
+      "type": "CAR_DETECTED"
+    },
+    {
+      "from_node": "camera-01",
+      "is_active": true,
+      "to_node": "A-01",
+      "type": "PATH_UPDATE"
+    },
+    {
+      "avg_stay_duration_mins": 60.0,
+      "max_capacity": 400,
+      "model_health": {
+        "inference_time_ms": 3.0,
+        "mae": 1.0,
+        "r2_score": 0.8,
+        "rmse": 2.0
+      },
+      "next_24h_occupancy": [
+        {
+          "occupancy": 200,
+          "timestamp": "2026-10-01T12:00:00Z"
+        }
+      ],
+      "stay_duration_distribution": [
+        1,
+        2,
+        3
+      ],
+      "timestamp": "2026-10-01T12:00:00Z",
+      "type": "TREND_PREDICTION"
+    }
+  ],
+  "gateway-to-server": [
+    {
+      "event_id": "00000000-0000-4000-8000-000000000001",
+      "payload": {
+        "camera_id": "camera-01",
+        "confidence": 0.9,
+        "spot_id": "A-01",
+        "status": "occupied",
+        "timestamp": "2026-10-01T12:00:00Z",
+        "type": "SPOT_UPDATE"
+      },
+      "type": "EDGE_EVENT",
+      "version": 1
+    }
+  ],
+  "gateway-to-vision": [
+    {
+      "delivery_version": 1,
+      "type": "LOCAL_READY"
+    },
+    {
+      "event_id": "00000000-0000-4000-8000-000000000001",
+      "outcome": "persisted",
+      "type": "LOCAL_ACK",
+      "version": 1
+    },
+    {
+      "event_id": "00000000-0000-4000-8000-000000000001",
+      "outcome": "duplicate",
+      "type": "LOCAL_ACK",
+      "version": 1
+    },
+    {
+      "event_id": "00000000-0000-4000-8000-000000000001",
+      "outcome": "rejected",
+      "type": "LOCAL_ACK",
+      "version": 1
+    }
+  ],
+  "server-to-app": [
+    {
+      "spot_id": "A-01",
+      "status": "reserved",
+      "type": "SPOT_UPDATE"
+    },
+    {
+      "route": [
+        "camera-01",
+        "A-01"
+      ],
+      "spot_id": "A-01",
+      "type": "NAVIGATION_START"
+    },
+    {
+      "reason": "no_route",
+      "spot_id": "A-01",
+      "type": "NAVIGATION_UNAVAILABLE"
+    },
+    {
+      "expires_at": "2026-10-01T12:00:00Z",
+      "reservation_id": "00000000-0000-4000-8000-000000000001",
+      "spot_id": "A-01",
+      "type": "RESERVATION_CONFIRMED"
+    },
+    {
+      "spot_id": "A-01",
+      "type": "RESERVATION_EXPIRED"
+    },
+    {
+      "reason": "active_reservation_limit",
+      "spot_id": "A-01",
+      "type": "RESERVATION_REJECTED"
+    },
+    {
+      "avg_stay_duration_mins": 60.0,
+      "max_capacity": 400,
+      "model_health": {
+        "inference_time_ms": 3.0,
+        "mae": 1.0,
+        "r2_score": 0.8,
+        "rmse": 2.0
+      },
+      "next_24h_occupancy": [
+        {
+          "occupancy": 200,
+          "timestamp": "2026-10-01T12:00:00Z"
+        }
+      ],
+      "stay_duration_distribution": [
+        1,
+        2,
+        3
+      ],
+      "timestamp": "2026-10-01T12:00:00Z",
+      "type": "TREND_PREDICTION"
+    }
+  ],
+  "server-to-gateway": [
+    {
+      "delivery_version": 1,
+      "durable_events": [
+        "SPOT_UPDATE",
+        "PATH_UPDATE",
+        "TREND_PREDICTION",
+        "CAR_DETECTED"
+      ],
+      "type": "EDGE_READY"
+    },
+    {
+      "duplicate": false,
+      "event_id": "00000000-0000-4000-8000-000000000001",
+      "outcome": "applied",
+      "reason": null,
+      "type": "EDGE_ACK",
+      "version": 1
+    }
+  ],
+  "vision-to-gateway": [
+    {
+      "event_id": "00000000-0000-4000-8000-000000000001",
+      "payload": {
+        "camera_id": "camera-01",
+        "confidence": 0.9,
+        "spot_id": "A-01",
+        "status": "occupied",
+        "timestamp": "2026-10-01T12:00:00Z",
+        "type": "SPOT_UPDATE"
+      },
+      "type": "LOCAL_EVENT",
+      "version": 1
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "channels": {
+    "app-to-server": "urn:estaciona-ai:ws:app-to-server:v1",
+    "edge-events": "urn:estaciona-ai:ws:edge-events:v1",
+    "gateway-to-server": "urn:estaciona-ai:ws:gateway-to-server:v1",
+    "gateway-to-vision": "urn:estaciona-ai:ws:gateway-to-vision:v1",
+    "server-to-app": "urn:estaciona-ai:ws:server-to-app:v1",
+    "server-to-gateway": "urn:estaciona-ai:ws:server-to-gateway:v1",
+    "vision-to-gateway": "urn:estaciona-ai:ws:vision-to-gateway:v1"
+  },
+  "compatibility": {
+    "cloud_ack": "postgres_commit",
+    "freshness": "strictly_newer_source_timestamp",
+    "identity_source": "authenticated_session",
+    "local_ack": "gateway_sqlite_commit",
+    "maximum_future_clock_skew_seconds": 30,
+    "tenant_scope": "single_installation"
+  },
+  "version": "1.0.0",
+  "wire_version": 1
+}

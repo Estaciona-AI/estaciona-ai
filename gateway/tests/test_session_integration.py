@@ -770,3 +770,35 @@ def test_r09_reconnection_reads_current_database_state(server, endpoint, role):
             }
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("legacy_fields", [False, True])
+def test_reserve_wire_contract_derives_identity_from_session(server, legacy_fields):
+    owner = insert_user(server)
+    another = insert_user(server)
+
+    async def run():
+        async with websockets.connect(
+            websocket_url(
+                server,
+                "app",
+                owner,
+                token(server, owner, "user", int(time.time()) + 30),
+            ),
+            origin="http://localhost",
+        ) as ws:
+            await consume_snapshot(ws)
+            request = {"type": "RESERVE_SPOT", "spot_id": "R02-A"}
+            if legacy_fields:
+                request.update(user_id=str(another), plate="IGNORED")
+            await ws.send(json.dumps(request))
+            while True:
+                message = json.loads(await asyncio.wait_for(ws.recv(), 3))
+                if message["type"] == "RESERVATION_CONFIRMED":
+                    break
+            assert server.query(
+                "SELECT user_id::text FROM reservations WHERE id=%s",
+                (message["reservation_id"],),
+            ) == [(str(owner),)]
+
+    asyncio.run(run())
