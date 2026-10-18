@@ -120,8 +120,13 @@ async fn run_edge_socket(
     state: &SharedState,
     principal: &crate::edge_auth::Principal,
 ) {
+    let mut durable_events = vec!["SPOT_UPDATE", "PATH_UPDATE", "TREND_PREDICTION"];
+    if state.lpr_mode == crate::lpr::LprMode::Disabled {
+        durable_events.push("CAR_DETECTED");
+    }
     let ready = ServerToEdgeMsg::Ready {
         delivery_version: 1,
+        durable_events,
     };
     if let Ok(json) = serde_json::to_string(&ready)
         && !matches!(
@@ -151,11 +156,8 @@ async fn run_edge_socket(
                         tracing::warn!(%event_id, version, "Unsupported edge delivery version");
                         return false;
                     }
-                    let delivery = match crate::edge_delivery::apply(
-                        &state.pool,
-                        principal,
-                        event_id,
-                        payload,
+                    let delivery = match crate::edge_delivery::apply_with_state(
+                        state, principal, event_id, payload,
                     )
                     .await
                     {
