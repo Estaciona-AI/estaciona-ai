@@ -93,11 +93,16 @@ async fn observe(
     match current {
         None => observation.reason = Some("unknown_spot".to_owned()),
         Some((_, false)) => observation.reason = Some("inactive_spot".to_owned()),
-        Some((current, true)) if current == "reserved" && status == "free" => {
-            observation.outcome = Outcome::Ignored;
-            observation.reason = Some("reservation_protected".to_owned());
-        }
-        Some(_) => {
+        Some((current, true)) => {
+            if current == "reserved" && status == "free" {
+                let active: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM reservations WHERE spot_id=$1 AND status='active')")
+                    .bind(spot_id).fetch_one(&mut **tx).await?;
+                if active {
+                    observation.outcome = Outcome::Ignored;
+                    observation.reason = Some("reservation_protected".to_owned());
+                    return Ok(observation);
+                }
+            }
             sqlx::query("UPDATE spots SET status = $2, last_updated = NOW() WHERE id = $1")
                 .bind(spot_id)
                 .bind(status)
@@ -786,6 +791,9 @@ mod tests {
     ) -> TestResult {
         let principal = principal(&pool).await?;
         let spot_id = authorized_spot(&pool, &principal, "reserved").await?;
+        let owner = user(&pool).await?;
+        sqlx::query("INSERT INTO reservations (id,user_id,spot_id,status,expires_at) VALUES ($1,$2,$3,'active',NOW()+INTERVAL '15 minutes')")
+            .bind(Uuid::new_v4()).bind(owner).bind(&spot_id).execute(&pool).await?;
         let history_id = history(&pool, &spot_id).await?;
         let mut low_confidence = payload(&spot_id, "occupied");
         low_confidence["confidence"] = json!(0.19);
@@ -1493,6 +1501,15 @@ mod tests {
         assert_eq!(legacy.reason.as_deref(), Some("inactive_spot"));
         assert!(legacy.spot_update.is_none());
         assert_eq!(status(&pool, &spot_id).await?, "occupied");
+        Ok(())
+    }
+    #[sqlx::test(migrations = "./migrations")]
+    async fn free_observation_releases_orphaned_reserved_spot(pool: PgPool) -> TestResult {
+        let principal = principal(&pool).await?;
+        let spot_id = authorized_spot(&pool, &principal, "reserved").await?;
+        let delivery = apply(&pool, &principal, Uuid::new_v4(), payload(&spot_id, "free")).await?;
+        assert_eq!(delivery.ack.outcome, Outcome::Applied);
+        assert_eq!(status(&pool, &spot_id).await?, "free");
         Ok(())
     }
 }

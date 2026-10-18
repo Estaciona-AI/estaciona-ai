@@ -270,75 +270,31 @@ pub async fn confirm_occupancy(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    require_reservation_owner(&state, &headers, id).await?;
-    let mut tx = state.pool.begin().await.map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Database error".to_string(),
-        )
-    })?;
-    let reservation = sqlx::query!(
-        "UPDATE reservations SET status = 'completed', completed_at = NOW() WHERE id = $1 AND status = 'active' RETURNING user_id, spot_id",
-        id
-    )
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Database error".to_string()))?;
-
-    match reservation {
-        Some(res) => {
-            sqlx::query!(
-                "INSERT INTO user_occupancy_history (user_id, spot_id) VALUES ($1, $2)",
-                res.user_id,
-                res.spot_id
-            )
-            .execute(&mut *tx)
-            .await
-            .map_err(|_| {
+    let user_id =
+        crate::security::authenticated_user(&headers, &state.jwt_secret, &state.pool).await?;
+    reservation_store::confirm(&state.pool, id, user_id)
+        .await
+        .map_err(|error| match error {
+            reservation_store::ConfirmError::NotFound => (
+                StatusCode::NOT_FOUND,
+                "Active reservation not found".to_owned(),
+            ),
+            reservation_store::ConfirmError::NotReady => (
+                StatusCode::CONFLICT,
+                "Reservation must be unexpired and the spot observed occupied".to_owned(),
+            ),
+            reservation_store::ConfirmError::Database(error) => {
+                tracing::error!("Failed to confirm occupancy: {}", error);
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    "Failed to save occupancy".to_string(),
+                    "Database error".to_owned(),
                 )
-            })?;
-
-            sqlx::query!(
-                r#"
-            DELETE FROM user_occupancy_history
-            WHERE id IN (
-                SELECT id FROM user_occupancy_history
-                WHERE user_id = $1
-                ORDER BY occupied_at DESC
-                OFFSET 30
-            )
-            "#,
-                res.user_id
-            )
-            .execute(&mut *tx)
-            .await
-            .map_err(|_| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Failed to prune occupancy history".to_string(),
-                )
-            })?;
-
-            tx.commit().await.map_err(|_| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Database error".to_string(),
-                )
-            })?;
-
-            Ok((
-                StatusCode::OK,
-                "Occupancy confirmed and history saved.".to_string(),
-            ))
-        }
-        None => Err((
-            StatusCode::NOT_FOUND,
-            "Active reservation not found".to_string(),
-        )),
-    }
+            }
+        })?;
+    Ok((
+        StatusCode::OK,
+        "Occupancy confirmed and history saved.".to_owned(),
+    ))
 }
 
 pub async fn extend_reservation(
