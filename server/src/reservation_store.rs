@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Guilherme Pedroza
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::reservation_policy::ReservationPolicy;
 use chrono::{DateTime, Utc};
 use sqlx::{PgConnection, PgPool};

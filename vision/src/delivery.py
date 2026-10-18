@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Guilherme Pedroza
+# SPDX-License-Identifier: Apache-2.0
+
 """Durable local delivery; gateway persistence is distinct from a cloud ACK."""
 
 import asyncio

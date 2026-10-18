@@ -1,0 +1,13 @@
+Estaciona AI
+Copyright 2026 Guilherme Pedroza
+
+The first-party source in this revision is licensed under Apache License 2.0.
+
+RT-DETR HGNetv2-L originates from the official lyuwenyu/RT-DETR project
+and PaddlePaddle/PaddleDetection, licensed under Apache License 2.0.
+ONNX Runtime is Copyright Microsoft Corporation, licensed under MIT.
+The licenses for these components are retained in LICENSES/.
+
+Dependencies, operating-system packages, model weights and NVIDIA runtime
+components retain their own licenses. See LICENSING.md. No license or
+endorsement for the project's name or visual identity is granted here.

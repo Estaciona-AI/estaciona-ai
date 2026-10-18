@@ -1,19 +1,5 @@
-# ==============================================================================
-# Copyright (C) 2026 Guilherme Pedroza
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU Affero General Public License as
-# published by the Free Software Foundation, either version 3 of the
-# License, or (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU Affero General Public License for more details.
-#
-# You should have received a copy of the GNU Affero General Public License
-# along with this program.  If not, see <https://www.gnu.org/licenses/>.
-# ==============================================================================
+# SPDX-FileCopyrightText: 2026 Guilherme Pedroza
+# SPDX-License-Identifier: Apache-2.0
 
 import datetime
 
@@ -34,13 +20,12 @@ os.environ["QT_LOGGING_RULES"] = "*=false"
 
 import cv2
 import numpy as np
-from ultralytics import YOLO
-import torch
+from detector import load_detector
 
 WS_URL = os.environ.get("LOCAL_WS_URL", "ws://localhost:8001/ws/edge")
 EDGE_API_KEY = os.environ.get("EDGE_API_KEY")
 
-MODEL_PATH = os.environ.get("VISION_MODEL_PATH", "yolo26x.pt")
+MODEL_PATH = os.environ.get("VISION_MODEL_PATH", "models/rtdetr-hgnetv2-l.onnx")
 VIDEO_PATH = os.environ.get("VISION_STREAM_URL")
 SPOTS_PATH = os.environ.get("VISION_SPOTS_PATH", "data/spots.json")
 CAMERA_ID = os.environ.get("VISION_CAMERA_ID", "cam_01")
@@ -58,13 +43,10 @@ def local_delivery():
     return DELIVERY
 
 
-VEHICLE_CLASSES = [2, 7]
-
 TRIGGER_OCCUPIED_THRESHOLD = 0.35
 STAY_OCCUPIED_THRESHOLD = 0.20
 
 CONF_THRESHOLD = 0.10
-INFERENCE_SIZE = 1312
 BOX_SHRINK_FACTOR = 0.15
 GAMMA_CORRECTION = 1.4
 CLAHE_ENABLED = False
@@ -151,14 +133,8 @@ async def main():
 
     spots = load_spots(spots_path)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"\n[VISION DEVICE] Rodando em: {device.upper()}")
-    if device == "cpu":
-        print(
-            "[AVISO] CUDA nao esta disponivel. O modelo rodara no processador (CPU), o que causara engasgos!"
-        )
-
-    model = YOLO(MODEL_PATH)
+    device = os.environ.get("VISION_DEVICE", "cuda")
+    model = load_detector(MODEL_PATH, device=device)
 
     video_list = []
     if os.path.isdir(VIDEO_PATH):
@@ -237,34 +213,15 @@ async def main():
             frame, gamma=GAMMA_CORRECTION, clahe_enabled=CLAHE_ENABLED
         )
 
-        results = model.predict(
-            inference_frame,
-            classes=VEHICLE_CLASSES,
-            conf=CONF_THRESHOLD,
-            imgsz=INFERENCE_SIZE,
-            device=device,
-            half=(device == "cuda"),
-            verbose=False,
-        )
-
         detections: list[tuple[int, int, int, int]] = []
-        for result in results:
-            if result.boxes is None:
-                continue
-            for box in result.boxes.xyxy:
-                x1, y1, x2, y2 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
-
-                w = x2 - x1
-                h = y2 - y1
-                shrink_w = int(w * BOX_SHRINK_FACTOR)
-                shrink_h = int(h * BOX_SHRINK_FACTOR)
-
-                sx1 = x1 + shrink_w
-                sy1 = y1 + shrink_h
-                sx2 = x2 - shrink_w
-                sy2 = y2 - shrink_h
-
-                detections.append((sx1, sy1, sx2, sy2))
+        for x1, y1, x2, y2 in model.detect(inference_frame, confidence=CONF_THRESHOLD):
+            w = x2 - x1
+            h = y2 - y1
+            shrink_w = int(w * BOX_SHRINK_FACTOR)
+            shrink_h = int(h * BOX_SHRINK_FACTOR)
+            detections.append(
+                (x1 + shrink_w, y1 + shrink_h, x2 - shrink_w, y2 - shrink_h)
+            )
 
         for spot_id, (mask, area) in spot_masks.items():
             ratio = compute_occupancy(mask, area, detections, frame.shape)

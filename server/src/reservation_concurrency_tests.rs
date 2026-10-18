@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Guilherme Pedroza
+// SPDX-License-Identifier: Apache-2.0
+
 use std::{sync::Arc, time::Duration};
 
 use sqlx::{PgPool, postgres::PgPoolOptions};

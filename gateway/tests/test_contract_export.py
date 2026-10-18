@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Guilherme Pedroza
+# SPDX-License-Identifier: Apache-2.0
+
 """The offline contract command must not load credentials or connect to PostgreSQL."""
 
 import json

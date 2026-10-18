@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Guilherme Pedroza
+// SPDX-License-Identifier: Apache-2.0
+
 use sqlx::PgPool;
 
 use crate::site_config::{Coords3D, ParkingLotConfig, PathNode, SiteConfig, Spot3DDef};

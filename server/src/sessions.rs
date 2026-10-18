@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Guilherme Pedroza
+// SPDX-License-Identifier: Apache-2.0
+
 //! Local access-session registry. Identity-provider integration remains separate.
 use axum::{
     extract::State,

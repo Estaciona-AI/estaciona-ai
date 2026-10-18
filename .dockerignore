@@ -28,3 +28,11 @@ target/
 
 # Build/Docker
 infra/data/
+
+# Model artifacts are provisioned separately with their own provenance/license.
+**/models/
+**/*.onnx
+**/*.engine
+**/*.pdparams
+**/*.pdiparams
+**/*.pdmodel

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Guilherme Pedroza
+// SPDX-License-Identifier: Apache-2.0
+
 //! Durable projections of edge observations. PostgreSQL is authoritative;
 //! in-process graph/cache publication follows commit without another await.
 use sqlx::{PgPool, Postgres, Transaction};
