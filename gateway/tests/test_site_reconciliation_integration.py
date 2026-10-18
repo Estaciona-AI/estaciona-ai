@@ -40,10 +40,13 @@ def test_restart_retires_spot_without_deleting_history_or_exposing_it_in_snapsho
     async def run():
         async with (
             websockets.connect(
-                websocket_url(server, "app", owner, signed), close_timeout=0.5
+                websocket_url(server, "app", owner, signed),
+                origin="http://localhost",
+                close_timeout=0.5,
             ) as app,
             websockets.connect(
                 websocket_url(server, "dashboard", admin, admin_token),
+                origin="http://localhost",
                 close_timeout=0.5,
             ) as dashboard,
             edge_connection(server) as edge,
