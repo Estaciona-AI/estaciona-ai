@@ -331,7 +331,6 @@ async fn apply_inner(
 mod tests {
     use std::sync::Arc;
 
-    use chrono::{Duration, Utc};
     use serde_json::json;
     use sha2::{Digest, Sha256};
     use tokio::sync::Barrier;
@@ -578,10 +577,14 @@ mod tests {
         let principal = principal(&pool).await?;
         let spot_id = authorized_spot(&pool, &principal, "free").await?;
         let owner = user(&pool).await?;
-        let reservation =
-            reservation_store::create(&pool, &spot_id, owner, Utc::now() + Duration::minutes(15))
-                .await
-                .expect("fixture reservation must be created");
+        let reservation = reservation_store::create(
+            &pool,
+            &spot_id,
+            owner,
+            &crate::reservation_policy::ReservationPolicy::default(),
+        )
+        .await
+        .expect("fixture reservation must be created");
         let id = Uuid::new_v4();
         let delivery = apply(&pool, &principal, id, payload(&spot_id, "occupied")).await?;
 
@@ -1250,10 +1253,14 @@ mod tests {
         let principal = principal(&pool).await?;
         let spot_id = authorized_spot(&pool, &principal, "free").await?;
         let owner = user(&pool).await?;
-        let reservation =
-            reservation_store::create(&pool, &spot_id, owner, Utc::now() + Duration::minutes(15))
-                .await
-                .expect("fixture reservation must be created");
+        let reservation = reservation_store::create(
+            &pool,
+            &spot_id,
+            owner,
+            &crate::reservation_policy::ReservationPolicy::default(),
+        )
+        .await
+        .expect("fixture reservation must be created");
         let occupied =
             apply_legacy(&pool, &principal, "test-camera", &spot_id, "occupied", 1.0).await?;
         assert_eq!(occupied.outcome, Outcome::Applied);
@@ -1335,7 +1342,7 @@ mod tests {
             &pool,
             &spot_id,
             owner,
-            Utc::now() + chrono::Duration::hours(1),
+            &crate::reservation_policy::ReservationPolicy::default(),
         )
         .await
         .expect("new owner reserves the released spot");
@@ -1429,7 +1436,7 @@ mod tests {
             &mut tx,
             &spot_id,
             owner,
-            Utc::now() + chrono::Duration::hours(1),
+            &crate::reservation_policy::ReservationPolicy::default(),
         )
         .await
         .expect("reservation claims free spot inside transaction");

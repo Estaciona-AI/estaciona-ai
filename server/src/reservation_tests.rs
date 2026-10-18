@@ -54,6 +54,7 @@ impl Fixture {
         let state = Arc::new(AppState {
             lpr_mode: Default::default(),
             pool,
+            reservation_policy: Default::default(),
             auth_limits: Default::default(),
             tx,
             user_sessions: DashMap::new(),
@@ -414,7 +415,7 @@ async fn failed_reservation_insert_rolls_back_the_spot_claim(
         &fixture.state.pool,
         &fixture.spot_id,
         Uuid::new_v4(), // Missing user: a persistence failure, not spot contention.
-        Utc::now() + Duration::minutes(15),
+        &crate::reservation_policy::ReservationPolicy::default(),
     )
     .await;
     assert!(matches!(
@@ -729,3 +730,98 @@ async fn r08_valid_empty_history_still_uses_distance(pool: PgPool) {
     add_preferred_spot(&f, "B-07").await;
     assert_recommended_spot(&f, "R01-01").await;
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn server_ignores_client_expiry_and_uses_its_hold_period(
+    pool: PgPool,
+) -> Result<(), sqlx::Error> {
+    let fixture = Fixture::new(pool).await?;
+    let response = reservations::create_reservation(
+        State(fixture.state.clone()),
+        fixture.headers(fixture.owner, "user").await,
+        Json(CreateReservation {
+            spot_id: fixture.spot_id.clone(),
+            expires_at: chrono::DateTime::parse_from_rfc3339("2100-01-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        }),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::OK);
+    let (created, expires): (chrono::DateTime<Utc>, chrono::DateTime<Utc>) = sqlx::query_as(
+        "SELECT created_at,expires_at FROM reservations WHERE spot_id=$1 AND status='active'",
+    )
+    .bind(&fixture.spot_id)
+    .fetch_one(&fixture.state.pool)
+    .await?;
+    assert!((expires - created).num_seconds() <= 900);
+    assert!((expires - created).num_seconds() >= 899);
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn concurrent_same_user_cannot_reserve_two_distinct_spots(
+    pool: PgPool,
+) -> Result<(), sqlx::Error> {
+    let fixture = Fixture::new(pool).await?;
+    sqlx::query("INSERT INTO spots (id,status,x,y) VALUES ('policy-second','free',0,0)")
+        .execute(&fixture.state.pool)
+        .await?;
+    let first = reservations::create_reservation(
+        State(fixture.state.clone()),
+        fixture.headers(fixture.owner, "user").await,
+        Json(CreateReservation {
+            spot_id: fixture.spot_id.clone(),
+            expires_at: Utc::now() + Duration::minutes(15),
+        }),
+    );
+    let second = reservations::create_reservation(
+        State(fixture.state.clone()),
+        fixture.headers(fixture.owner, "user").await,
+        Json(CreateReservation {
+            spot_id: "policy-second".into(),
+            expires_at: Utc::now() + Duration::minutes(15),
+        }),
+    );
+    let (first, second) = tokio::join!(first, second);
+    let mut statuses = [
+        first.into_response().status().as_u16(),
+        second.into_response().status().as_u16(),
+    ];
+    statuses.sort();
+    assert_eq!(statuses, [200, 409]);
+    let (active,free): (i64,i64) = sqlx::query_as("SELECT (SELECT count(*) FROM reservations WHERE user_id=$1 AND status='active'),(SELECT count(*) FROM spots WHERE id IN ($2,'policy-second') AND status='free')").bind(fixture.owner).bind(&fixture.spot_id).fetch_one(&fixture.state.pool).await?;
+    assert_eq!((active, free), (1, 1));
+    Ok(())
+}
+
+
+#[sqlx::test(migrations = "./migrations")]
+async fn policy_can_allow_two_reservations_without_a_global_user_constraint(
+    pool: PgPool,
+) -> Result<(), sqlx::Error> {
+    let fixture = Fixture::new(pool).await?;
+    sqlx::query("INSERT INTO spots (id,status,x,y) VALUES ('policy-second','free',0,0),('policy-third','free',0,0)").execute(&fixture.state.pool).await?;
+    let policy = crate::reservation_policy::ReservationPolicy {
+        max_active_per_user: 2,
+        ..Default::default()
+    };
+    for spot in [&fixture.spot_id, "policy-second"] {
+        crate::reservation_store::create(&fixture.state.pool, spot, fixture.owner, &policy)
+            .await
+            .expect("policy allows two active reservations");
+    }
+    assert!(matches!(
+        crate::reservation_store::create(
+            &fixture.state.pool,
+            "policy-third",
+            fixture.owner,
+            &policy
+        )
+        .await,
+        Err(crate::reservation_store::CreateError::UserLimit)
+    ));
+    Ok(())
+}
+

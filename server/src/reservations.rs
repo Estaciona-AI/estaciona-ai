@@ -152,19 +152,28 @@ pub async fn create_reservation(
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let user_id =
         crate::security::authenticated_user(&headers, &state.jwt_secret, &state.pool).await?;
-    let record =
-        reservation_store::create(&state.pool, &payload.spot_id, user_id, payload.expires_at)
-            .await
-            .map_err(|error| match error {
-                CreateError::Unavailable => (StatusCode::CONFLICT, "Spot is not free".to_string()),
-                CreateError::Database(error) => {
-                    tracing::error!("Failed to create reservation: {}", error);
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "Database error".to_string(),
-                    )
-                }
-            })?;
+    let _legacy_client_expiry = payload.expires_at;
+    let record = reservation_store::create(
+        &state.pool,
+        &payload.spot_id,
+        user_id,
+        &state.reservation_policy,
+    )
+    .await
+    .map_err(|error| match error {
+        CreateError::UserLimit => (
+            StatusCode::CONFLICT,
+            "Active reservation limit reached".to_string(),
+        ),
+        CreateError::Unavailable => (StatusCode::CONFLICT, "Spot is not free".to_string()),
+        CreateError::Database(error) => {
+            tracing::error!("Failed to create reservation: {}", error);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Database error".to_string(),
+            )
+        }
+    })?;
 
     let update_msg = ServerToAppMsg::SpotUpdate {
         spot_id: payload.spot_id.clone(),

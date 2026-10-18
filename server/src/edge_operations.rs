@@ -51,7 +51,6 @@ mod tests {
     use super::*;
     use crate::reservation_store;
     use crate::{auth_limits::AuthLimits, edge_auth, pathfinding::ParkingGraph, state::AppState};
-    use chrono::{Duration, Utc};
     use dashmap::DashMap;
     use sha2::{Digest, Sha256};
     use sqlx::PgPool;
@@ -124,6 +123,7 @@ mod tests {
         let state = Arc::new(AppState {
             lpr_mode: crate::lpr::LprMode::Enabled,
             pool,
+            reservation_policy: Default::default(),
             auth_limits: AuthLimits::default(),
             tx,
             user_sessions: sessions,
@@ -184,7 +184,7 @@ mod tests {
             &f.state.pool,
             "outside",
             f.user,
-            Utc::now() + Duration::minutes(15),
+            &crate::reservation_policy::ReservationPolicy::default(),
         )
         .await
         .unwrap();
@@ -406,7 +406,7 @@ mod tests {
             &f.state.pool,
             "allowed",
             f.user,
-            Utc::now() + Duration::minutes(15),
+            &crate::reservation_policy::ReservationPolicy::default(),
         )
         .await
         .unwrap();
@@ -519,7 +519,7 @@ mod tests {
                 &f.state.pool,
                 "allowed",
                 f.user,
-                Utc::now() + Duration::minutes(15),
+                &crate::reservation_policy::ReservationPolicy::default(),
             )
             .await
             .unwrap();

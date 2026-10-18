@@ -1,3 +1,4 @@
+use crate::reservation_policy::ReservationPolicy;
 use chrono::{DateTime, Utc};
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
@@ -16,6 +17,7 @@ pub struct Reservation {
 #[derive(Debug)]
 pub enum CreateError {
     Unavailable,
+    UserLimit,
     Database(sqlx::Error),
 }
 
@@ -37,10 +39,10 @@ pub async fn create(
     pool: &PgPool,
     spot_id: &str,
     user_id: Uuid,
-    expires_at: DateTime<Utc>,
+    policy: &ReservationPolicy,
 ) -> Result<Reservation, CreateError> {
     let mut tx = pool.begin().await.map_err(CreateError::Database)?;
-    match create_in_transaction(&mut tx, spot_id, user_id, expires_at).await {
+    match create_in_transaction(&mut tx, spot_id, user_id, policy).await {
         Ok(reservation) => {
             tx.commit().await.map_err(CreateError::Database)?;
             Ok(reservation)
@@ -58,8 +60,29 @@ pub async fn create_in_transaction(
     connection: &mut PgConnection,
     spot_id: &str,
     user_id: Uuid,
-    expires_at: DateTime<Utc>,
+    policy: &ReservationPolicy,
 ) -> Result<Reservation, CreateError> {
+    policy
+        .validate()
+        .map_err(|error| CreateError::Database(sqlx::Error::Protocol(error.to_string())))?;
+    // Quota coordination must not lock the account row: security updates and
+    // session revocation must remain able to cancel a blocked reservation.
+    // Hash collisions only serialize unrelated accounts; they cannot bypass quota.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text,19088743))")
+        .bind(user_id.to_string())
+        .execute(&mut *connection)
+        .await
+        .map_err(CreateError::Database)?;
+    let active: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM reservations WHERE user_id=$1 AND status='active'",
+    )
+    .bind(user_id)
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(CreateError::Database)?;
+    if active >= policy.max_active_per_user {
+        return Err(CreateError::UserLimit);
+    }
     let claimed = sqlx::query(
         "UPDATE spots SET status = 'reserved', last_updated = NOW() \
          WHERE id = $1 AND status = 'free' AND is_active",
@@ -73,13 +96,13 @@ pub async fn create_in_transaction(
     }
     sqlx::query_as::<_, Reservation>(
         "INSERT INTO reservations (id, user_id, spot_id, status, expires_at) \
-         VALUES ($1, $2, $3, 'active', $4) \
+         VALUES ($1, $2, $3, 'active', NOW() + make_interval(secs => $4)) \
          RETURNING id, user_id, spot_id, status, created_at, expires_at, completed_at",
     )
     .bind(Uuid::new_v4())
     .bind(user_id)
     .bind(spot_id)
-    .bind(expires_at)
+    .bind(policy.hold_seconds as f64)
     .fetch_one(&mut *connection)
     .await
     .map_err(|error| {
@@ -176,3 +199,4 @@ pub async fn finish(
         spot_status: changed_status,
     }))
 }
+
