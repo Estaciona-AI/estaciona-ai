@@ -1,0 +1,221 @@
+{
+  "$defs": {
+    "EdgeToServerMsg": {
+      "oneOf": [
+        {
+          "properties": {
+            "camera_id": {
+              "type": "string"
+            },
+            "confidence": {
+              "format": "double",
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            "spot_id": {
+              "type": "string"
+            },
+            "status": {
+              "enum": [
+                "free",
+                "occupied"
+              ],
+              "type": "string"
+            },
+            "timestamp": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "type": {
+              "const": "SPOT_UPDATE",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "spot_id",
+            "status",
+            "camera_id",
+            "confidence",
+            "timestamp"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "camera_id": {
+              "type": "string"
+            },
+            "plate": {
+              "type": "string"
+            },
+            "timestamp": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "type": {
+              "const": "CAR_DETECTED",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "plate",
+            "camera_id",
+            "timestamp"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "from_node": {
+              "type": "string"
+            },
+            "is_active": {
+              "type": "boolean"
+            },
+            "to_node": {
+              "type": "string"
+            },
+            "type": {
+              "const": "PATH_UPDATE",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "from_node",
+            "to_node",
+            "is_active"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "avg_stay_duration_mins": {
+              "format": "double",
+              "type": "number"
+            },
+            "max_capacity": {
+              "format": "int32",
+              "type": "integer"
+            },
+            "model_health": {
+              "$ref": "#/$defs/ModelHealth"
+            },
+            "next_24h_occupancy": {
+              "items": {
+                "$ref": "#/$defs/HourlyOccupancy"
+              },
+              "type": "array"
+            },
+            "stay_duration_distribution": {
+              "items": {
+                "format": "int32",
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "timestamp": {
+              "format": "date-time",
+              "type": "string"
+            },
+            "type": {
+              "const": "TREND_PREDICTION",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "timestamp",
+            "avg_stay_duration_mins",
+            "stay_duration_distribution",
+            "max_capacity",
+            "model_health",
+            "next_24h_occupancy"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "HourlyOccupancy": {
+      "properties": {
+        "occupancy": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "timestamp",
+        "occupancy"
+      ],
+      "type": "object"
+    },
+    "ModelHealth": {
+      "properties": {
+        "inference_time_ms": {
+          "format": "double",
+          "type": "number"
+        },
+        "mae": {
+          "format": "double",
+          "type": "number"
+        },
+        "r2_score": {
+          "format": "double",
+          "type": "number"
+        },
+        "rmse": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "r2_score",
+        "mae",
+        "rmse",
+        "inference_time_ms"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "urn:estaciona-ai:ws:vision-to-gateway:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "properties": {
+        "event_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/EdgeToServerMsg"
+        },
+        "type": {
+          "const": "LOCAL_EVENT",
+          "type": "string"
+        },
+        "version": {
+          "format": "uint8",
+          "maximum": 1,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "type",
+        "version",
+        "event_id",
+        "payload"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "VisionToGateway",
+  "x-contract-version": "1.0.0"
+}

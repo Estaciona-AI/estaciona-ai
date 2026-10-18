@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::edge_auth::{AuthError, Principal};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Outcome {
     Applied,

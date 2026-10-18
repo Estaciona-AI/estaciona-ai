@@ -20,6 +20,7 @@ mod auth_limits;
 #[cfg(test)]
 mod auth_resource_tests;
 mod config_store;
+mod contracts;
 mod edge_auth;
 mod edge_cli;
 mod edge_delivery;
@@ -71,6 +72,18 @@ use crate::ws::messages::ServerToAppMsg;
 async fn main() {
     tracing_subscriber::fmt::init();
 
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).is_some_and(|arg| arg == "--export-contracts") {
+        if args.len() != 3 {
+            eprintln!("Usage: --export-contracts OUTPUT_DIRECTORY");
+            std::process::exit(2);
+        }
+        if let Err(error) = contracts::export(std::path::Path::new(&args[2])) {
+            eprintln!("Contract export failed: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     dotenvy::from_path("../.env").ok();
     let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL missing in .env");
 
@@ -85,7 +98,6 @@ async fn main() {
         .await
         .expect("Failed to run database migrations");
 
-    let args: Vec<String> = std::env::args().collect();
     match edge_cli::dispatch(&pool, &args).await {
         Ok(true) => return,
         Ok(false) => {}

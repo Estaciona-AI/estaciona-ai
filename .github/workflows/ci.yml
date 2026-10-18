@@ -158,3 +158,38 @@ jobs:
 
       - name: Run Pytest
         run: uv run pytest
+
+  contracts-ci:
+    name: Contract compatibility CI
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./shared
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "shared/uv.lock"
+      - name: Lint contract checks
+        run: uv run --locked ruff check . && uv run --locked ruff format --check .
+      - name: Validate generated schemas and Python producers
+        run: uv run --locked pytest --junitxml=test-results/contracts.xml
+      - name: Upload versioned contract bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: estaciona-ai-contracts-v1
+          path: |
+            shared/messages.json
+            shared/v1/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload contract test results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: contract-test-results
+          path: shared/test-results/contracts.xml
+          if-no-files-found: warn
+          retention-days: 7

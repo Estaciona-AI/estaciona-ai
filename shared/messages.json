@@ -1,106 +1,70 @@
 {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "title": "Estaciona AI Protocol",
-    "description": "Schemas para comunicação inter-camadas via WebSocket",
-    "$defs": {
-        "EdgeToServer_SPOT_UPDATE": {
-            "type": "object",
-            "properties": {
-                "type": { "const": "SPOT_UPDATE" },
-                "spot_id": { "type": "string"},
-                "status": { "type": "string", "enum": ["free", "occupied"] },
-                "camera_id": { "type": "string"},
-                "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
-                "timestamp": { "type": "string", "format": "date-time" }
-            },
-            "required": ["type", "spot_id", "status", "camera_id", "confidence", "timestamp"]
-        },
-        "EdgeToServer_CAR_DETECTED": {
-            "type": "object",
-            "properties": {
-                "type": { "const": "CAR_DETECTED" },
-                "plate": { "type": "string" },
-                "camera_id": { "type": "string" },
-                "timestamp": { "type": "string", "format": "date-time" }
-            },
-            "required": ["type", "plate", "camera_id", "timestamp"]
-        },
-        "EdgeToServer_PATH_UPDATE": {
-            "type": "object",
-            "properties": {
-                "type": { "const": "PATH_UPDATE" },
-                "from_node": { "type": "string" },
-                "to_node": { "type": "string" },
-                "is_active": { "type": "boolean" }
-            },
-            "required": ["type", "from_node", "to_node", "is_active"]
-        },
-        "AppToServer_RESERVE_SPOT": {
-            "type": "object",
-            "properties": {
-                "type": { "const": "RESERVE_SPOT" },
-                "spot_id": { "type": "string" },
-                "user_id": { "type": "string", "format": "uuid" },
-                "plate": { "type": "string" }
-            },
-            "required": ["type", "spot_id", "user_id", "plate"]
-        },
-        "AppToServer_CANCEL_RESERVATION": {
-            "type": "object",
-            "properties": {
-                "type": { "const": "CANCEL_RESERVATION" },
-                "reservation_id": { "type": "string", "format": "uuid" }
-            },
-            "required": ["type", "reservation_id"]
-        },
-        "ServerToApp_NAVIGATION_START": {
-            "type": "object",
-            "properties": {
-                "type": { "const": "NAVIGATION_START" },
-                "spot_id": { "type": "string" },
-                "route": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Sequência de IDs dos nós do grafo do estacionamento"
-                } 
-            },
-        "required": ["type", "spot_id", "route"]
-        },
-        "ServerToApp_RESERVATION_CONFIRMED": {
-            "type": "object",
-            "properties": {
-                "type": { "const": "RESERVATION_CONFIRMED" },
-                "reservation_id": { "type": "string", "format": "uuid"},
-                "spot_id": { "type": "string" },
-                "expires_at": { "type": "string", "format": "date-time" }
-            },
-            "required": ["type", "reservation_id", "spot_id", "expires_at"]
-        },
-        "ServerToApp_RESERVATION_EXPIRED": {
-            "type": "object",
-            "properties": {
-                "type": { "const": "RESERVATION_EXPIRED" },
-                "spot_id": { "type": "string" }
-            },
-            "required": ["type", "spot_id"]
-        },
-        "ServerToApp_RESERVATION_REJECTED": {
-            "type": "object",
-            "properties": {
-                "type": { "const": "RESERVATION_REJECTED" },
-                "spot_id": { "type": "string" },
-                "reason": { "type": "string", "enum": ["already_taken", "invalid_spot"] }
-            },
-            "required": ["type", "spot_id", "reason"]
-        },
-        "ServerToApp_SPOT_UPDATE": {
-            "type": "object",
-            "properties": {
-                "type": { "const": "SPOT_UPDATE"},
-                "spot_id": { "type": "string" },
-                "status": { "type": "string", "enum": ["free", "occupied", "reserved"] }
-            },
-            "required": ["type", "spot_id", "status"]
-        }
+  "$defs": {
+    "AppToServer_CANCEL_RESERVATION": {
+      "$ref": "urn:estaciona-ai:ws:app-to-server:v1#/oneOf/1"
+    },
+    "AppToServer_RESERVE_SPOT": {
+      "$ref": "urn:estaciona-ai:ws:app-to-server:v1#/oneOf/0"
+    },
+    "EdgeToServer_CAR_DETECTED": {
+      "$ref": "urn:estaciona-ai:ws:edge-events:v1#/oneOf/1"
+    },
+    "EdgeToServer_PATH_UPDATE": {
+      "$ref": "urn:estaciona-ai:ws:edge-events:v1#/oneOf/2"
+    },
+    "EdgeToServer_SPOT_UPDATE": {
+      "$ref": "urn:estaciona-ai:ws:edge-events:v1#/oneOf/0"
+    },
+    "EdgeToServer_TREND_PREDICTION": {
+      "$ref": "urn:estaciona-ai:ws:edge-events:v1#/oneOf/3"
+    },
+    "ServerToApp_NAVIGATION_START": {
+      "$ref": "urn:estaciona-ai:ws:server-to-app:v1#/oneOf/0"
+    },
+    "ServerToApp_NAVIGATION_UNAVAILABLE": {
+      "$ref": "urn:estaciona-ai:ws:server-to-app:v1#/oneOf/1"
+    },
+    "ServerToApp_RESERVATION_CONFIRMED": {
+      "$ref": "urn:estaciona-ai:ws:server-to-app:v1#/oneOf/2"
+    },
+    "ServerToApp_RESERVATION_EXPIRED": {
+      "$ref": "urn:estaciona-ai:ws:server-to-app:v1#/oneOf/3"
+    },
+    "ServerToApp_RESERVATION_REJECTED": {
+      "$ref": "urn:estaciona-ai:ws:server-to-app:v1#/oneOf/4"
+    },
+    "ServerToApp_SPOT_UPDATE": {
+      "$ref": "urn:estaciona-ai:ws:server-to-app:v1#/oneOf/5"
+    },
+    "ServerToApp_TREND_PREDICTION": {
+      "$ref": "urn:estaciona-ai:ws:server-to-app:v1#/oneOf/6"
     }
+  },
+  "$id": "urn:estaciona-ai:ws:messages:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "$ref": "urn:estaciona-ai:ws:app-to-server:v1"
+    },
+    {
+      "$ref": "urn:estaciona-ai:ws:edge-events:v1"
+    },
+    {
+      "$ref": "urn:estaciona-ai:ws:gateway-to-server:v1"
+    },
+    {
+      "$ref": "urn:estaciona-ai:ws:gateway-to-vision:v1"
+    },
+    {
+      "$ref": "urn:estaciona-ai:ws:server-to-app:v1"
+    },
+    {
+      "$ref": "urn:estaciona-ai:ws:server-to-gateway:v1"
+    },
+    {
+      "$ref": "urn:estaciona-ai:ws:vision-to-gateway:v1"
+    }
+  ],
+  "title": "Estaciona AI websocket contracts",
+  "x-contract-version": "1.0.0"
 }
