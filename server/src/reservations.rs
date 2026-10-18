@@ -29,13 +29,15 @@ use crate::reservation_store::{self, CreateError, FinishReason};
 use crate::state::SharedState;
 use crate::ws::messages::ServerToAppMsg;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 pub struct CreateReservation {
     pub spot_id: String,
-    pub expires_at: DateTime<Utc>,
+    /// Compatibility input only; the server determines the actual expiration.
+    #[serde(default)]
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct ReservationResponse {
     pub id: Uuid,
     pub user_id: Uuid,
@@ -46,8 +48,9 @@ pub struct ReservationResponse {
     pub completed_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 pub struct UpdateSpotStatus {
+    #[schemars(schema_with = "crate::contracts::spot_status_schema")]
     pub status: String,
 }
 
@@ -530,7 +533,10 @@ mod tests {
 
         let parsed: CreateReservation = serde_json::from_str(json_data).unwrap();
         assert_eq!(parsed.spot_id, "A-01");
-        assert_eq!(parsed.expires_at.to_rfc3339(), "2026-10-10T10:00:00+00:00");
+        assert_eq!(
+            parsed.expires_at.unwrap().to_rfc3339(),
+            "2026-10-10T10:00:00+00:00"
+        );
     }
 
     #[test]
@@ -547,6 +553,13 @@ mod tests {
         assert_eq!(
             parsed.user_id,
             uuid::Uuid::parse_str("123e4567-e89b-12d3-a456-426614174000").unwrap()
+        );
+    }
+    #[test]
+    fn rest_reservation_does_not_require_client_expiry() {
+        assert!(
+            serde_json::from_value::<CreateReservation>(serde_json::json!({"spot_id":"A-01"}))
+                .is_ok()
         );
     }
 }
