@@ -22,7 +22,6 @@ pub mod ws_edge;
 pub use ws_edge::ws_edge_handler;
 
 use axum::extract::ws::{Message, WebSocket};
-use chrono::{Duration, Utc};
 use futures_util::{SinkExt, StreamExt};
 
 use crate::reservation_store::{self, CreateError, FinishReason};
@@ -93,44 +92,53 @@ pub(crate) async fn handle_app_socket(socket: WebSocket, state: SharedState, ses
             if let Ok(msg) = serde_json::from_str::<AppToServerMsg>(&text) {
                 session.revalidate(&value.pool).await?;
                 match msg {
-                    AppToServerMsg::ReserveSpot { spot_id, .. } => {
-                        let expires = Utc::now() + Duration::minutes(15);
-                        match reservation_store::create(&value.pool, &spot_id, user_id, expires)
-                            .await
-                        {
-                            Ok(reservation) => {
-                                let confirm = ServerToAppMsg::ReservationConfirmed {
-                                    reservation_id: reservation.id,
-                                    spot_id: spot_id.clone(),
-                                    expires_at: expires,
-                                };
+                    AppToServerMsg::ReserveSpot { spot_id, .. } => match reservation_store::create(
+                        &value.pool,
+                        &spot_id,
+                        user_id,
+                        &value.reservation_policy,
+                    )
+                    .await
+                    {
+                        Ok(reservation) => {
+                            let confirm = ServerToAppMsg::ReservationConfirmed {
+                                reservation_id: reservation.id,
+                                spot_id: spot_id.clone(),
+                                expires_at: reservation
+                                    .expires_at
+                                    .expect("created reservation has expiry"),
+                            };
 
-                                let update = ServerToAppMsg::SpotUpdate {
-                                    spot_id: spot_id.clone(),
-                                    status: "reserved".to_string(),
-                                };
+                            let update = ServerToAppMsg::SpotUpdate {
+                                spot_id: spot_id.clone(),
+                                status: "reserved".to_string(),
+                            };
 
-                                if let Ok(json) = serde_json::to_string(&confirm) {
-                                    let _ = private_tx.try_send(json);
-                                }
-                                if let Ok(json) = serde_json::to_string(&update) {
-                                    let _ = value.tx.send(json);
-                                }
+                            if let Ok(json) = serde_json::to_string(&confirm) {
+                                let _ = private_tx.try_send(json);
                             }
-                            Err(CreateError::Unavailable) => {
-                                let reject = ServerToAppMsg::ReservationRejected {
-                                    spot_id,
-                                    reason: "already_taken".to_string(),
-                                };
-                                if let Ok(json) = serde_json::to_string(&reject) {
-                                    let _ = private_tx.try_send(json);
-                                }
-                            }
-                            Err(CreateError::Database(error)) => {
-                                tracing::error!(%error, %spot_id, "Failed to create WebSocket reservation");
+                            if let Ok(json) = serde_json::to_string(&update) {
+                                let _ = value.tx.send(json);
                             }
                         }
-                    }
+                        Err(error @ (CreateError::Unavailable | CreateError::UserLimit)) => {
+                            let reject = ServerToAppMsg::ReservationRejected {
+                                spot_id,
+                                reason: if matches!(error, CreateError::UserLimit) {
+                                    "active_reservation_limit"
+                                } else {
+                                    "already_taken"
+                                }
+                                .to_string(),
+                            };
+                            if let Ok(json) = serde_json::to_string(&reject) {
+                                let _ = private_tx.try_send(json);
+                            }
+                        }
+                        Err(CreateError::Database(error)) => {
+                            tracing::error!(%error, %spot_id, "Failed to create WebSocket reservation");
+                        }
+                    },
                     AppToServerMsg::CancelReservation { reservation_id } => {
                         match reservation_store::finish(
                             &value.pool,
