@@ -354,3 +354,95 @@ def test_main_startup(monkeypatch):
             assert mock_sync_loop.called
 
     asyncio.run(run())
+
+
+def test_continuous_input_commits_without_waiting_for_idle(tmp_path):
+    async def run():
+        db_path = str(tmp_path / "fallback.db")
+        metrics_path = str(tmp_path / "metrics.db")
+        init_db(db_path)
+        init_metrics_db(metrics_path)
+        ws = AsyncMock()
+        ws.request.headers = {"Authorization": "Bearer secret_key"}
+        sync_event = asyncio.Event()
+        reads = 0
+        paused = asyncio.Event()
+
+        async def recv():
+            nonlocal reads
+            reads += 1
+            if reads > 64:
+                paused.set()
+                await asyncio.Future()
+            return json.dumps({"type": "SPOT_UPDATE", "spot_id": str(reads)})
+
+        ws.recv.side_effect = recv
+        task = asyncio.create_task(
+            handler(ws, db_path, metrics_path, "secret_key", sync_event)
+        )
+        try:
+            await asyncio.wait_for(paused.wait(), 2)
+            assert len(get_unsynced_events(db_path)) == 64
+            assert sync_event.is_set()
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(run())
+
+
+def test_large_frames_flush_before_next_receive(tmp_path):
+    async def run():
+        db_path = str(tmp_path / "fallback.db")
+        metrics_path = str(tmp_path / "metrics.db")
+        init_db(db_path)
+        init_metrics_db(metrics_path)
+        ws = AsyncMock()
+        ws.request.headers = {"Authorization": "Bearer secret_key"}
+        frame = json.dumps({"type": "SPOT_UPDATE", "padding": "x" * (256 * 1024)})
+        reads = 0
+        persisted_before_second_receive = False
+
+        async def recv():
+            nonlocal reads, persisted_before_second_receive
+            reads += 1
+            if reads == 1:
+                return frame
+            if reads == 2:
+                persisted_before_second_receive = len(get_unsynced_events(db_path)) == 1
+            raise RuntimeError("closed")
+
+        ws.recv.side_effect = recv
+        await handler(ws, db_path, metrics_path, "secret_key", asyncio.Event())
+        assert persisted_before_second_receive
+
+    asyncio.run(run())
+
+
+def test_continuous_slow_input_has_a_batch_deadline(tmp_path):
+    async def run():
+        db_path = str(tmp_path / "fallback.db")
+        metrics_path = str(tmp_path / "metrics.db")
+        init_db(db_path)
+        init_metrics_db(metrics_path)
+        ws = AsyncMock()
+        ws.request.headers = {"Authorization": "Bearer secret_key"}
+
+        # A frame every 4 ms never reaches the existing 10 ms idle timeout.
+        async def recv():
+            await asyncio.sleep(0.004)
+            return '{"type":"SPOT_UPDATE","spot_id":"A-01"}'
+
+        ws.recv.side_effect = recv
+        sync_event = asyncio.Event()
+        task = asyncio.create_task(
+            handler(ws, db_path, metrics_path, "secret_key", sync_event)
+        )
+        try:
+            await asyncio.wait_for(sync_event.wait(), 0.20)
+            assert get_unsynced_events(db_path)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(run())

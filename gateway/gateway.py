@@ -29,6 +29,10 @@ from ml.inference import PredictiveEngine
 ACK_TIMEOUT_SECONDS = 5.0
 HANDSHAKE_TIMEOUT_SECONDS = 3.0
 RETRY_DELAY_SECONDS = 5.0
+LOCAL_BATCH_MAX_MESSAGES = 64
+LOCAL_BATCH_FLUSH_BYTES = 256 * 1024
+LOCAL_BATCH_MAX_AGE_SECONDS = 0.05
+LOCAL_BATCH_IDLE_SECONDS = 0.01
 
 
 def init_db(db_path):
@@ -273,12 +277,37 @@ async def handler(websocket, db_path, metrics_path, expected_key, sync_event):
     try:
         while True:
             messages = [await websocket.recv()]
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + LOCAL_BATCH_MAX_AGE_SECONDS
+            batch_bytes = len(
+                messages[0].encode("utf-8")
+                if isinstance(messages[0], str)
+                else messages[0]
+            )
+            disconnected = False
 
-            while True:
+            # A byte threshold can be crossed by the final frame; the websocket's
+            # max_size bounds each frame. Count and age never depend on idle input.
+            while (
+                len(messages) < LOCAL_BATCH_MAX_MESSAGES
+                and batch_bytes < LOCAL_BATCH_FLUSH_BYTES
+            ):
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    break
                 try:
-                    msg = await asyncio.wait_for(websocket.recv(), timeout=0.01)
+                    msg = await asyncio.wait_for(
+                        websocket.recv(),
+                        timeout=min(LOCAL_BATCH_IDLE_SECONDS, remaining),
+                    )
                     messages.append(msg)
-                except asyncio.TimeoutError, Exception:
+                    batch_bytes += len(
+                        msg.encode("utf-8") if isinstance(msg, str) else msg
+                    )
+                except asyncio.TimeoutError:
+                    break
+                except Exception:
+                    disconnected = True
                     break
 
             events_to_insert = []
@@ -354,6 +383,9 @@ async def handler(websocket, db_path, metrics_path, expected_key, sync_event):
                     metrics_to_insert,
                 )
                 metrics_conn.commit()
+
+            if disconnected:
+                break
 
     except Exception as e:
         print(
