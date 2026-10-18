@@ -23,8 +23,9 @@ import sys
 import time
 import asyncio
 import glob
-from collections import deque
-import websockets
+from pathlib import Path
+import hashlib
+from delivery import LocalDelivery, LocalOutbox
 from dotenv import load_dotenv
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "../../.env"))
@@ -43,7 +44,19 @@ MODEL_PATH = os.environ.get("VISION_MODEL_PATH", "yolo26x.pt")
 VIDEO_PATH = os.environ.get("VISION_STREAM_URL")
 SPOTS_PATH = os.environ.get("VISION_SPOTS_PATH", "data/spots.json")
 CAMERA_ID = os.environ.get("VISION_CAMERA_ID", "cam_01")
-PENDING_UPDATES = deque()
+DELIVERY = None
+
+
+def local_delivery():
+    global DELIVERY
+    if DELIVERY is None:
+        camera_key = hashlib.sha256(CAMERA_ID.encode()).hexdigest()[:16]
+        path = os.environ.get(
+            "VISION_OUTBOX_PATH", str(Path("data") / f"vision-outbox-{camera_key}.db")
+        )
+        DELIVERY = LocalDelivery(WS_URL, LocalOutbox(path))
+    return DELIVERY
+
 
 VEHICLE_CLASSES = [2, 7]
 
@@ -117,38 +130,11 @@ def compute_occupancy(
 
 
 async def connect_ws(headers):
-    try:
-        ws = await websockets.connect(
-            WS_URL, additional_headers=headers, open_timeout=3
-        )
-        print(f"[CONN] Conectado ao gateway: {WS_URL}")
-        return ws
-    except Exception as e:
-        print(f"[CONN] Falha ao conectar ao gateway: {e}")
-        raise
+    return await local_delivery().connect(headers)
 
 
 async def safe_send(ws, payload_str, headers):
-    if payload_str is not None:
-        PENDING_UPDATES.append(payload_str)
-    try:
-        if ws is None:
-            ws = await connect_ws(headers)
-        while PENDING_UPDATES:
-            await ws.send(PENDING_UPDATES[0])
-            PENDING_UPDATES.popleft()
-        return ws
-    except Exception:
-        print("[CONN] Conexao perdida, reconectando...")
-        try:
-            ws = await connect_ws(headers)
-            while PENDING_UPDATES:
-                await ws.send(PENDING_UPDATES[0])
-                PENDING_UPDATES.popleft()
-            return ws
-        except Exception as e:
-            print(f"[CONN] Falha ao reenviar ({e})")
-            return None
+    return await local_delivery().send(ws, payload_str, headers)
 
 
 async def main():
@@ -210,7 +196,10 @@ async def main():
     last_sync_time = time.time()
 
     while True:
-        if PENDING_UPDATES and time.monotonic() - last_retry_time >= 5:
+        if (
+            local_delivery().outbox.first() is not None
+            and time.monotonic() - last_retry_time >= 5
+        ):
             last_retry_time = time.monotonic()
             websocket = await safe_send(websocket, None, headers)
 
