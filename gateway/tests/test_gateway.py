@@ -446,3 +446,88 @@ def test_continuous_slow_input_has_a_batch_deadline(tmp_path):
             await asyncio.gather(task, return_exceptions=True)
 
     asyncio.run(run())
+
+
+def test_local_delivery_replay_has_one_persisted_event_and_ack_after_commit(tmp_path):
+    from uuid import uuid4
+
+    async def run():
+        db_path = str(tmp_path / "fallback.db")
+        metrics_path = str(tmp_path / "metrics.db")
+        init_db(db_path)
+        init_metrics_db(metrics_path)
+        event_id = str(uuid4())
+        payload = {"type": "SPOT_UPDATE", "spot_id": "A-01", "status": "free"}
+        frame = json.dumps(
+            {
+                "type": "LOCAL_EVENT",
+                "version": 1,
+                "event_id": event_id,
+                "payload": payload,
+            }
+        )
+        for expected in ["persisted", "duplicate"]:
+            ws = AsyncMock()
+            ws.request.headers = {
+                "Authorization": "Bearer key",
+                "X-Estaciona-Local-Delivery": "1",
+            }
+            ws.recv.side_effect = [frame, RuntimeError("closed")]
+            acks = []
+
+            async def send(text):
+                message = json.loads(text)
+                if message["type"] == "LOCAL_ACK":
+                    # A separate connection must already see the event.
+                    rows = get_unsynced_events(db_path)
+                    assert len(rows) == 1
+                    assert json.loads(rows[0][1])["spot_id"] == "A-01"
+                    acks.append(message)
+
+            ws.send.side_effect = send
+            await handler(ws, db_path, metrics_path, "key", asyncio.Event())
+            assert acks == [
+                {
+                    "type": "LOCAL_ACK",
+                    "version": 1,
+                    "event_id": event_id,
+                    "outcome": expected,
+                }
+            ]
+        with sqlite3.connect(metrics_path) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM metrics").fetchone()[0] == 1
+
+    asyncio.run(run())
+
+
+def test_local_uuid_conflict_cannot_replace_persisted_payload(tmp_path):
+    from uuid import uuid4
+
+    async def run():
+        db, metrics = str(tmp_path / "fallback.db"), str(tmp_path / "metrics.db")
+        init_db(db)
+        init_metrics_db(metrics)
+        event_id = str(uuid4())
+        for status in ["free", "occupied"]:
+            ws = AsyncMock()
+            ws.request.headers = {
+                "Authorization": "Bearer key",
+                "X-Estaciona-Local-Delivery": "1",
+            }
+            ws.recv.side_effect = [
+                json.dumps(
+                    {
+                        "type": "LOCAL_EVENT",
+                        "version": 1,
+                        "event_id": event_id,
+                        "payload": {"type": "SPOT_UPDATE", "status": status},
+                    }
+                ),
+                OSError("closed"),
+            ]
+            await handler(ws, db, metrics, "key", asyncio.Event())
+            ack = json.loads(ws.send.call_args.args[0])
+            assert ack["outcome"] == ("persisted" if status == "free" else "rejected")
+        assert json.loads(get_unsynced_events(db)[0][1])["status"] == "free"
+
+    asyncio.run(run())
