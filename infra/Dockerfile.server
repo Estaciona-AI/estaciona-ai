@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Guilherme Pedroza
+# SPDX-License-Identifier: Apache-2.0
+
 ### BUILDER ###
 
 FROM rust:1.95.0-slim AS builder
@@ -28,6 +31,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 COPY --from=builder /build/server/target/release/estaciona-ai-rust-server ./server
+
+COPY LICENSE NOTICE LICENSING.md /usr/share/licenses/estaciona-ai/
+COPY LICENSES/ /usr/share/licenses/estaciona-ai/third-party/
 
 ENV RUST_LOG=info
 EXPOSE 8000

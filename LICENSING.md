@@ -86,7 +86,9 @@ não é uma dependência deste runtime; os engines antigos permanecem fora dele.
 As cópias em LICENSES/ cobrem os componentes diretamente integrados nesta troca;
 não são um inventário jurídico exaustivo do sistema operacional ou dos wheels.
 Ao distribuir binários/container, mantenha também as licenças e avisos completos
-presentes nos pacotes efetivamente enviados. O gate `scripts/check_licenses.py`
+presentes nos pacotes efetivamente enviados. A imagem do servidor inclui os
+arquivos de licença do projeto em `/usr/share/licenses/estaciona-ai/`; os
+modelos locais são excluídos do contexto Docker e provisionados separadamente. O gate `scripts/check_licenses.py`
 verifica consistência dos metadados/headers e bloqueia a reintrodução dos pacotes
 Ultralytics no lock da visão; não certifica licenças transitivas ou modelos
 customizados. Marcas e identidade visual não são concedidas pela Apache-2.0.
