@@ -73,6 +73,13 @@ async fn main() {
         }
         return;
     }
+    let installation_request = match installation::cli::parse(&args) {
+        Ok(request) => request,
+        Err(usage) => {
+            eprintln!("{usage}");
+            std::process::exit(2);
+        }
+    };
     let admin_request = match admin_cli::parse(&args) {
         Ok(request) => request,
         Err(usage) => {
@@ -81,6 +88,9 @@ async fn main() {
         }
     };
     dotenvy::from_path("../.env").ok();
+    if let Some(command) = installation_request {
+        std::process::exit(installation::cli::run(command).await);
+    }
     let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL missing in .env");
 
     let pool = PgPoolOptions::new()

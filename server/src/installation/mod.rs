@@ -19,3 +19,8 @@ pub mod store;
 
 #[cfg(test)]
 mod store_tests;
+
+#[cfg(test)]
+mod cli_tests;
+
+pub mod cli;

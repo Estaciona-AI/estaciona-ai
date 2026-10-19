@@ -51,6 +51,7 @@ pub enum StoreError {
     Database(sqlx::Error),
     Timeout,
     MissingSchema,
+    Migration,
     IdentityMismatch,
     ExistingData,
     DatabaseConfirmationMismatch,
@@ -62,6 +63,7 @@ impl fmt::Display for StoreError {
         f.write_str(match self {
             Self::Database(_) => "Installation binding storage unavailable",
             Self::Timeout => "Installation binding operation timed out",
+            Self::Migration => "Installation database migrations failed",
             Self::MissingSchema => "Installation binding migration required",
             Self::IdentityMismatch => "Database belongs to a different installation identity",
             Self::ExistingData => "Database contains application data; explicit adoption required",
@@ -243,4 +245,62 @@ pub async fn bind(
     })
     .await
     .map_err(|_| StoreError::Timeout)?
+}
+
+/// Conservative inspection before migrations, including supported historical tables.
+/// Maintenance mode is required: this does not coordinate with arbitrary legacy DDL.
+pub async fn preflight(
+    pool: &PgPool,
+    identity: &InstallationIdentity,
+    mode: &BindMode,
+) -> Result<(), StoreError> {
+    timeout(OPERATION_TIMEOUT, async {
+        let mut tx = begin(pool).await?;
+        sqlx::query("SET TRANSACTION READ ONLY").execute(&mut *tx).await?;
+        if let BindMode::AdoptExisting { confirmed_database } = mode {
+            let actual: String = sqlx::query_scalar("SELECT current_database()::text")
+                .fetch_one(&mut *tx).await?;
+            if actual != *confirmed_database {
+                return Err(StoreError::DatabaseConfirmationMismatch);
+            }
+        }
+        let bound = if schema_exists(&mut tx).await? {
+            status(&mut tx, identity).await?
+        } else {
+            BindingStatus::Unbound
+        };
+        if bound == BindingStatus::Mismatch {
+            return Err(StoreError::IdentityMismatch);
+        }
+        let tables: Vec<(String, String)> = sqlx::query_as(
+            "SELECT n.nspname::text,c.relname::text FROM pg_catalog.pg_class c
+             JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+             WHERE n.nspname NOT IN ('pg_catalog','information_schema')
+             AND n.nspname !~ '^pg_' AND c.relkind IN ('r','p','f','m')",
+        ).fetch_all(&mut *tx).await?;
+        for (schema, name) in tables {
+            if schema != "public" { return Err(StoreError::UnsupportedSchema); }
+            if matches!(name.as_str(), "_sqlx_migrations" | "installation_binding") { continue; }
+            // Only these audited literals can become SQL identifiers.
+            let table = BUSINESS_TABLES.iter().copied().chain(["dashboard_admins"])
+                .find(|candidate| *candidate == name).ok_or(StoreError::UnsupportedSchema)?;
+            let mut query = sqlx::QueryBuilder::<Postgres>::new("SELECT EXISTS(SELECT 1 FROM public.");
+            query.push(table).push(")");
+            let populated: bool = query.build_query_scalar().fetch_one(&mut *tx).await?;
+            if !populated { continue; }
+            if matches!(mode, BindMode::EmptyDatabase) && bound == BindingStatus::Unbound {
+                return Err(StoreError::ExistingData);
+            }
+            // Historical destructive migrations need separate operator reconciliation.
+            if table == "dashboard_admins" { return Err(StoreError::UnsupportedSchema); }
+            if table == "ws_tickets" {
+                let has_session: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_attribute WHERE attrelid='public.ws_tickets'::regclass AND attname='session_id' AND NOT attisdropped)",
+                ).fetch_one(&mut *tx).await?;
+                if !has_session { return Err(StoreError::UnsupportedSchema); }
+            }
+        }
+        tx.rollback().await?;
+        Ok(())
+    }).await.map_err(|_| StoreError::Timeout)?
 }

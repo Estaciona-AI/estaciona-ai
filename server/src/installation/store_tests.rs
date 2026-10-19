@@ -7,7 +7,7 @@ use sqlx::PgPool;
 use std::fs;
 use uuid::Uuid;
 
-fn identity(site: u128, environment: &str) -> InstallationIdentity {
+pub(super) fn identity(site: u128, environment: &str) -> InstallationIdentity {
     // Synthetic coordinates only; file names are unrelated to ownership IDs.
     let path =
         std::env::temp_dir().join(format!("estaciona-binding-fixture-{}.json", Uuid::new_v4()));
