@@ -474,6 +474,7 @@ async def sync_loop(db_path, metrics_path, cloud_url, api_key, sync_event):
                         raise ValueError("Invalid durable event capabilities")
                     print("[INFO] CLOUD_CONNECTED delivery_version=1", flush=True)
 
+                deferred = False
                 for _, event_uuid, message_text in events:
                     try:
                         payload = json.loads(message_text)
@@ -520,9 +521,12 @@ async def sync_loop(db_path, metrics_path, cloud_url, api_key, sync_event):
                     else:
                         # Never turn a transport send into a claim of persistence.
                         # Keep the UUID and payload intact until a capable server is available.
-                        raise ValueError(
-                            "Server does not support durable delivery for event type"
-                        )
+                        deferred = True
+                if deferred:
+                    # Renegotiate after backoff; unsupported rows retain their UUID.
+                    await cloud_conn.close()
+                    cloud_conn = None
+                    await asyncio.sleep(RETRY_DELAY_SECONDS)
             except asyncio.CancelledError:
                 raise
             except Exception as error:
