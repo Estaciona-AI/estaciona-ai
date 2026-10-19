@@ -187,7 +187,10 @@ async def main():
             last_retry_time = time.monotonic()
             websocket = await safe_send(websocket, None, headers)
 
-        if time.time() - last_sync_time >= 30:
+        if (
+            time.time() - last_sync_time >= 30
+            and local_delivery().outbox.first() is None
+        ):
             last_sync_time = time.time()
             print("[VISION] Resyncing all spots state to gateway (30s heartbeat)")
             for spot_id, state in debounce_map.items():

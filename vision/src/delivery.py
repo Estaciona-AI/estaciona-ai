@@ -98,7 +98,25 @@ class LocalDelivery:
 
     async def send(self, ws, payload_text, headers):
         if payload_text is not None:
-            self.outbox.enqueue(payload_text)
+            # Oversized individual frames cannot be fixed by draining the queue.
+            size = len(
+                json.dumps(json.loads(payload_text), separators=(",", ":")).encode(
+                    "utf-8"
+                )
+            )
+            if size > min(512 * 1024, self.outbox.max_bytes):
+                raise BufferError("Local delivery payload exceeds outbox byte budget")
+            while True:
+                try:
+                    self.outbox.enqueue(payload_text)
+                    break
+                except BufferError:
+                    print(
+                        "[CONN] Vision paused: outbox full; draining before accepting transition"
+                    )
+                    ws = await self.send(ws, None, headers)
+                    if self.outbox.first() is not None:
+                        await asyncio.sleep(1)
         for attempt in range(2):
             try:
                 if ws is None:
