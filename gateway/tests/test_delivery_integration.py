@@ -273,7 +273,7 @@ async def receive_ready(connection):
     ready = json.loads(await asyncio.wait_for(connection.recv(), timeout=3))
     assert ready["type"] == "EDGE_READY"
     assert ready["delivery_version"] == 1
-    active = ["SPOT_UPDATE", "PATH_UPDATE", "TREND_PREDICTION"]
+    active = ["SPOT_UPDATE", "PATH_UPDATE", "TREND_PREDICTION", "TREND_PREDICTION_V2"]
     assert ready["durable_events"] in (active, [*active, "CAR_DETECTED"])
 
 
@@ -420,7 +420,9 @@ def test_unauthorized_edge_has_no_protocol_or_receipt(server):
     assert server.query("SELECT COUNT(*) FROM edge_event_receipts") == [(0,)]
 
 
-@pytest.mark.parametrize("kind", ["PATH_UPDATE", "TREND_PREDICTION"])
+@pytest.mark.parametrize(
+    "kind", ["PATH_UPDATE", "TREND_PREDICTION", "TREND_PREDICTION_V2"]
+)
 def test_durable_projection_ack_survives_real_server_restart(server, kind):
     server.query(
         "UPDATE edge_gateways SET path_update=TRUE,trend_prediction=TRUE WHERE id=%s",
@@ -451,6 +453,19 @@ def test_durable_projection_ack_survives_real_server_restart(server, kind):
             ],
         }
     )
+    if kind == "TREND_PREDICTION_V2":
+        payload = {
+            "type": kind,
+            "timestamp": payload["timestamp"],
+            "max_capacity": 400,
+            "evaluation": {
+                "status": "unavailable",
+                "reason": "evaluation_failed",
+                "inference_time_ms": 10.0,
+            },
+            "stay_duration": {"status": "unavailable", "reason": "not_measured"},
+            "next_24h_occupancy": payload["next_24h_occupancy"],
+        }
     frame = {
         "type": "EDGE_EVENT",
         "version": 1,
@@ -478,7 +493,7 @@ def test_durable_projection_ack_survives_real_server_restart(server, kind):
         "SELECT COUNT(*) FROM edge_event_receipts WHERE event_id=%s",
         (frame["event_id"],),
     ) == [(1,)]
-    if kind == "TREND_PREDICTION":
+    if kind.startswith("TREND_PREDICTION"):
         from test_ws_tickets_integration import http, issue, ws_url
 
         email = f"{uuid4()}@example.invalid"
@@ -502,8 +517,8 @@ def test_durable_projection_ack_survives_real_server_restart(server, kind):
                     message = json.loads(
                         await asyncio.wait_for(dashboard.recv(), timeout=3)
                     )
-                    if message.get("type") == "TREND_PREDICTION":
-                        assert message["max_capacity"] == 400
+                    if message.get("type") == kind:
+                        assert message == payload
                         return
                 pytest.fail("restored forecast was not delivered to the dashboard")
 

@@ -772,11 +772,27 @@ def trend_prediction():
     }
 
 
-def test_trend_requires_explicit_permission_to_broadcast_and_cache(server):
+@pytest.mark.parametrize("version", [1, 2])
+def test_trend_requires_explicit_permission_to_broadcast_and_cache(server, version):
     user_id = insert_user(server, "admin")
     signed_token = token(server, user_id, "admin", int(time.time()) + 60)
     dashboard_url = websocket_url(server, "dashboard", user_id, signed_token)
     prediction = trend_prediction()
+    if version == 2:
+        prediction = {
+            "type": "TREND_PREDICTION_V2",
+            "timestamp": prediction["timestamp"],
+            "max_capacity": 1,
+            "next_24h_occupancy": prediction["next_24h_occupancy"],
+            "evaluation": {
+                "status": "partial",
+                "reason": "constant_target",
+                "mae": 0.0,
+                "rmse": 0.0,
+                "inference_time_ms": 3.0,
+            },
+            "stay_duration": {"status": "unavailable", "reason": "not_measured"},
+        }
 
     async def run():
         async with edge_connection(server) as edge:

@@ -58,6 +58,55 @@
       ],
       "timestamp": "2026-10-01T12:00:00Z",
       "type": "TREND_PREDICTION"
+    },
+    {
+      "evaluation": {
+        "inference_time_ms": 1.0,
+        "mae": 2.0,
+        "r2_score": -0.5,
+        "rmse": 3.0,
+        "status": "available"
+      },
+      "max_capacity": 400,
+      "next_24h_occupancy": [],
+      "stay_duration": {
+        "reason": "not_measured",
+        "status": "unavailable"
+      },
+      "timestamp": "2026-10-01T12:00:00Z",
+      "type": "TREND_PREDICTION_V2"
+    },
+    {
+      "evaluation": {
+        "inference_time_ms": 1.0,
+        "mae": 0.0,
+        "reason": "constant_target",
+        "rmse": 0.0,
+        "status": "partial"
+      },
+      "max_capacity": 400,
+      "next_24h_occupancy": [],
+      "stay_duration": {
+        "reason": "not_measured",
+        "status": "unavailable"
+      },
+      "timestamp": "2026-10-01T12:00:00Z",
+      "type": "TREND_PREDICTION_V2"
+    },
+    {
+      "evaluation": {
+        "inference_time_ms": 1.0,
+        "reason": "evaluation_failed",
+        "status": "unavailable"
+      },
+      "max_capacity": 400,
+      "next_24h_occupancy": [],
+      "stay_duration": {
+        "reason": "not_measured",
+        "status": "unavailable"
+      },
+      "timestamp": "2026-10-01T12:00:00Z",
+      "type": "TREND_PREDICTION_V2"
     }
   ],
   "gateway-to-server": [
@@ -155,6 +204,55 @@
       ],
       "timestamp": "2026-10-01T12:00:00Z",
       "type": "TREND_PREDICTION"
+    },
+    {
+      "evaluation": {
+        "inference_time_ms": 1.0,
+        "mae": 2.0,
+        "r2_score": -0.5,
+        "rmse": 3.0,
+        "status": "available"
+      },
+      "max_capacity": 400,
+      "next_24h_occupancy": [],
+      "stay_duration": {
+        "reason": "not_measured",
+        "status": "unavailable"
+      },
+      "timestamp": "2026-10-01T12:00:00Z",
+      "type": "TREND_PREDICTION_V2"
+    },
+    {
+      "evaluation": {
+        "inference_time_ms": 1.0,
+        "mae": 0.0,
+        "reason": "constant_target",
+        "rmse": 0.0,
+        "status": "partial"
+      },
+      "max_capacity": 400,
+      "next_24h_occupancy": [],
+      "stay_duration": {
+        "reason": "not_measured",
+        "status": "unavailable"
+      },
+      "timestamp": "2026-10-01T12:00:00Z",
+      "type": "TREND_PREDICTION_V2"
+    },
+    {
+      "evaluation": {
+        "inference_time_ms": 1.0,
+        "reason": "evaluation_failed",
+        "status": "unavailable"
+      },
+      "max_capacity": 400,
+      "next_24h_occupancy": [],
+      "stay_duration": {
+        "reason": "not_measured",
+        "status": "unavailable"
+      },
+      "timestamp": "2026-10-01T12:00:00Z",
+      "type": "TREND_PREDICTION_V2"
     }
   ],
   "server-to-gateway": [
@@ -164,6 +262,7 @@
         "SPOT_UPDATE",
         "PATH_UPDATE",
         "TREND_PREDICTION",
+        "TREND_PREDICTION_V2",
         "CAR_DETECTED"
       ],
       "type": "EDGE_READY"

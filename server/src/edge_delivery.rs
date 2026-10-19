@@ -314,7 +314,8 @@ async fn apply_inner(
         }
         Some(
             message @ (crate::ws::messages::EdgeToServerMsg::PathUpdate { .. }
-            | crate::ws::messages::EdgeToServerMsg::TrendPrediction { .. }),
+            | crate::ws::messages::EdgeToServerMsg::TrendPrediction { .. }
+            | crate::ws::messages::EdgeToServerMsg::TrendPredictionV2(_)),
         ) if state.is_some() => {
             let effect = crate::edge_state::prepare(
                 &mut tx,

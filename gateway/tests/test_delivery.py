@@ -68,6 +68,7 @@ class Cloud:
                         "SPOT_UPDATE",
                         "PATH_UPDATE",
                         "TREND_PREDICTION",
+                        "TREND_PREDICTION_V2",
                         "CAR_DETECTED",
                     ],
                 }
@@ -347,7 +348,9 @@ def test_failure_after_metrics_commit_keeps_outbox_replayable(tmp_path):
         ).fetchone() == (1, "applied")
 
 
-@pytest.mark.parametrize("kind", ["PATH_UPDATE", "TREND_PREDICTION", "CAR_DETECTED"])
+@pytest.mark.parametrize(
+    "kind", ["PATH_UPDATE", "TREND_PREDICTION", "TREND_PREDICTION_V2", "CAR_DETECTED"]
+)
 def test_remaining_events_require_durable_ack(tmp_path, kind):
     db, metrics = setup(tmp_path)
     event_id = enqueue(db, metrics, {"type": kind})
@@ -359,9 +362,10 @@ def test_remaining_events_require_durable_ack(tmp_path, kind):
         assert conn.execute("SELECT cloud_ack FROM metrics").fetchone()[0] == 1
 
 
-def test_old_server_keeps_unsupported_event_pending(tmp_path):
+@pytest.mark.parametrize("kind", ["PATH_UPDATE", "TREND_PREDICTION_V2"])
+def test_old_server_keeps_unsupported_event_pending(tmp_path, kind):
     db, metrics = setup(tmp_path)
-    event_id = enqueue(db, metrics, {"type": "PATH_UPDATE"})
+    event_id = enqueue(db, metrics, {"type": kind})
     cloud = Cloud(durable_events=["SPOT_UPDATE"])
     asyncio.run(sync(db, metrics, cloud, cloud.closed.is_set))
     assert gateway.pending_deliveries(db)[0][1] == event_id

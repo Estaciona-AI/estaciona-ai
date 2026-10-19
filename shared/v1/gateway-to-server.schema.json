@@ -136,8 +136,149 @@
             "next_24h_occupancy"
           ],
           "type": "object"
+        },
+        {
+          "$ref": "#/$defs/ForecastV2",
+          "properties": {
+            "type": {
+              "const": "TREND_PREDICTION_V2",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
         }
       ]
+    },
+    "EvaluationFailure": {
+      "enum": [
+        "invalid_evaluation_window",
+        "non_finite_values",
+        "evaluation_failed"
+      ],
+      "type": "string"
+    },
+    "ForecastEvaluation": {
+      "oneOf": [
+        {
+          "properties": {
+            "inference_time_ms": {
+              "format": "double",
+              "type": "number"
+            },
+            "mae": {
+              "format": "double",
+              "type": "number"
+            },
+            "r2_score": {
+              "format": "double",
+              "type": "number"
+            },
+            "rmse": {
+              "format": "double",
+              "type": "number"
+            },
+            "status": {
+              "const": "available",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "r2_score",
+            "mae",
+            "rmse",
+            "inference_time_ms"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "inference_time_ms": {
+              "format": "double",
+              "type": "number"
+            },
+            "mae": {
+              "format": "double",
+              "type": "number"
+            },
+            "reason": {
+              "$ref": "#/$defs/PartialEvaluationReason"
+            },
+            "rmse": {
+              "format": "double",
+              "type": "number"
+            },
+            "status": {
+              "const": "partial",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "reason",
+            "mae",
+            "rmse",
+            "inference_time_ms"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "inference_time_ms": {
+              "format": "double",
+              "type": "number"
+            },
+            "reason": {
+              "$ref": "#/$defs/EvaluationFailure"
+            },
+            "status": {
+              "const": "unavailable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "reason",
+            "inference_time_ms"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ForecastV2": {
+      "properties": {
+        "evaluation": {
+          "$ref": "#/$defs/ForecastEvaluation"
+        },
+        "max_capacity": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "next_24h_occupancy": {
+          "items": {
+            "$ref": "#/$defs/HourlyOccupancy"
+          },
+          "type": "array"
+        },
+        "stay_duration": {
+          "$ref": "#/$defs/StayDuration"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "timestamp",
+        "max_capacity",
+        "evaluation",
+        "stay_duration",
+        "next_24h_occupancy"
+      ],
+      "type": "object"
     },
     "HourlyOccupancy": {
       "properties": {
@@ -182,6 +323,38 @@
         "inference_time_ms"
       ],
       "type": "object"
+    },
+    "PartialEvaluationReason": {
+      "enum": [
+        "constant_target"
+      ],
+      "type": "string"
+    },
+    "StayDuration": {
+      "oneOf": [
+        {
+          "properties": {
+            "reason": {
+              "$ref": "#/$defs/StayDurationReason"
+            },
+            "status": {
+              "const": "unavailable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "StayDurationReason": {
+      "enum": [
+        "not_measured"
+      ],
+      "type": "string"
     }
   },
   "$id": "urn:estaciona-ai:ws:gateway-to-server:v1",
@@ -217,5 +390,5 @@
     }
   ],
   "title": "EdgeTransportMsg",
-  "x-contract-version": "1.1.0"
+  "x-contract-version": "1.2.0"
 }
