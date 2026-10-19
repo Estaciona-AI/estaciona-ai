@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+import logging
 import pandas as pd
 import numpy as np
 import torch
@@ -13,6 +14,34 @@ from dotenv import load_dotenv
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "../../.env"))
+
+
+def evaluate_forecast(actual, predicted, inference_time_ms):
+    timing = {"inference_time_ms": float(inference_time_ms)}
+    unavailable = {"status": "unavailable", **timing}
+    try:
+        actual = np.asarray(actual, dtype=np.float64)
+        predicted = np.asarray(predicted, dtype=np.float64)
+        if actual.shape != (24,) or predicted.shape != (24,):
+            return {**unavailable, "reason": "invalid_evaluation_window"}
+        if not np.isfinite(actual).all() or not np.isfinite(predicted).all():
+            return {**unavailable, "reason": "non_finite_values"}
+        mae = float(mean_absolute_error(actual, predicted))
+        rmse = float(np.sqrt(mean_squared_error(actual, predicted)))
+        if not np.isfinite([mae, rmse]).all():
+            return {**unavailable, "reason": "non_finite_values"}
+        metrics = {"mae": mae, "rmse": rmse, **timing}
+        if np.ptp(actual) == 0:
+            return {"status": "partial", "reason": "constant_target", **metrics}
+        r2 = float(r2_score(actual, predicted, force_finite=False))
+        if not np.isfinite(r2):
+            return {**unavailable, "reason": "non_finite_values"}
+        return {"status": "available", "r2_score": r2, **metrics}
+    except Exception as error:
+        logging.getLogger(__name__).warning(
+            "Forecast evaluation unavailable: %s", type(error).__name__
+        )
+        return {**unavailable, "reason": "evaluation_failed"}
 
 
 class TemporalAttentionForecast(nn.Module):
@@ -102,6 +131,8 @@ class PredictiveEngine:
         history_counts = self.get_history(192)
 
         # 1. Predict next 24h using the last 168h
+        if not np.isfinite(self.max_val) or self.max_val <= 0:
+            raise ValueError("Forecast normalization must be finite and positive")
         recent_168 = history_counts[-168:]
         data_norm = np.array(recent_168, dtype=np.float32) / self.max_val
         tensor_in = torch.tensor(data_norm).unsqueeze(0).unsqueeze(-1)
@@ -111,6 +142,8 @@ class PredictiveEngine:
             preds_norm = self.transformer(tensor_in).squeeze().numpy()
         inference_time_ms = (time.perf_counter() - t_start) * 1000
 
+        if np.shape(preds_norm) != (24,) or not np.isfinite(preds_norm).all():
+            raise ValueError("Forecast inference returned invalid values")
         preds_real = (
             (preds_norm * self.max_val).clip(min=0, max=capacity).astype(int).tolist()
         )
@@ -136,27 +169,13 @@ class PredictiveEngine:
 
         eval_preds_real = (eval_preds_norm * self.max_val).clip(min=0)
 
-        try:
-            r2 = r2_score(actual_24, eval_preds_real)
-            mae = mean_absolute_error(actual_24, eval_preds_real)
-            rmse = np.sqrt(mean_squared_error(actual_24, eval_preds_real))
-            # Fallback if r2 is negative or weird due to flat actuals
-            if r2 < 0 or np.isnan(r2):
-                r2 = 0.0
-        except Exception:
-            r2, mae, rmse = 0.0, 0.0, 0.0
+        evaluation = evaluate_forecast(actual_24, eval_preds_real, inference_time_ms)
 
         payload = {
-            "type": "TREND_PREDICTION",
+            "type": "TREND_PREDICTION_V2",
             "timestamp": now.isoformat(),
-            "avg_stay_duration_mins": 0.0,
-            "stay_duration_distribution": [],
-            "model_health": {
-                "r2_score": float(r2),
-                "mae": float(mae),
-                "rmse": float(rmse),
-                "inference_time_ms": float(inference_time_ms),
-            },
+            "stay_duration": {"status": "unavailable", "reason": "not_measured"},
+            "evaluation": evaluation,
             "next_24h_occupancy": forecast_array,
             "max_capacity": capacity,
         }
