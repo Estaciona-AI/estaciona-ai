@@ -79,3 +79,57 @@ def test_outbox_bounds_aggregate_bytes_and_frame_size(tmp_path):
         LocalOutbox(tmp_path / "large.db").enqueue(
             json.dumps({"padding": "x" * (512 * 1024)})
         )
+
+
+def test_full_outbox_drains_before_accepting_the_next_transition(tmp_path):
+    async def run():
+        outbox = LocalOutbox(tmp_path / "outbox.db", max_events=1)
+        old = outbox.enqueue('{"type":"SPOT_UPDATE","spot_id":"A"}')
+        delivery = LocalDelivery("ws://unused", outbox)
+        ws = AsyncMock()
+
+        async def ack():
+            event = json.loads(ws.send.call_args.args[0])
+            return json.dumps(
+                {
+                    "type": "LOCAL_ACK",
+                    "version": 1,
+                    "event_id": event["event_id"],
+                    "outcome": "persisted",
+                }
+            )
+
+        ws.recv.side_effect = ack
+        assert await delivery.send(ws, '{"type":"SPOT_UPDATE","spot_id":"B"}', {}) is ws
+        events = [json.loads(call.args[0]) for call in ws.send.call_args_list]
+        assert [event["payload"]["spot_id"] for event in events] == ["A", "B"]
+        assert events[0]["event_id"] == old
+        assert outbox.first() is None
+
+    asyncio.run(run())
+
+
+def test_full_offline_outbox_waits_without_dropping_durable_events(tmp_path):
+    async def run():
+        outbox = LocalOutbox(tmp_path / "outbox.db", max_events=1)
+        old = outbox.enqueue('{"type":"SPOT_UPDATE","spot_id":"A"}')
+        delivery = LocalDelivery("ws://unused", outbox)
+        attempted = asyncio.Event()
+
+        async def offline(headers):
+            attempted.set()
+            raise OSError("offline")
+
+        delivery.connect = offline
+        task = asyncio.create_task(
+            delivery.send(None, '{"type":"SPOT_UPDATE","spot_id":"B"}', {})
+        )
+        await asyncio.wait_for(attempted.wait(), 1)
+        assert not task.done()
+        assert outbox.first()["event_id"] == old
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert LocalOutbox(outbox.path).first()["event_id"] == old
+
+    asyncio.run(run())
