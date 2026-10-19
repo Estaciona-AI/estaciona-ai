@@ -120,6 +120,10 @@ async fn observe(
                 observation.reason = Some("stale_observation".to_owned());
                 return Ok(observation);
             }
+            // Keep physical free/occupied separate from reservation protection.
+            // Only accepted, newer observations reach this transactional upsert.
+            sqlx::query("INSERT INTO physical_occupancy_hourly (spot_id,hour_start,status,observed_at) VALUES ($1,date_trunc('hour',$3::timestamptz AT TIME ZONE 'UTC') AT TIME ZONE 'UTC',$2,$3) ON CONFLICT (hour_start,spot_id) DO UPDATE SET status=EXCLUDED.status,observed_at=EXCLUDED.observed_at WHERE physical_occupancy_hourly.observed_at<EXCLUDED.observed_at")
+                .bind(spot_id).bind(status).bind(timestamp).execute(&mut **tx).await?;
             if protected {
                 observation.outcome = Outcome::Ignored;
                 observation.reason = Some("reservation_protected".to_owned());
@@ -491,6 +495,46 @@ mod tests {
             plate_receipt_fingerprint(&payload, b"one"),
             plate_receipt_fingerprint(&json!({"plate":"XYZ9876"}), b"one")
         );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn physical_history_is_independent_of_users_and_coalesces_heartbeats(
+        pool: PgPool,
+    ) -> TestResult {
+        let principal = principal(&pool).await?;
+        let spot = authorized_spot(&pool, &principal, "free").await?;
+        let hour = Utc::now()
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc();
+        for (offset, status) in [(1, "occupied"), (2, "occupied"), (3, "free")] {
+            let mut event = payload(&spot, status);
+            event["timestamp"] = json!(hour + chrono::Duration::seconds(offset));
+            apply(&pool, &principal, Uuid::new_v4(), event).await?;
+        }
+        let rows: Vec<(String,)> =
+            sqlx::query_as("SELECT status FROM physical_occupancy_hourly WHERE spot_id=$1")
+                .bind(&spot)
+                .fetch_all(&pool)
+                .await?;
+        assert_eq!(rows, vec![("free".into(),)]);
+        let personal: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM user_occupancy_history WHERE spot_id=$1")
+                .bind(&spot)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(personal, 0);
+        let mut stale = payload(&spot, "occupied");
+        stale["timestamp"] = json!(hour + chrono::Duration::seconds(1));
+        apply(&pool, &principal, Uuid::new_v4(), stale).await?;
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM physical_occupancy_hourly WHERE spot_id=$1")
+                .bind(&spot)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(status, "free");
+        Ok(())
     }
 
     #[sqlx::test(migrations = "./migrations")]
