@@ -11,3 +11,11 @@ pub use descriptor::{
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod binding_tests;
+
+pub mod store;
+
+#[cfg(test)]
+mod store_tests;
