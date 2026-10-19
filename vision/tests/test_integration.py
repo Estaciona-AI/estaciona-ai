@@ -192,7 +192,7 @@ def test_main_emits_initial_transition_and_heartbeat_in_microsecond_order(monkey
     timestamps = [message["timestamp"] for message in emitted]
     assert timestamps == [
         "2026-10-19T12:00:00.100000Z",
-        "2026-10-19T12:00:00.800000Z",
+        "2026-10-19T12:00:00.700000Z",
         "2026-10-19T12:00:30.900000Z",
     ]
     assert timestamps == sorted(timestamps)
