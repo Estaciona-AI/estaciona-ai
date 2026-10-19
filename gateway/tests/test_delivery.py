@@ -370,3 +370,15 @@ def test_old_server_keeps_unsupported_event_pending(tmp_path, kind):
     asyncio.run(sync(db, metrics, cloud, cloud.closed.is_set))
     assert gateway.pending_deliveries(db)[0][1] == event_id
     assert cloud.frames == []
+
+
+def test_unsupported_backlog_does_not_block_compatible_events(tmp_path):
+    db, metrics = setup(tmp_path)
+    pending = [
+        enqueue(db, metrics, {"type": "TREND_PREDICTION_V2"}) for _ in range(130)
+    ]
+    supported = enqueue(db, metrics, payload())
+    cloud = Cloud(lambda cloud, frame: cloud.ack(frame), durable_events=["SPOT_UPDATE"])
+    asyncio.run(sync(db, metrics, cloud, cloud.closed.is_set))
+    assert [frame["event_id"] for frame in cloud.frames] == [supported]
+    assert [row[1] for row in gateway.pending_deliveries(db)] == pending
