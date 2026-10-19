@@ -169,6 +169,12 @@ def create_sequences(ts_df, seq_len=168, pred_len=24):
 
 def train_forecasting_model():
     ts_df = physical_history(get_db_engine())
+    if not ts_df.empty:
+        # Unknown samples split the timeline; never fill them or join runs.
+        ts_df = ts_df.loc[np.isfinite(ts_df["occupancy"])].sort_values("timestamp")
+    if not ts_df.empty:
+        runs = ts_df["timestamp"].diff().ne(pd.Timedelta(hours=1)).cumsum()
+        ts_df = ts_df.loc[runs == runs.iloc[-1]].reset_index(drop=True)
     if len(ts_df) < 193:
         raise ValueError(
             "At least 193 hours of physical occupancy are required for training"

@@ -258,3 +258,62 @@ def test_training_rejects_unobserved_or_discontinuous_history(kind):
         frame = frame.iloc[:192]
     with pytest.raises(ValueError, match="history"):
         create_sequences(frame)
+
+
+@pytest.mark.parametrize("bad_hour", ["gap", "partial"])
+def test_training_recovers_after_old_incomplete_history(bad_hour):
+    import pandas as pd
+    from ml import train
+
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2026-01-01", periods=500, freq="h", tz="UTC"),
+            "occupancy": [0.0] * 500,
+        }
+    )
+    if bad_hour == "gap":
+        frame = frame.drop(index=40)
+    else:
+        frame.loc[40, "occupancy"] = float("nan")
+    frame = frame.iloc[::-1]  # The consumer must order samples before selecting.
+    original = train.create_sequences
+
+    def stop_before_training(selected, seq_len, pred_len):
+        original(selected, seq_len, pred_len)
+        assert len(selected) == 459
+        assert selected["timestamp"].iloc[0] == pd.Timestamp("2026-01-02T17:00:00Z")
+        assert selected["occupancy"].eq(0).all()
+        raise RuntimeError("valid window reached training")
+
+    with (
+        patch.object(train, "get_db_engine", return_value=None),
+        patch.object(train, "physical_history", return_value=frame),
+        patch.object(train, "create_sequences", side_effect=stop_before_training),
+    ):
+        with pytest.raises(RuntimeError, match="valid window reached training"):
+            train.train_forecasting_model()
+
+
+@pytest.mark.parametrize("kind", ["empty", "partial", "short_latest"])
+def test_training_does_not_fall_back_to_an_older_run_or_fabricate_samples(kind):
+    import pandas as pd
+    from ml import train
+
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2026-01-01", periods=500, freq="h", tz="UTC"),
+            "occupancy": [0.0] * 500,
+        }
+    )
+    if kind == "empty":
+        frame = frame.iloc[:0]
+    elif kind == "partial":
+        frame["occupancy"] = float("nan")
+    else:
+        frame = frame.drop(index=400)  # 99 latest hours; older run has 400.
+    with (
+        patch.object(train, "get_db_engine", return_value=None),
+        patch.object(train, "physical_history", return_value=frame),
+    ):
+        with pytest.raises(ValueError, match="193 hours"):
+            train.train_forecasting_model()
