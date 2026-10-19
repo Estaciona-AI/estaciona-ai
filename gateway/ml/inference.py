@@ -95,12 +95,7 @@ class PredictiveEngine:
         start_time = end_time - timedelta(hours=hours_back)
         frame = physical_history(self.engine, start_time, end_time)
         hours = pd.date_range(start=start_time, periods=hours_back, freq="h", tz="UTC")
-        return (
-            frame.set_index("timestamp")["occupancy"]
-            .reindex(hours, fill_value=0)
-            .astype(int)
-            .tolist()
-        )
+        return frame.set_index("timestamp")["occupancy"].reindex(hours).tolist()
 
     def get_capacity(self):
         with self.engine.connect() as connection:
@@ -120,7 +115,11 @@ class PredictiveEngine:
         # 1. Predict next 24h using the last 168h
         if not np.isfinite(self.max_val) or self.max_val <= 0:
             raise ValueError("Forecast normalization must be finite and positive")
-        recent_168 = history_counts[-168:]
+        recent_168 = np.asarray(history_counts[-168:], dtype=np.float64)
+        if recent_168.shape != (168,) or not np.isfinite(recent_168).all():
+            raise ValueError(
+                "Insufficient observed physical history: 168 complete hours required"
+            )
         data_norm = np.array(recent_168, dtype=np.float32) / self.max_val
         tensor_in = torch.tensor(data_norm).unsqueeze(0).unsqueeze(-1)
 
@@ -148,15 +147,21 @@ class PredictiveEngine:
         eval_168 = history_counts[:168]
         actual_24 = history_counts[-24:]
 
-        eval_norm = np.array(eval_168, dtype=np.float32) / self.max_val
-        eval_tensor = torch.tensor(eval_norm).unsqueeze(0).unsqueeze(-1)
-
-        with torch.no_grad():
-            eval_preds_norm = self.transformer(eval_tensor).squeeze().numpy()
-
-        eval_preds_real = (eval_preds_norm * self.max_val).clip(min=0)
-
-        evaluation = evaluate_forecast(actual_24, eval_preds_real, inference_time_ms)
+        if len(history_counts) != 192 or not np.isfinite(eval_168).all():
+            evaluation = {
+                "status": "unavailable",
+                "reason": "invalid_evaluation_window",
+                "inference_time_ms": inference_time_ms,
+            }
+        else:
+            eval_norm = np.array(eval_168, dtype=np.float32) / self.max_val
+            eval_tensor = torch.tensor(eval_norm).unsqueeze(0).unsqueeze(-1)
+            with torch.no_grad():
+                eval_preds_norm = self.transformer(eval_tensor).squeeze().numpy()
+            eval_preds_real = (eval_preds_norm * self.max_val).clip(min=0)
+            evaluation = evaluate_forecast(
+                actual_24, eval_preds_real, inference_time_ms
+            )
 
         payload = {
             "type": "TREND_PREDICTION_V2",
