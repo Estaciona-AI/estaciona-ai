@@ -18,6 +18,9 @@
     "EdgeToServer_TREND_PREDICTION": {
       "$ref": "urn:estaciona-ai:ws:edge-events:v1#/oneOf/3"
     },
+    "EdgeToServer_TREND_PREDICTION_V2": {
+      "$ref": "urn:estaciona-ai:ws:edge-events:v1#/oneOf/4"
+    },
     "ServerToApp_NAVIGATION_START": {
       "$ref": "urn:estaciona-ai:ws:server-to-app:v1#/oneOf/0"
     },
@@ -38,6 +41,9 @@
     },
     "ServerToApp_TREND_PREDICTION": {
       "$ref": "urn:estaciona-ai:ws:server-to-app:v1#/oneOf/6"
+    },
+    "ServerToApp_TREND_PREDICTION_V2": {
+      "$ref": "urn:estaciona-ai:ws:server-to-app:v1#/oneOf/7"
     }
   },
   "$id": "urn:estaciona-ai:ws:messages:v1",
@@ -66,5 +72,5 @@
     }
   ],
   "title": "Estaciona AI websocket contracts",
-  "x-contract-version": "1.1.0"
+  "x-contract-version": "1.2.0"
 }

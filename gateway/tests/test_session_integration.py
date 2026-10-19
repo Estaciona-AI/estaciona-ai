@@ -275,7 +275,12 @@ def test_websocket_expires_during_continuous_broadcasts(server, endpoint, role):
             assert json.loads(await asyncio.wait_for(edge.recv(), timeout=3)) == {
                 "type": "EDGE_READY",
                 "delivery_version": 1,
-                "durable_events": ["SPOT_UPDATE", "PATH_UPDATE", "TREND_PREDICTION"]
+                "durable_events": [
+                    "SPOT_UPDATE",
+                    "PATH_UPDATE",
+                    "TREND_PREDICTION",
+                    "TREND_PREDICTION_V2",
+                ]
                 + (
                     ["CAR_DETECTED"]
                     if server.environment["LPR_ENABLED"] == "false"
@@ -695,6 +700,7 @@ def test_older_socket_does_not_remove_the_newer_private_channel(server, terminat
                             "SPOT_UPDATE",
                             "PATH_UPDATE",
                             "TREND_PREDICTION",
+                            "TREND_PREDICTION_V2",
                         ]
                         + (
                             ["CAR_DETECTED"]

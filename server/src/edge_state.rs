@@ -68,7 +68,9 @@ pub(crate) async fn prepare<'a>(
 ) -> Result<Prepared<'a>, AuthError> {
     let operation = match &message {
         EdgeToServerMsg::PathUpdate { .. } => GlobalOperation::PathUpdate,
-        EdgeToServerMsg::TrendPrediction { .. } => GlobalOperation::TrendPrediction,
+        EdgeToServerMsg::TrendPrediction { .. } | EdgeToServerMsg::TrendPredictionV2(_) => {
+            GlobalOperation::TrendPrediction
+        }
         _ => return Ok(Prepared::Terminal(Outcome::Rejected, "unsupported_event")),
     };
     if !edge_auth::global_allowed(tx, principal, operation).await? {
@@ -111,9 +113,6 @@ pub(crate) async fn prepare<'a>(
             model_health,
             next_24h_occupancy,
         } => {
-            // PostgreSQL releases its advisory lock before commit().await necessarily
-            // resumes. Hold an in-process writer through cache publication as well.
-            let writer = state.forecast_writer.lock().await;
             let frame = ServerToAppMsg::TrendPrediction {
                 timestamp,
                 avg_stay_duration_mins,
@@ -122,17 +121,32 @@ pub(crate) async fn prepare<'a>(
                 model_health,
                 next_24h_occupancy,
             };
-            let json = serde_json::to_value(frame)
-                .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
-            sqlx::query("INSERT INTO edge_forecast_state (singleton,payload) VALUES (true,$1) ON CONFLICT (singleton) DO UPDATE SET payload=EXCLUDED.payload")
-                .bind(sqlx::types::Json(&json)).execute(&mut **tx).await?;
-            Ok(Prepared::Forecast {
-                json: json.to_string(),
-                writer,
-            })
+            persist_forecast(tx, state, frame).await
         }
+        EdgeToServerMsg::TrendPredictionV2(forecast) => {
+            persist_forecast(tx, state, ServerToAppMsg::TrendPredictionV2(forecast)).await
+        }
+
         _ => unreachable!("operation discriminant was checked above"),
     }
+}
+
+async fn persist_forecast<'a>(
+    tx: &mut Transaction<'_, Postgres>,
+    state: &'a SharedState,
+    frame: ServerToAppMsg,
+) -> Result<Prepared<'a>, AuthError> {
+    // PostgreSQL releases its advisory lock before commit().await necessarily
+    // resumes. Hold an in-process writer through cache publication as well.
+    let writer = state.forecast_writer.lock().await;
+    let json =
+        serde_json::to_value(frame).map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
+    sqlx::query("INSERT INTO edge_forecast_state (singleton,payload) VALUES (true,$1) ON CONFLICT (singleton) DO UPDATE SET payload=EXCLUDED.payload")
+                .bind(sqlx::types::Json(&json)).execute(&mut **tx).await?;
+    Ok(Prepared::Forecast {
+        json: json.to_string(),
+        writer,
+    })
 }
 
 pub(crate) async fn restore(

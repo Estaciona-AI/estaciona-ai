@@ -72,6 +72,62 @@ pub struct ModelHealth {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EvaluationFailure {
+    InvalidEvaluationWindow,
+    NonFiniteValues,
+    EvaluationFailed,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PartialEvaluationReason {
+    ConstantTarget,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ForecastEvaluation {
+    Available {
+        r2_score: f64,
+        mae: f64,
+        rmse: f64,
+        inference_time_ms: f64,
+    },
+    Partial {
+        reason: PartialEvaluationReason,
+        mae: f64,
+        rmse: f64,
+        inference_time_ms: f64,
+    },
+    Unavailable {
+        reason: EvaluationFailure,
+        inference_time_ms: f64,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum StayDurationReason {
+    NotMeasured,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum StayDuration {
+    Unavailable { reason: StayDurationReason },
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct ForecastV2 {
+    pub timestamp: DateTime<Utc>,
+    pub max_capacity: i32,
+    pub evaluation: ForecastEvaluation,
+    pub stay_duration: StayDuration,
+    pub next_24h_occupancy: Vec<HourlyOccupancy>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "type")]
 pub enum EdgeToServerMsg {
     #[serde(rename = "SPOT_UPDATE")]
@@ -105,6 +161,8 @@ pub enum EdgeToServerMsg {
         model_health: ModelHealth,
         next_24h_occupancy: Vec<HourlyOccupancy>,
     },
+    #[serde(rename = "TREND_PREDICTION_V2")]
+    TrendPredictionV2(ForecastV2),
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -139,6 +197,8 @@ pub enum ServerToAppMsg {
         model_health: ModelHealth,
         next_24h_occupancy: Vec<HourlyOccupancy>,
     },
+    #[serde(rename = "TREND_PREDICTION_V2")]
+    TrendPredictionV2(ForecastV2),
 }
 
 #[cfg(test)]
@@ -408,5 +468,28 @@ mod tests {
             parsed.is_ok(),
             "session identity makes user_id and plate unnecessary: {parsed:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod forecast_availability_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn forecast_v2_preserves_unavailability_and_real_negative_scores() {
+        for evaluation in [
+            json!({"status":"available","r2_score":-0.5,"mae":2.0,"rmse":3.0,"inference_time_ms":1.0}),
+            json!({"status":"partial","reason":"constant_target","mae":0.0,"rmse":0.0,"inference_time_ms":1.0}),
+            json!({"status":"unavailable","reason":"evaluation_failed","inference_time_ms":1.0}),
+        ] {
+            let payload = json!({"type":"TREND_PREDICTION_V2","timestamp":"2026-10-19T12:00:00Z","max_capacity":400,"evaluation":evaluation,"stay_duration":{"status":"unavailable","reason":"not_measured"},"next_24h_occupancy":[]});
+            let edge: EdgeToServerMsg =
+                serde_json::from_value(payload.clone()).expect("forecast V2 accepted");
+            assert_eq!(serde_json::to_value(edge).unwrap(), payload);
+            let public: ServerToAppMsg =
+                serde_json::from_value(payload.clone()).expect("public V2 accepted");
+            assert_eq!(serde_json::to_value(public).unwrap(), payload);
+        }
     }
 }

@@ -17,7 +17,7 @@ use crate::ws::messages::{
     AppToServerMsg, EdgeToServerMsg, EdgeTransportMsg, ServerToAppMsg, ServerToEdgeMsg,
 };
 
-pub const VERSION: &str = "1.1.0";
+pub const VERSION: &str = "1.2.0";
 
 pub fn physical_state_schema(_: &mut SchemaGenerator) -> Schema {
     json_schema!({"type":"string","enum":["free","occupied"]})
@@ -235,7 +235,7 @@ pub fn fixtures() -> Value {
     // Public and edge forecast DTOs intentionally share the existing shape.
     let public: ServerToAppMsg =
         serde_json::from_value(fixture(forecast.clone())).expect("shared forecast shape");
-    json!({
+    let mut fixtures = json!({
         "app-to-server":[
             fixture(AppToServerMsg::ReserveSpot{spot_id:"A-01".into(),user_id:None,plate:None}),
             fixture(AppToServerMsg::ReserveSpot{spot_id:"A-01".into(),user_id:Some(event_id),plate:Some("EXAMPLE".into())}),
@@ -243,11 +243,30 @@ pub fn fixtures() -> Value {
         ],
         "edge-events":[fixture(edge.clone()),fixture(EdgeToServerMsg::CarDetected{plate:"EXAMPLE".into(),camera_id:"camera-01".into(),timestamp}),fixture(EdgeToServerMsg::PathUpdate{from_node:"camera-01".into(),to_node:"A-01".into(),is_active:true}),fixture(forecast)],
         "gateway-to-server":[fixture(EdgeTransportMsg::Event{version:1,event_id,payload:fixture(edge.clone())})],
-        "server-to-gateway":[fixture(ServerToEdgeMsg::Ready{delivery_version:1,durable_events:vec!["SPOT_UPDATE","PATH_UPDATE","TREND_PREDICTION","CAR_DETECTED"]}),fixture(ServerToEdgeMsg::Ack{version:1,event_id,outcome:"applied".into(),reason:None,duplicate:false})],
+        "server-to-gateway":[fixture(ServerToEdgeMsg::Ready{delivery_version:1,durable_events:vec!["SPOT_UPDATE","PATH_UPDATE","TREND_PREDICTION","TREND_PREDICTION_V2","CAR_DETECTED"]}),fixture(ServerToEdgeMsg::Ack{version:1,event_id,outcome:"applied".into(),reason:None,duplicate:false})],
         "vision-to-gateway":[fixture(VisionToGateway::Event{version:1,event_id,payload:edge})],
         "gateway-to-vision":[fixture(GatewayToVision::Ready{delivery_version:1}),fixture(GatewayToVision::Ack{version:1,event_id,outcome:LocalOutcome::Persisted}),fixture(GatewayToVision::Ack{version:1,event_id,outcome:LocalOutcome::Duplicate}),fixture(GatewayToVision::Ack{version:1,event_id,outcome:LocalOutcome::Rejected})],
         "server-to-app":[fixture(ServerToAppMsg::SpotUpdate{spot_id:"A-01".into(),status:"reserved".into()}),fixture(ServerToAppMsg::NavigationStart{spot_id:"A-01".into(),route:vec!["camera-01".into(),"A-01".into()]}),fixture(ServerToAppMsg::NavigationUnavailable{spot_id:"A-01".into(),reason:"no_route".into()}),fixture(ServerToAppMsg::ReservationConfirmed{reservation_id:event_id,spot_id:"A-01".into(),expires_at:timestamp}),fixture(ServerToAppMsg::ReservationExpired{spot_id:"A-01".into()}),fixture(ServerToAppMsg::ReservationRejected{spot_id:"A-01".into(),reason:"active_reservation_limit".into()}),fixture(public)]
-    })
+    });
+    for evaluation in [
+        json!({"status":"available","r2_score":-0.5,"mae":2.0,"rmse":3.0,"inference_time_ms":1.0}),
+        json!({"status":"partial","reason":"constant_target","mae":0.0,"rmse":0.0,"inference_time_ms":1.0}),
+        json!({"status":"unavailable","reason":"evaluation_failed","inference_time_ms":1.0}),
+    ] {
+        let message = json!({"type":"TREND_PREDICTION_V2","timestamp":timestamp,"max_capacity":400,"evaluation":evaluation,"stay_duration":{"status":"unavailable","reason":"not_measured"},"next_24h_occupancy":[]});
+        let edge: EdgeToServerMsg =
+            serde_json::from_value(message.clone()).expect("V2 edge fixture");
+        let public: ServerToAppMsg = serde_json::from_value(message).expect("V2 public fixture");
+        fixtures["edge-events"]
+            .as_array_mut()
+            .expect("array")
+            .push(fixture(edge));
+        fixtures["server-to-app"]
+            .as_array_mut()
+            .expect("array")
+            .push(fixture(public));
+    }
+    fixtures
 }
 
 pub fn artifacts() -> BTreeMap<String, Value> {
@@ -266,6 +285,7 @@ pub fn artifacts() -> BTreeMap<String, Value> {
     for (name, schema) in rest {
         artifacts.insert(format!("v1/rest-{name}.schema.json"), schema);
     }
+    artifacts.get_mut("v1/manifest.json").expect("manifest")["compatibility"]["forecast"] = json!({"current_event":"TREND_PREDICTION_V2","legacy_event":"TREND_PREDICTION","legacy_event_accepted":true,"evaluation_states":["available","partial","unavailable"],"stay_duration":"unavailable_until_measured","deployment_order":"server_before_forecast_producer"});
     artifacts.insert("v1/fixtures.json".into(), fixtures());
     for (name, schema) in schemas {
         artifacts.insert(format!("v1/{name}.schema.json"), schema);

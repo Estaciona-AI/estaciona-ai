@@ -176,3 +176,22 @@ def test_rest_errors_and_tickets_have_strict_identity_types():
     assert not validator("rest-issue-ws-ticket").is_valid(
         {"destination": "app", "user_id": "other"}
     )
+
+
+def test_forecast_v2_distinguishes_unavailable_metrics_and_preserves_v1():
+    messages = json.loads((ROOT / "v1/fixtures.json").read_text())["edge-events"]
+    assert any(message["type"] == "TREND_PREDICTION" for message in messages)
+    v2 = [message for message in messages if message["type"] == "TREND_PREDICTION_V2"]
+    assert {message["evaluation"]["status"] for message in v2} == {
+        "available",
+        "partial",
+        "unavailable",
+    }
+    for message in v2:
+        validator("edge-events").validate(message)
+        assert "avg_stay_duration_mins" not in message
+        assert message["stay_duration"]["reason"] == "not_measured"
+        if message["evaluation"]["status"] == "unavailable":
+            assert not {"mae", "rmse", "r2_score"} & message["evaluation"].keys()
+    invalid = {**v2[0], "evaluation": {"status": "available", "inference_time_ms": 1}}
+    assert not validator("edge-events").is_valid(invalid)

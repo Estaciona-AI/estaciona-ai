@@ -560,7 +560,9 @@ async def prediction_loop(db_path, sync_event):
     while True:
         try:
             payload = await asyncio.to_thread(engine.predict_trends)
-            await asyncio.to_thread(save_event, db_path, json.dumps(payload))
+            await asyncio.to_thread(
+                save_event, db_path, json.dumps(payload, allow_nan=False)
+            )
             sync_event.set()
             print(
                 f"{datetime.datetime.now(datetime.UTC).strftime('%Y-%m-%d %H:%M:%S')} [INFO] TREND_PREDICTION_QUEUED",

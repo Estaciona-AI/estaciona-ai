@@ -106,7 +106,12 @@ async fn run_edge_socket(
     state: &SharedState,
     principal: &crate::edge_auth::Principal,
 ) {
-    let mut durable_events = vec!["SPOT_UPDATE", "PATH_UPDATE", "TREND_PREDICTION"];
+    let mut durable_events = vec![
+        "SPOT_UPDATE",
+        "PATH_UPDATE",
+        "TREND_PREDICTION",
+        "TREND_PREDICTION_V2",
+    ];
     if state.lpr_mode == crate::lpr::LprMode::Disabled {
         durable_events.push("CAR_DETECTED");
     }
@@ -282,7 +287,8 @@ async fn run_edge_socket(
                             }
                         }
                     }
-                    prediction @ EdgeToServerMsg::TrendPrediction { .. } => {
+                    prediction @ (EdgeToServerMsg::TrendPrediction { .. }
+                    | EdgeToServerMsg::TrendPredictionV2(_)) => {
                         match crate::edge_operations::forecast(state, principal, prediction).await {
                             Ok(true) => {}
                             Ok(false) => {

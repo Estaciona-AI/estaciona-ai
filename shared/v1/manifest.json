@@ -10,6 +10,18 @@
   },
   "compatibility": {
     "cloud_ack": "postgres_commit",
+    "forecast": {
+      "current_event": "TREND_PREDICTION_V2",
+      "deployment_order": "server_before_forecast_producer",
+      "evaluation_states": [
+        "available",
+        "partial",
+        "unavailable"
+      ],
+      "legacy_event": "TREND_PREDICTION",
+      "legacy_event_accepted": true,
+      "stay_duration": "unavailable_until_measured"
+    },
     "freshness": "strictly_newer_source_timestamp",
     "identity_source": "authenticated_session",
     "local_ack": "gateway_sqlite_commit",
@@ -68,6 +80,6 @@
       }
     }
   },
-  "version": "1.1.0",
+  "version": "1.2.0",
   "wire_version": 1
 }
