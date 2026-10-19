@@ -94,7 +94,8 @@ def test_denied_origin_preserves_ticket_for_allowed_browser(
 
 def test_ticket_is_bearer_only_scoped_to_app_and_single_use(server):
     user_id = insert_user(server)
-    jwt = token(server, user_id, "user", int(time.time()) + 120)
+    session_expires_at = int(time.time()) + 120
+    jwt = token(server, user_id, "user", session_expires_at)
     status, _, _ = http(
         server,
         "/auth/ws-ticket",
@@ -113,7 +114,7 @@ def test_ticket_is_bearer_only_scoped_to_app_and_single_use(server):
         "SELECT user_id,destination,session_expires_at FROM ws_tickets WHERE digest=%s",
         (digest,),
     )
-    assert stored == [(str(user_id), "app", int(time.time()) + 120)]
+    assert stored == [(str(user_id), "app", session_expires_at)]
 
     async def run():
         async with websockets.connect(
