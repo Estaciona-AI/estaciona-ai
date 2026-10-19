@@ -1,0 +1,403 @@
+{
+  "$defs": {
+    "EvaluationFailure": {
+      "enum": [
+        "invalid_evaluation_window",
+        "non_finite_values",
+        "evaluation_failed"
+      ],
+      "type": "string"
+    },
+    "ForecastEvaluation": {
+      "oneOf": [
+        {
+          "properties": {
+            "inference_time_ms": {
+              "format": "double",
+              "type": "number"
+            },
+            "mae": {
+              "format": "double",
+              "type": "number"
+            },
+            "r2_score": {
+              "format": "double",
+              "type": "number"
+            },
+            "rmse": {
+              "format": "double",
+              "type": "number"
+            },
+            "status": {
+              "const": "available",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "r2_score",
+            "mae",
+            "rmse",
+            "inference_time_ms"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "inference_time_ms": {
+              "format": "double",
+              "type": "number"
+            },
+            "mae": {
+              "format": "double",
+              "type": "number"
+            },
+            "reason": {
+              "$ref": "#/$defs/PartialEvaluationReason"
+            },
+            "rmse": {
+              "format": "double",
+              "type": "number"
+            },
+            "status": {
+              "const": "partial",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "reason",
+            "mae",
+            "rmse",
+            "inference_time_ms"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "inference_time_ms": {
+              "format": "double",
+              "type": "number"
+            },
+            "reason": {
+              "$ref": "#/$defs/EvaluationFailure"
+            },
+            "status": {
+              "const": "unavailable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "reason",
+            "inference_time_ms"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ForecastV2": {
+      "properties": {
+        "evaluation": {
+          "$ref": "#/$defs/ForecastEvaluation"
+        },
+        "max_capacity": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "next_24h_occupancy": {
+          "items": {
+            "$ref": "#/$defs/HourlyOccupancy"
+          },
+          "type": "array"
+        },
+        "stay_duration": {
+          "$ref": "#/$defs/StayDuration"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "timestamp",
+        "max_capacity",
+        "evaluation",
+        "stay_duration",
+        "next_24h_occupancy"
+      ],
+      "type": "object"
+    },
+    "HourlyOccupancy": {
+      "properties": {
+        "occupancy": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "timestamp",
+        "occupancy"
+      ],
+      "type": "object"
+    },
+    "ModelHealth": {
+      "properties": {
+        "inference_time_ms": {
+          "format": "double",
+          "type": "number"
+        },
+        "mae": {
+          "format": "double",
+          "type": "number"
+        },
+        "r2_score": {
+          "format": "double",
+          "type": "number"
+        },
+        "rmse": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "r2_score",
+        "mae",
+        "rmse",
+        "inference_time_ms"
+      ],
+      "type": "object"
+    },
+    "PartialEvaluationReason": {
+      "enum": [
+        "constant_target"
+      ],
+      "type": "string"
+    },
+    "StayDuration": {
+      "oneOf": [
+        {
+          "properties": {
+            "reason": {
+              "$ref": "#/$defs/StayDurationReason"
+            },
+            "status": {
+              "const": "unavailable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "StayDurationReason": {
+      "enum": [
+        "not_measured"
+      ],
+      "type": "string"
+    }
+  },
+  "$id": "urn:estaciona-ai:ws:server-to-app:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "properties": {
+        "route": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "spot_id": {
+          "type": "string"
+        },
+        "type": {
+          "const": "NAVIGATION_START",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "spot_id",
+        "route"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "reason": {
+          "type": "string"
+        },
+        "spot_id": {
+          "type": "string"
+        },
+        "type": {
+          "const": "NAVIGATION_UNAVAILABLE",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "spot_id",
+        "reason"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "expires_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "reservation_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "spot_id": {
+          "type": "string"
+        },
+        "type": {
+          "const": "RESERVATION_CONFIRMED",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "reservation_id",
+        "spot_id",
+        "expires_at"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "spot_id": {
+          "type": "string"
+        },
+        "type": {
+          "const": "RESERVATION_EXPIRED",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "spot_id"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "reason": {
+          "type": "string"
+        },
+        "spot_id": {
+          "type": "string"
+        },
+        "type": {
+          "const": "RESERVATION_REJECTED",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "spot_id",
+        "reason"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "spot_id": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "free",
+            "occupied",
+            "reserved"
+          ],
+          "type": "string"
+        },
+        "type": {
+          "const": "SPOT_UPDATE",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "spot_id",
+        "status"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "avg_stay_duration_mins": {
+          "format": "double",
+          "type": "number"
+        },
+        "max_capacity": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "model_health": {
+          "$ref": "#/$defs/ModelHealth"
+        },
+        "next_24h_occupancy": {
+          "items": {
+            "$ref": "#/$defs/HourlyOccupancy"
+          },
+          "type": "array"
+        },
+        "stay_duration_distribution": {
+          "items": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "type": {
+          "const": "TREND_PREDICTION",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "timestamp",
+        "avg_stay_duration_mins",
+        "stay_duration_distribution",
+        "max_capacity",
+        "model_health",
+        "next_24h_occupancy"
+      ],
+      "type": "object"
+    },
+    {
+      "$ref": "#/$defs/ForecastV2",
+      "properties": {
+        "type": {
+          "const": "TREND_PREDICTION_V2",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "ServerToAppMsg",
+  "x-contract-version": "1.2.0"
+}

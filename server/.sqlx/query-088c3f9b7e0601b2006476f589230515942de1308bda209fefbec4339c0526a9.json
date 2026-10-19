@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, status FROM spots",
+  "query": "SELECT id, status FROM spots WHERE is_active",
   "describe": {
     "columns": [
       {
@@ -34,5 +34,5 @@
       false
     ]
   },
-  "hash": "5b56e8687a7300bb204b5ec1f82612f6c68c709a75eeb376d24cafe595456d3a"
+  "hash": "088c3f9b7e0601b2006476f589230515942de1308bda209fefbec4339c0526a9"
 }

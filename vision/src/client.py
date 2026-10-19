@@ -1,19 +1,5 @@
-# ==============================================================================
-# Copyright (C) 2026 Guilherme Pedroza
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU Affero General Public License as
-# published by the Free Software Foundation, either version 3 of the
-# License, or (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU Affero General Public License for more details.
-#
-# You should have received a copy of the GNU Affero General Public License
-# along with this program.  If not, see <https://www.gnu.org/licenses/>.
-# ==============================================================================
+# SPDX-FileCopyrightText: 2026 Guilherme Pedroza
+# SPDX-License-Identifier: Apache-2.0
 
 import datetime
 
@@ -23,8 +9,9 @@ import sys
 import time
 import asyncio
 import glob
-from collections import deque
-import websockets
+from pathlib import Path
+import hashlib
+from delivery import LocalDelivery, LocalOutbox
 from dotenv import load_dotenv
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "../../.env"))
@@ -33,25 +20,33 @@ os.environ["QT_LOGGING_RULES"] = "*=false"
 
 import cv2
 import numpy as np
-from ultralytics import YOLO
-import torch
+from detector import load_detector
 
 WS_URL = os.environ.get("LOCAL_WS_URL", "ws://localhost:8001/ws/edge")
 EDGE_API_KEY = os.environ.get("EDGE_API_KEY")
 
-MODEL_PATH = os.environ.get("VISION_MODEL_PATH", "yolo26x.pt")
+MODEL_PATH = os.environ.get("VISION_MODEL_PATH", "models/rtdetr-hgnetv2-l.onnx")
 VIDEO_PATH = os.environ.get("VISION_STREAM_URL")
 SPOTS_PATH = os.environ.get("VISION_SPOTS_PATH", "data/spots.json")
 CAMERA_ID = os.environ.get("VISION_CAMERA_ID", "cam_01")
-PENDING_UPDATES = deque()
+DELIVERY = None
 
-VEHICLE_CLASSES = [2, 7]
+
+def local_delivery():
+    global DELIVERY
+    if DELIVERY is None:
+        camera_key = hashlib.sha256(CAMERA_ID.encode()).hexdigest()[:16]
+        path = os.environ.get(
+            "VISION_OUTBOX_PATH", str(Path("data") / f"vision-outbox-{camera_key}.db")
+        )
+        DELIVERY = LocalDelivery(WS_URL, LocalOutbox(path))
+    return DELIVERY
+
 
 TRIGGER_OCCUPIED_THRESHOLD = 0.35
 STAY_OCCUPIED_THRESHOLD = 0.20
 
 CONF_THRESHOLD = 0.10
-INFERENCE_SIZE = 1312
 BOX_SHRINK_FACTOR = 0.15
 GAMMA_CORRECTION = 1.4
 CLAHE_ENABLED = False
@@ -116,39 +111,20 @@ def compute_occupancy(
     return overlap_area / spot_area
 
 
+def observation_timestamp():
+    return (
+        datetime.datetime.now(datetime.UTC)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
+
+
 async def connect_ws(headers):
-    try:
-        ws = await websockets.connect(
-            WS_URL, additional_headers=headers, open_timeout=3
-        )
-        print(f"[CONN] Conectado ao gateway: {WS_URL}")
-        return ws
-    except Exception as e:
-        print(f"[CONN] Falha ao conectar ao gateway: {e}")
-        raise
+    return await local_delivery().connect(headers)
 
 
 async def safe_send(ws, payload_str, headers):
-    if payload_str is not None:
-        PENDING_UPDATES.append(payload_str)
-    try:
-        if ws is None:
-            ws = await connect_ws(headers)
-        while PENDING_UPDATES:
-            await ws.send(PENDING_UPDATES[0])
-            PENDING_UPDATES.popleft()
-        return ws
-    except Exception:
-        print("[CONN] Conexao perdida, reconectando...")
-        try:
-            ws = await connect_ws(headers)
-            while PENDING_UPDATES:
-                await ws.send(PENDING_UPDATES[0])
-                PENDING_UPDATES.popleft()
-            return ws
-        except Exception as e:
-            print(f"[CONN] Falha ao reenviar ({e})")
-            return None
+    return await local_delivery().send(ws, payload_str, headers)
 
 
 async def main():
@@ -165,14 +141,8 @@ async def main():
 
     spots = load_spots(spots_path)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"\n[VISION DEVICE] Rodando em: {device.upper()}")
-    if device == "cpu":
-        print(
-            "[AVISO] CUDA nao esta disponivel. O modelo rodara no processador (CPU), o que causara engasgos!"
-        )
-
-    model = YOLO(MODEL_PATH)
+    device = os.environ.get("VISION_DEVICE", "cuda")
+    model = load_detector(MODEL_PATH, device=device)
 
     video_list = []
     if os.path.isdir(VIDEO_PATH):
@@ -210,11 +180,17 @@ async def main():
     last_sync_time = time.time()
 
     while True:
-        if PENDING_UPDATES and time.monotonic() - last_retry_time >= 5:
+        if (
+            local_delivery().outbox.first() is not None
+            and time.monotonic() - last_retry_time >= 5
+        ):
             last_retry_time = time.monotonic()
             websocket = await safe_send(websocket, None, headers)
 
-        if time.time() - last_sync_time >= 30:
+        if (
+            time.time() - last_sync_time >= 30
+            and local_delivery().outbox.first() is None
+        ):
             last_sync_time = time.time()
             print("[VISION] Resyncing all spots state to gateway (30s heartbeat)")
             for spot_id, state in debounce_map.items():
@@ -225,7 +201,7 @@ async def main():
                         "status": state["confirmed"],
                         "camera_id": CAMERA_ID,
                         "confidence": 1.0,
-                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                        "timestamp": observation_timestamp(),
                         "edge_sent_at": datetime.datetime.now(datetime.UTC)
                         .isoformat(timespec="milliseconds")
                         .replace("+00:00", "Z"),
@@ -246,34 +222,15 @@ async def main():
             frame, gamma=GAMMA_CORRECTION, clahe_enabled=CLAHE_ENABLED
         )
 
-        results = model.predict(
-            inference_frame,
-            classes=VEHICLE_CLASSES,
-            conf=CONF_THRESHOLD,
-            imgsz=INFERENCE_SIZE,
-            device=device,
-            half=(device == "cuda"),
-            verbose=False,
-        )
-
         detections: list[tuple[int, int, int, int]] = []
-        for result in results:
-            if result.boxes is None:
-                continue
-            for box in result.boxes.xyxy:
-                x1, y1, x2, y2 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
-
-                w = x2 - x1
-                h = y2 - y1
-                shrink_w = int(w * BOX_SHRINK_FACTOR)
-                shrink_h = int(h * BOX_SHRINK_FACTOR)
-
-                sx1 = x1 + shrink_w
-                sy1 = y1 + shrink_h
-                sx2 = x2 - shrink_w
-                sy2 = y2 - shrink_h
-
-                detections.append((sx1, sy1, sx2, sy2))
+        for x1, y1, x2, y2 in model.detect(inference_frame, confidence=CONF_THRESHOLD):
+            w = x2 - x1
+            h = y2 - y1
+            shrink_w = int(w * BOX_SHRINK_FACTOR)
+            shrink_h = int(h * BOX_SHRINK_FACTOR)
+            detections.append(
+                (x1 + shrink_w, y1 + shrink_h, x2 - shrink_w, y2 - shrink_h)
+            )
 
         for spot_id, (mask, area) in spot_masks.items():
             ratio = compute_occupancy(mask, area, detections, frame.shape)
@@ -302,7 +259,7 @@ async def main():
                     "status": raw_status,
                     "camera_id": CAMERA_ID,
                     "confidence": float(ratio) if raw_status == "occupied" else 1.0,
-                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "timestamp": observation_timestamp(),
                     "edge_sent_at": datetime.datetime.now(datetime.UTC)
                     .isoformat(timespec="milliseconds")
                     .replace("+00:00", "Z"),
@@ -342,9 +299,7 @@ async def main():
                             "confidence": float(ratio)
                             if raw_status == "occupied"
                             else 1.0,
-                            "timestamp": time.strftime(
-                                "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
-                            ),
+                            "timestamp": observation_timestamp(),
                             "edge_sent_at": datetime.datetime.now(datetime.UTC)
                             .isoformat(timespec="milliseconds")
                             .replace("+00:00", "Z"),

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "UPDATE spots SET status = $1, last_updated = NOW() WHERE id = $2",
+  "query": "UPDATE spots SET status = $1, last_updated = NOW() WHERE id = $2 AND is_active",
   "describe": {
     "columns": [],
     "parameters": {
@@ -11,5 +11,5 @@
     },
     "nullable": []
   },
-  "hash": "fddaf23aa2dc91179a160ce3f4114388b66b90bfdee979be35808408974a728b"
+  "hash": "da332e34a5f113c3c5571162277f85eada5321c80082fb589bbdf179d67366e2"
 }

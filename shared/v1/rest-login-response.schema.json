@@ -1,0 +1,28 @@
+{
+  "$id": "urn:estaciona-ai:rest:login-response:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "name": {
+      "type": "string"
+    },
+    "role": {
+      "type": "string"
+    },
+    "token": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "token",
+    "role",
+    "name",
+    "id"
+  ],
+  "title": "LoginResponse",
+  "type": "object",
+  "x-contract-version": "1.2.0"
+}

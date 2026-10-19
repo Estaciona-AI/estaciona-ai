@@ -1,24 +1,10 @@
-// ==============================================================================
-// Copyright (C) 2026 Guilherme Pedroza
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as
-// published by the Free Software Foundation, either version 3 of the
-// License, or (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
-// ==============================================================================
+// SPDX-FileCopyrightText: 2026 Guilherme Pedroza
+// SPDX-License-Identifier: Apache-2.0
 
 use serde::Deserialize;
 use serde_json::Value;
 use std::{
-    io,
+    io::{self, Write},
     path::{Path, PathBuf},
 };
 
@@ -60,26 +46,32 @@ impl SiteConfig {
         let config_path = directory.join("config.json");
         let raw: Value = read_json(&config_path)?;
         validate_parking_config(&raw)?;
-        let parkings = serde_json::from_value(raw).map_err(invalid_data)?;
+        let parkings: Vec<ParkingLotConfig> = serde_json::from_value(raw).map_err(invalid_data)?;
         let spots: Vec<Spot3DDef> = read_json(&directory.join("spots_3d.json"))?;
-        let mut ids = std::collections::HashSet::new();
-        for spot in &spots {
-            if spot.id.trim().is_empty() || !ids.insert(&spot.id) {
-                return Err(invalid_data("Empty or duplicate spot ID in spots_3d.json"));
-            }
-            if ![spot.center_3d.x, spot.center_3d.y, spot.center_3d.z]
-                .iter()
-                .all(|v| v.is_finite())
-            {
-                return Err(invalid_data("Non-finite spot coordinates in spots_3d.json"));
-            }
-        }
+        validate_spots(&spots)?;
+        crate::site_graph::validate_names(&parkings, &spots).map_err(invalid_data)?;
         Ok(Self {
             directory,
             parkings,
             spots,
         })
     }
+}
+
+fn validate_spots(spots: &[Spot3DDef]) -> io::Result<()> {
+    let mut ids = std::collections::HashSet::new();
+    for spot in spots {
+        if spot.id.trim().is_empty() || !ids.insert(&spot.id) {
+            return Err(invalid_data("Empty or duplicate spot ID in spots_3d.json"));
+        }
+        if ![spot.center_3d.x, spot.center_3d.y, spot.center_3d.z]
+            .iter()
+            .all(|v| v.is_finite())
+        {
+            return Err(invalid_data("Non-finite spot coordinates in spots_3d.json"));
+        }
+    }
+    Ok(())
 }
 
 fn invalid_data(error: impl std::fmt::Display) -> io::Error {
@@ -133,8 +125,63 @@ fn validate_parking_config(payload: &Value) -> io::Result<()> {
 
 pub fn save_parking_config(directory: &Path, payload: &Value) -> io::Result<()> {
     validate_parking_config(payload)?;
+    let parkings = Vec::<ParkingLotConfig>::deserialize(payload).map_err(invalid_data)?;
+    // Stored geometry failures are infrastructure errors, not invalid requests.
+    let spots: Vec<Spot3DDef> =
+        read_json(&directory.join("spots_3d.json")).map_err(io::Error::other)?;
+    validate_spots(&spots).map_err(io::Error::other)?;
+    crate::site_graph::validate_names(&parkings, &spots).map_err(invalid_data)?;
     let content = serde_json::to_string_pretty(payload).map_err(invalid_data)?;
-    std::fs::write(directory.join("config.json"), content)
+    replace_config_file(directory, |file| file.write_all(content.as_bytes()))
+}
+
+// A local-file adapter: the caller owns the destination and write admission.
+// Readers see either complete version; the active file is never truncated.
+fn replace_config_file(
+    directory: &Path,
+    write_content: impl FnOnce(&mut std::fs::File) -> io::Result<()>,
+) -> io::Result<()> {
+    let parent = std::fs::File::open(directory)?;
+    let destination = directory.join("config.json");
+    let permissions = match std::fs::metadata(&destination) {
+        Ok(metadata) => Some(metadata.permissions()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    let path = directory.join(format!(".config-{}.tmp", uuid::Uuid::new_v4()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(&path)?;
+    let mut pending = PendingConfigFile { path, file };
+    write_content(&mut pending.file)?;
+    if let Some(permissions) = permissions {
+        pending.file.set_permissions(permissions)?;
+    }
+    pending.file.sync_all()?;
+    std::fs::rename(&pending.path, destination)?;
+    // A failure here is reported, but replacement has already happened.
+    // It does not justify rolling back a concurrently observed version.
+    parent.sync_all()
+}
+
+struct PendingConfigFile {
+    path: PathBuf,
+    file: std::fs::File,
+}
+
+impl Drop for PendingConfigFile {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_file(&self.path)
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            tracing::warn!(%error, "Failed to clean up temporary configuration file");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -262,5 +309,160 @@ mod tests {
             std::fs::read(fixture.0.join("config.json")).unwrap(),
             original
         );
+    }
+
+    #[test]
+    fn r10_replacement_preserves_the_previous_file_inode() {
+        let fixture = Fixture::new();
+        fixture.seed();
+        let old_path = fixture.0.join("previous-config.json");
+        std::fs::hard_link(fixture.0.join("config.json"), &old_path).unwrap();
+        let original = std::fs::read(&old_path).unwrap();
+        let payload = serde_json::json!([
+            {"name": "Replacement", "path": [{"x": 0, "z": 0}, {"x": 8, "z": 0}]}
+        ]);
+        save_parking_config(&fixture.0, &payload).unwrap();
+        assert_eq!(std::fs::read(old_path).unwrap(), original);
+        assert_eq!(
+            read_json::<Value>(&fixture.0.join("config.json")).unwrap(),
+            payload
+        );
+    }
+
+    fn assert_no_pending_files(directory: &Path) {
+        assert!(std::fs::read_dir(directory).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")
+        }));
+    }
+
+    #[test]
+    fn r10_partial_write_failure_keeps_config_and_cleans_temporary_file() {
+        let fixture = Fixture::new();
+        fixture.seed();
+        let original = std::fs::read(fixture.0.join("config.json")).unwrap();
+        let result = replace_config_file(&fixture.0, |file| {
+            file.write_all(b"partial json")?;
+            Err(io::Error::other("injected disk write failure"))
+        });
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read(fixture.0.join("config.json")).unwrap(),
+            original
+        );
+        assert_no_pending_files(&fixture.0);
+    }
+
+    #[test]
+    fn r10_readers_keep_complete_config_until_publication() {
+        let fixture = Fixture::new();
+        fixture.seed();
+        let original = std::fs::read(fixture.0.join("config.json")).unwrap();
+        replace_config_file(&fixture.0, |file| {
+            file.write_all(b"[{")?;
+            assert_eq!(std::fs::read(fixture.0.join("config.json"))?, original);
+            file.write_all(b"}]")
+        })
+        .unwrap();
+        assert_eq!(
+            std::fs::read(fixture.0.join("config.json")).unwrap(),
+            b"[{}]"
+        );
+        assert_no_pending_files(&fixture.0);
+    }
+
+    #[test]
+    fn r10_rename_failure_cleans_temporary_file() {
+        let fixture = Fixture::new();
+        std::fs::create_dir(fixture.0.join("config.json")).unwrap();
+        let result = replace_config_file(&fixture.0, |file| file.write_all(b"[]"));
+        assert!(result.is_err());
+        assert!(fixture.0.join("config.json").is_dir());
+        assert_no_pending_files(&fixture.0);
+    }
+
+    #[test]
+    fn r10_writer_panic_keeps_config_and_cleans_temporary_file() {
+        let fixture = Fixture::new();
+        fixture.seed();
+        let original = std::fs::read(fixture.0.join("config.json")).unwrap();
+        let result = std::panic::catch_unwind(|| {
+            let _ = replace_config_file(&fixture.0, |file| {
+                file.write_all(b"partial")?;
+                panic!("injected writer panic");
+            });
+        });
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read(fixture.0.join("config.json")).unwrap(),
+            original
+        );
+        assert_no_pending_files(&fixture.0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r10_atomic_replacement_preserves_existing_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = Fixture::new();
+        fixture.seed();
+        let path = fixture.0.join("config.json");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        replace_config_file(&fixture.0, |file| file.write_all(b"[]")).unwrap();
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+    }
+
+    #[test]
+    fn r11_loading_rejects_collisions_with_generated_navigation_names() {
+        let fixture = Fixture::new();
+        fixture.seed();
+        for id in ["cam-01", "path_node_1"] {
+            fixture.write(
+                "spots_3d.json",
+                &serde_json::json!([
+                    {"id": id, "center3D": {"x": 1, "y": 0, "z": 1}}
+                ]),
+            );
+            let error = SiteConfig::load(&fixture.0).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert!(error.to_string().contains(id));
+        }
+    }
+
+    #[test]
+    fn r11_saving_rejects_new_collision_without_replacing_the_valid_config() {
+        let fixture = Fixture::new();
+        fixture.seed();
+        fixture.write(
+            "config.json",
+            &serde_json::json!([
+                {"name": "Short", "path": [{"x": 0, "z": 0}, {"x": 0, "z": 0}]}
+            ]),
+        );
+        fixture.write(
+            "spots_3d.json",
+            &serde_json::json!([
+                {"id": "path_node_1", "center3D": {"x": 1, "y": 0, "z": 1}}
+            ]),
+        );
+        SiteConfig::load(&fixture.0).unwrap();
+        let before = std::fs::read(fixture.0.join("config.json")).unwrap();
+        let payload = serde_json::json!([
+            {"name": "Extended", "path": [{"x": 0, "z": 0}, {"x": 1, "z": 0}]}
+        ]);
+        let error = save_parking_config(&fixture.0, &payload).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("path_node_1"));
+        assert_eq!(
+            std::fs::read(fixture.0.join("config.json")).unwrap(),
+            before
+        );
+        assert_no_pending_files(&fixture.0);
     }
 }

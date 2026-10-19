@@ -1,4 +1,8 @@
+# SPDX-FileCopyrightText: 2026 Guilherme Pedroza
+# SPDX-License-Identifier: Apache-2.0
+
 import os
+import logging
 import pandas as pd
 import numpy as np
 import torch
@@ -7,9 +11,42 @@ from datetime import datetime, timedelta, timezone
 import time
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
+
+if __package__:
+    from .history import physical_history
+else:
+    from history import physical_history
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "../../.env"))
+
+
+def evaluate_forecast(actual, predicted, inference_time_ms):
+    timing = {"inference_time_ms": float(inference_time_ms)}
+    unavailable = {"status": "unavailable", **timing}
+    try:
+        actual = np.asarray(actual, dtype=np.float64)
+        predicted = np.asarray(predicted, dtype=np.float64)
+        if actual.shape != (24,) or predicted.shape != (24,):
+            return {**unavailable, "reason": "invalid_evaluation_window"}
+        if not np.isfinite(actual).all() or not np.isfinite(predicted).all():
+            return {**unavailable, "reason": "non_finite_values"}
+        mae = float(mean_absolute_error(actual, predicted))
+        rmse = float(np.sqrt(mean_squared_error(actual, predicted)))
+        if not np.isfinite([mae, rmse]).all():
+            return {**unavailable, "reason": "non_finite_values"}
+        metrics = {"mae": mae, "rmse": rmse, **timing}
+        if np.ptp(actual) == 0:
+            return {"status": "partial", "reason": "constant_target", **metrics}
+        r2 = float(r2_score(actual, predicted, force_finite=False))
+        if not np.isfinite(r2):
+            return {**unavailable, "reason": "non_finite_values"}
+        return {"status": "available", "r2_score": r2, **metrics}
+    except Exception as error:
+        logging.getLogger(__name__).warning(
+            "Forecast evaluation unavailable: %s", type(error).__name__
+        )
+        return {**unavailable, "reason": "evaluation_failed"}
 
 
 class TemporalAttentionForecast(nn.Module):
@@ -54,39 +91,18 @@ class PredictiveEngine:
         self.engine = get_db_engine()
 
     def get_history(self, hours_back):
-        end_time = datetime.now(timezone.utc)
+        end_time = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
         start_time = end_time - timedelta(hours=hours_back)
-
-        query = f"""
-            SELECT occupied_at, COALESCE(released_at, NOW()) AS released_at
-            FROM user_occupancy_history
-            WHERE released_at IS NULL OR released_at > '{start_time.isoformat()}'
-        """
-        df = pd.read_sql(query, self.engine)
-
-        hours = pd.date_range(
-            start=pd.Timestamp(start_time).floor("h"),
-            periods=hours_back,
-            freq="h",
-            tz="UTC",
-        )
-        occupancy_counts = []
-
-        if not df.empty:
-            df["occupied_at"] = pd.to_datetime(df["occupied_at"], utc=True)
-            df["released_at"] = pd.to_datetime(df["released_at"], utc=True)
-            for h in hours:
-                count = ((df["occupied_at"] <= h) & (df["released_at"] > h)).sum()
-                occupancy_counts.append(int(count))
-        else:
-            occupancy_counts = [0] * hours_back
-
-        return occupancy_counts
+        frame = physical_history(self.engine, start_time, end_time)
+        hours = pd.date_range(start=start_time, periods=hours_back, freq="h", tz="UTC")
+        return frame.set_index("timestamp")["occupancy"].reindex(hours).tolist()
 
     def get_capacity(self):
         with self.engine.connect() as connection:
             return int(
-                connection.execute(text("SELECT COUNT(*) FROM spots")).scalar_one()
+                connection.execute(
+                    text("SELECT COUNT(*) FROM spots WHERE is_active")
+                ).scalar_one()
             )
 
     def predict_trends(self):
@@ -97,7 +113,13 @@ class PredictiveEngine:
         history_counts = self.get_history(192)
 
         # 1. Predict next 24h using the last 168h
-        recent_168 = history_counts[-168:]
+        if not np.isfinite(self.max_val) or self.max_val <= 0:
+            raise ValueError("Forecast normalization must be finite and positive")
+        recent_168 = np.asarray(history_counts[-168:], dtype=np.float64)
+        if recent_168.shape != (168,) or not np.isfinite(recent_168).all():
+            raise ValueError(
+                "Insufficient observed physical history: 168 complete hours required"
+            )
         data_norm = np.array(recent_168, dtype=np.float32) / self.max_val
         tensor_in = torch.tensor(data_norm).unsqueeze(0).unsqueeze(-1)
 
@@ -106,6 +128,8 @@ class PredictiveEngine:
             preds_norm = self.transformer(tensor_in).squeeze().numpy()
         inference_time_ms = (time.perf_counter() - t_start) * 1000
 
+        if np.shape(preds_norm) != (24,) or not np.isfinite(preds_norm).all():
+            raise ValueError("Forecast inference returned invalid values")
         preds_real = (
             (preds_norm * self.max_val).clip(min=0, max=capacity).astype(int).tolist()
         )
@@ -123,35 +147,27 @@ class PredictiveEngine:
         eval_168 = history_counts[:168]
         actual_24 = history_counts[-24:]
 
-        eval_norm = np.array(eval_168, dtype=np.float32) / self.max_val
-        eval_tensor = torch.tensor(eval_norm).unsqueeze(0).unsqueeze(-1)
-
-        with torch.no_grad():
-            eval_preds_norm = self.transformer(eval_tensor).squeeze().numpy()
-
-        eval_preds_real = (eval_preds_norm * self.max_val).clip(min=0)
-
-        try:
-            r2 = r2_score(actual_24, eval_preds_real)
-            mae = mean_absolute_error(actual_24, eval_preds_real)
-            rmse = np.sqrt(mean_squared_error(actual_24, eval_preds_real))
-            # Fallback if r2 is negative or weird due to flat actuals
-            if r2 < 0 or np.isnan(r2):
-                r2 = 0.0
-        except Exception:
-            r2, mae, rmse = 0.0, 0.0, 0.0
+        if len(history_counts) != 192 or not np.isfinite(eval_168).all():
+            evaluation = {
+                "status": "unavailable",
+                "reason": "invalid_evaluation_window",
+                "inference_time_ms": inference_time_ms,
+            }
+        else:
+            eval_norm = np.array(eval_168, dtype=np.float32) / self.max_val
+            eval_tensor = torch.tensor(eval_norm).unsqueeze(0).unsqueeze(-1)
+            with torch.no_grad():
+                eval_preds_norm = self.transformer(eval_tensor).squeeze().numpy()
+            eval_preds_real = (eval_preds_norm * self.max_val).clip(min=0)
+            evaluation = evaluate_forecast(
+                actual_24, eval_preds_real, inference_time_ms
+            )
 
         payload = {
-            "type": "TREND_PREDICTION",
+            "type": "TREND_PREDICTION_V2",
             "timestamp": now.isoformat(),
-            "avg_stay_duration_mins": 0.0,
-            "stay_duration_distribution": [],
-            "model_health": {
-                "r2_score": float(r2),
-                "mae": float(mae),
-                "rmse": float(rmse),
-                "inference_time_ms": float(inference_time_ms),
-            },
+            "stay_duration": {"status": "unavailable", "reason": "not_measured"},
+            "evaluation": evaluation,
             "next_24h_occupancy": forecast_array,
             "max_capacity": capacity,
         }

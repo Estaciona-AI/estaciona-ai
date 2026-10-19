@@ -1,0 +1,1 @@
+DROP INDEX reservations_one_active_per_spot;

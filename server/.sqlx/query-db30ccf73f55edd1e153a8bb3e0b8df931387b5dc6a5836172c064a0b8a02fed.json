@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id \n        FROM spots \n        WHERE status = 'free' \n          AND id NOT IN ('A-01', 'A-02', 'A-03', 'A-04')\n        ",
+  "query": "\n        SELECT id \n        FROM spots \n        WHERE status = 'free' AND is_active\n          AND id NOT IN ('A-01', 'A-02', 'A-03', 'A-04')\n        ",
   "describe": {
     "columns": [
       {
@@ -22,5 +22,5 @@
       false
     ]
   },
-  "hash": "2c09e5437255c564b6ea27dddbcb5e55a00af4819c2181f91a381971e8e616e6"
+  "hash": "db30ccf73f55edd1e153a8bb3e0b8df931387b5dc6a5836172c064a0b8a02fed"
 }

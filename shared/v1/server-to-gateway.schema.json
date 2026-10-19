@@ -1,0 +1,83 @@
+{
+  "$defs": {
+    "Outcome": {
+      "enum": [
+        "applied",
+        "ignored",
+        "rejected"
+      ],
+      "type": "string"
+    }
+  },
+  "$id": "urn:estaciona-ai:ws:server-to-gateway:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "properties": {
+        "delivery_version": {
+          "format": "uint8",
+          "maximum": 1,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "durable_events": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "type": {
+          "const": "EDGE_READY",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "delivery_version",
+        "durable_events"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "duplicate": {
+          "type": "boolean"
+        },
+        "event_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "outcome": {
+          "$ref": "#/$defs/Outcome"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "const": "EDGE_ACK",
+          "type": "string"
+        },
+        "version": {
+          "format": "uint8",
+          "maximum": 1,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "type",
+        "version",
+        "event_id",
+        "outcome",
+        "reason",
+        "duplicate"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "ServerToEdgeMsg",
+  "x-contract-version": "1.2.0"
+}

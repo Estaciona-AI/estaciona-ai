@@ -1,0 +1,85 @@
+{
+  "channels": {
+    "app-to-server": "urn:estaciona-ai:ws:app-to-server:v1",
+    "edge-events": "urn:estaciona-ai:ws:edge-events:v1",
+    "gateway-to-server": "urn:estaciona-ai:ws:gateway-to-server:v1",
+    "gateway-to-vision": "urn:estaciona-ai:ws:gateway-to-vision:v1",
+    "server-to-app": "urn:estaciona-ai:ws:server-to-app:v1",
+    "server-to-gateway": "urn:estaciona-ai:ws:server-to-gateway:v1",
+    "vision-to-gateway": "urn:estaciona-ai:ws:vision-to-gateway:v1"
+  },
+  "compatibility": {
+    "cloud_ack": "postgres_commit",
+    "forecast": {
+      "current_event": "TREND_PREDICTION_V2",
+      "deployment_order": "server_before_forecast_producer",
+      "evaluation_states": [
+        "available",
+        "partial",
+        "unavailable"
+      ],
+      "legacy_event": "TREND_PREDICTION",
+      "legacy_event_accepted": true,
+      "stay_duration": "unavailable_until_measured"
+    },
+    "freshness": "strictly_newer_source_timestamp",
+    "identity_source": "authenticated_session",
+    "local_ack": "gateway_sqlite_commit",
+    "maximum_future_clock_skew_seconds": 30,
+    "tenant_scope": "single_installation"
+  },
+  "rest": {
+    "api_version": 1,
+    "base_path": "/api/v1",
+    "errors": "http_status_category_with_request_id",
+    "legacy_routes_preserved": true,
+    "schemas": {
+      "api-error": {
+        "id": "urn:estaciona-ai:rest:api-error:v1",
+        "path": "v1/rest-api-error.schema.json"
+      },
+      "capabilities": {
+        "id": "urn:estaciona-ai:rest:capabilities:v1",
+        "path": "v1/rest-capabilities.schema.json"
+      },
+      "create-reservation": {
+        "id": "urn:estaciona-ai:rest:create-reservation:v1",
+        "path": "v1/rest-create-reservation.schema.json"
+      },
+      "create-user": {
+        "id": "urn:estaciona-ai:rest:create-user:v1",
+        "path": "v1/rest-create-user.schema.json"
+      },
+      "issue-ws-ticket": {
+        "id": "urn:estaciona-ai:rest:issue-ws-ticket:v1",
+        "path": "v1/rest-issue-ws-ticket.schema.json"
+      },
+      "issued-ws-ticket": {
+        "id": "urn:estaciona-ai:rest:issued-ws-ticket:v1",
+        "path": "v1/rest-issued-ws-ticket.schema.json"
+      },
+      "login-request": {
+        "id": "urn:estaciona-ai:rest:login-request:v1",
+        "path": "v1/rest-login-request.schema.json"
+      },
+      "login-response": {
+        "id": "urn:estaciona-ai:rest:login-response:v1",
+        "path": "v1/rest-login-response.schema.json"
+      },
+      "reservation-response": {
+        "id": "urn:estaciona-ai:rest:reservation-response:v1",
+        "path": "v1/rest-reservation-response.schema.json"
+      },
+      "update-spot-status": {
+        "id": "urn:estaciona-ai:rest:update-spot-status:v1",
+        "path": "v1/rest-update-spot-status.schema.json"
+      },
+      "user-response": {
+        "id": "urn:estaciona-ai:rest:user-response:v1",
+        "path": "v1/rest-user-response.schema.json"
+      }
+    }
+  },
+  "version": "1.2.0",
+  "wire_version": 1
+}

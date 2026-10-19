@@ -1,19 +1,5 @@
-// ==============================================================================
-// Copyright (C) 2026 Guilherme Pedroza
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as
-// published by the Free Software Foundation, either version 3 of the
-// License, or (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
-// ==============================================================================
+// SPDX-FileCopyrightText: 2026 Guilherme Pedroza
+// SPDX-License-Identifier: Apache-2.0
 
 use axum::{
     Json,
@@ -25,10 +11,11 @@ use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::security::{hash_password, hash_plate};
+use crate::auth::AuthError;
+use crate::security::{hash_password_async, hash_plate};
 use crate::state::SharedState;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 pub struct CreateUser {
     pub name: String,
     pub email: String,
@@ -38,7 +25,7 @@ pub struct CreateUser {
     pub plate: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct UserResponse {
     pub id: Uuid,
     pub name: String,
@@ -53,21 +40,53 @@ pub struct UserResponse {
 pub async fn create_user(
     State(state): State<SharedState>,
     Json(payload): Json<CreateUser>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let new_id = Uuid::new_v4();
-
-    let hashed_password = hash_password(&payload.password).map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Error hashing password".to_string(),
-        )
-    })?;
+) -> Result<impl IntoResponse, AuthError> {
+    if payload.name.is_empty()
+        || payload.name.chars().count() > 255
+        || payload.email.is_empty()
+        || payload.email.chars().count() > 255
+        || payload.password.is_empty()
+        || payload.password.len() > 1024
+        || payload
+            .plate
+            .as_ref()
+            .is_some_and(|plate| plate.is_empty() || plate.len() > 32)
+    {
+        return Err(AuthError::Status(
+            StatusCode::BAD_REQUEST,
+            "Invalid registration input",
+        ));
+    }
 
     let hashed_plate = payload
         .plate
         .as_deref()
         .map(|p| hash_plate(p, &state.plate_pepper));
 
+    let duplicate =
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM users WHERE email = $1)")
+            .bind(&payload.email)
+            .fetch_one(&state.pool)
+            .await
+            .map_err(|error| {
+                tracing::error!(%error, "Registration preflight failed");
+                AuthError::Status(StatusCode::INTERNAL_SERVER_ERROR, "Failed to create user")
+            })?;
+    if duplicate {
+        return Err(AuthError::Status(
+            StatusCode::CONFLICT,
+            "Email already registered",
+        ));
+    }
+
+    let hashed_password = hash_password_async(&state.auth_limits, payload.password).await?;
+    let new_id = Uuid::new_v4();
+
+    let requested_plate = hashed_plate.clone();
+    let mut tx = state.pool.begin().await.map_err(|error| {
+        tracing::error!(%error, "Registration transaction unavailable");
+        AuthError::Status(StatusCode::INTERNAL_SERVER_ERROR, "Failed to create user")
+    })?;
     let record = sqlx::query!(
         r#"
         INSERT INTO users (id, name, email, password_hash, date_of_birth, pcd_status, plate)
@@ -90,21 +109,30 @@ pub async fn create_user(
         payload.pcd_status,
         hashed_plate,
     )
-    .fetch_one(&state.pool)
+    .fetch_one(&mut *tx)
     .await
     .map_err(|e| {
         tracing::error!("Database error: {}", e);
-        if e.to_string().contains("duplicate key value") {
-            (
-                StatusCode::CONFLICT,
-                "Email or Plate already registered".to_string(),
-            )
+        if e.as_database_error()
+            .is_some_and(|error| error.is_unique_violation())
+        {
+            AuthError::Status(StatusCode::CONFLICT, "Email already registered")
         } else {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to create user".to_string(),
-            )
+            AuthError::Status(StatusCode::INTERNAL_SERVER_ERROR, "Failed to create user")
         }
+    })?;
+
+    if let Some(hash) = requested_plate.as_deref() {
+        crate::vehicles::request_binding(&mut tx, record.id, hash, None)
+            .await
+            .map_err(|error| {
+                tracing::error!(%error, "Failed to persist declared vehicle binding");
+                AuthError::Status(StatusCode::INTERNAL_SERVER_ERROR, "Failed to create user")
+            })?;
+    }
+    tx.commit().await.map_err(|error| {
+        tracing::error!(%error, "Registration commit failed");
+        AuthError::Status(StatusCode::INTERNAL_SERVER_ERROR, "Failed to create user")
     })?;
 
     let response = UserResponse {
@@ -126,8 +154,9 @@ pub async fn get_user(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let requester = crate::security::authenticated_claims(&headers, &state.jwt_secret)?;
-    if requester.role != "admin" && requester.sub != id.to_string() {
+    let requester =
+        crate::security::authenticated_session(&headers, &state.jwt_secret, &state.pool).await?;
+    if requester.role != "admin" && requester.user_id != id {
         return Err((StatusCode::FORBIDDEN, "User access denied".to_string()));
     }
     let record = sqlx::query_as!(

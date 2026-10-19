@@ -1,19 +1,6 @@
-# ==============================================================================
-# Copyright (C) 2026 Guilherme Pedroza
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU Affero General Public License as
-# published by the Free Software Foundation, either version 3 of the
-# License, or (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU Affero General Public License for more details.
-#
-# You should have received a copy of the GNU Affero General Public License
-# along with this program.  If not, see <https://www.gnu.org/licenses/>.
-# ==============================================================================
+# SPDX-FileCopyrightText: 2026 Guilherme Pedroza
+# SPDX-License-Identifier: Apache-2.0
+
 #
 
 import os
@@ -27,6 +14,11 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from sqlalchemy import create_engine
 from dotenv import load_dotenv
+
+if __package__:
+    from .history import physical_history
+else:
+    from history import physical_history
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_error, r2_score
 
@@ -158,6 +150,12 @@ def prepare_timeseries_data(df):
 
 def create_sequences(ts_df, seq_len=168, pred_len=24):
     data = ts_df["occupancy"].values.astype(np.float32)
+    if len(data) < seq_len + pred_len + 1 or not np.isfinite(data).all():
+        raise ValueError(
+            "Training requires sufficient finite observed physical history"
+        )
+    if not ts_df["timestamp"].diff().dropna().eq(pd.Timedelta(hours=1)).all():
+        raise ValueError("Training physical history contains missing hours")
     max_val = data.max() if data.max() > 0 else 1.0
     data_norm = data / max_val
 
@@ -169,8 +167,18 @@ def create_sequences(ts_df, seq_len=168, pred_len=24):
     return torch.tensor(np.array(X)).unsqueeze(-1), torch.tensor(np.array(y)), max_val
 
 
-def train_forecasting_model(df):
-    ts_df = prepare_timeseries_data(df)
+def train_forecasting_model():
+    ts_df = physical_history(get_db_engine())
+    if not ts_df.empty:
+        # Unknown samples split the timeline; never fill them or join runs.
+        ts_df = ts_df.loc[np.isfinite(ts_df["occupancy"])].sort_values("timestamp")
+    if not ts_df.empty:
+        runs = ts_df["timestamp"].diff().ne(pd.Timedelta(hours=1)).cumsum()
+        ts_df = ts_df.loc[runs == runs.iloc[-1]].reset_index(drop=True)
+    if len(ts_df) < 193:
+        raise ValueError(
+            "At least 193 hours of physical occupancy are required for training"
+        )
 
     print("[5/6] Preparando tensores para o PyTorch tranformer...")
     seq_len = 168
@@ -224,9 +232,10 @@ def train_forecasting_model(df):
 if __name__ == "__main__":
     print("Estaciona AI - Inteligência Preditiva")
     print("Copyright (C) 2026 Guilherme Pedroza")
-    print("This program comes with ABSOLUTELY NO WARRANTY; for details see LICENSE.")
-    print("This is free software, and you are welcome to redistribute it under")
-    print("certain conditions; see the GNU Affero General Public License v3.\n")
+    print("Licensed under Apache-2.0; provided AS IS, without warranties.")
+    print("Redistribution is permitted under Apache License 2.0;")
+    print("see LICENSE for conditions and attribution requirements.\n")
     df = load_and_preprocess_data()
-    train_duration_model(df)
-    train_forecasting_model(df)
+    if not df.empty:
+        train_duration_model(df)
+    train_forecasting_model()

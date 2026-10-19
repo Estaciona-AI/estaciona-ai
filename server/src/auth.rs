@@ -1,33 +1,44 @@
-// ==============================================================================
-// Copyright (C) 2026 Guilherme Pedroza
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as
-// published by the Free Software Foundation, either version 3 of the
-// License, or (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
-// ==============================================================================
+// SPDX-FileCopyrightText: 2026 Guilherme Pedroza
+// SPDX-License-Identifier: Apache-2.0
 
-use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use axum::{
+    Json,
+    extract::State,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
 use serde::{Deserialize, Serialize};
 
-use crate::security::{create_jwt, verify_password};
+use crate::security::{PasswordWorkError, verify_password_async};
 use crate::state::SharedState;
 
-#[derive(Deserialize)]
+pub enum AuthError {
+    Status(StatusCode, &'static str),
+    Password(PasswordWorkError),
+}
+
+impl From<PasswordWorkError> for AuthError {
+    fn from(error: PasswordWorkError) -> Self {
+        Self::Password(error)
+    }
+}
+
+impl IntoResponse for AuthError {
+    fn into_response(self) -> Response {
+        match self {
+            Self::Status(status, message) => (status, message).into_response(),
+            Self::Password(error) => error.into_response(),
+        }
+    }
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 pub struct LoginRequest {
     pub email: String,
     pub password: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct LoginResponse {
     pub token: String,
     pub role: String,
@@ -38,7 +49,17 @@ pub struct LoginResponse {
 pub async fn login_dashboard(
     State(state): State<SharedState>,
     Json(payload): Json<LoginRequest>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
+) -> Result<impl IntoResponse, AuthError> {
+    if payload.email.is_empty()
+        || payload.email.chars().count() > 255
+        || payload.password.is_empty()
+        || payload.password.len() > 1024
+    {
+        return Err(AuthError::Status(
+            StatusCode::BAD_REQUEST,
+            "Invalid login input",
+        ));
+    }
     let user = sqlx::query!(
         "SELECT id, password_hash as \"password_hash!\", role, name FROM users WHERE email = $1",
         payload.email
@@ -47,30 +68,44 @@ pub async fn login_dashboard(
     .await
     .map_err(|e| {
         tracing::error!("Database error during login: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Database error".to_string(),
-        )
+        AuthError::Status(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
     })?;
 
     let user_record = match user {
         Some(record) => record,
-        None => return Err((StatusCode::UNAUTHORIZED, "Invalid credentials".to_string())),
+        None => {
+            return Err(AuthError::Status(
+                StatusCode::UNAUTHORIZED,
+                "Invalid credentials",
+            ));
+        }
     };
 
-    if !verify_password(&payload.password, &user_record.password_hash) {
-        return Err((StatusCode::UNAUTHORIZED, "Invalid credentials".to_string()));
+    if !verify_password_async(
+        &state.auth_limits,
+        payload.password,
+        user_record.password_hash,
+    )
+    .await?
+    {
+        return Err(AuthError::Status(
+            StatusCode::UNAUTHORIZED,
+            "Invalid credentials",
+        ));
     }
 
-    let token = create_jwt(
-        &user_record.id.to_string(),
+    let token = crate::sessions::issue(
+        &state.pool,
+        user_record.id,
         &user_record.role,
         &state.jwt_secret,
     )
-    .map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed while generating access token".to_string(),
+    .await
+    .map_err(|error| {
+        tracing::error!(%error, "Session creation failed");
+        AuthError::Status(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Session creation unavailable",
         )
     })?;
 
