@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Guilherme Pedroza
 // SPDX-License-Identifier: Apache-2.0
 
+mod admin_cli;
 mod api_contract;
 mod auth;
 mod auth_limits;
@@ -71,6 +72,13 @@ async fn main() {
         }
         return;
     }
+    let admin_request = match admin_cli::parse(&args) {
+        Ok(request) => request,
+        Err(usage) => {
+            eprintln!("{usage}");
+            std::process::exit(2);
+        }
+    };
     dotenvy::from_path("../.env").ok();
     let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL missing in .env");
 
@@ -93,27 +101,12 @@ async fn main() {
             std::process::exit(1);
         }
     }
-    if args.len() >= 4 && args[1] == "--create-admin" {
-        let email = &args[2];
-        let plain_password = &args[3];
-
-        let hashed = crate::security::hash_password(plain_password)
-            .expect("Falha ao gerar o hash da senha via Argon2");
-
-        sqlx::query!(
-            "INSERT INTO users (id, name, email, password_hash, role) VALUES ($1, 'Admin', $2, $3, 'admin')",
-            uuid::Uuid::new_v4(),
-            email,
-            hashed
-        )
-        .execute(&pool)
-        .await
-        .expect("Falha ao salvar administrador no banco. Ele já existe?");
-
-        tracing::info!(
-            "Administrador '{}' criado com sucesso! Servidor sendo finalizado.",
-            email
-        );
+    if let Some(request) = admin_request {
+        if let Err(error) = admin_cli::create(&pool, request).await {
+            tracing::error!(%error, "Administrator provisioning failed");
+            std::process::exit(1);
+        }
+        tracing::info!("Administrator created");
         return;
     }
 
