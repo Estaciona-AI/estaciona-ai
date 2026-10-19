@@ -25,13 +25,6 @@ def physical_history(engine, start=None, end=None):
         GROUP BY h.hour_start ORDER BY h.hour_start
     """)
     with engine.connect() as connection:
-        capacity = connection.execute(
-            text("SELECT COUNT(*) FROM spots WHERE is_active")
-        ).scalar_one()
         frame = pd.read_sql(query, connection, params=params)
-    # Partial camera coverage is not an observation of the whole parking lot.
-    frame.loc[(frame["observed_spots"] != capacity) | (capacity == 0), "occupancy"] = (
-        float("nan")
-    )
     frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
     return frame

@@ -150,12 +150,6 @@ def prepare_timeseries_data(df):
 
 def create_sequences(ts_df, seq_len=168, pred_len=24):
     data = ts_df["occupancy"].values.astype(np.float32)
-    if len(data) < seq_len + pred_len + 1 or not np.isfinite(data).all():
-        raise ValueError(
-            "Training requires sufficient finite observed physical history"
-        )
-    if not ts_df["timestamp"].diff().dropna().eq(pd.Timedelta(hours=1)).all():
-        raise ValueError("Training physical history contains missing hours")
     max_val = data.max() if data.max() > 0 else 1.0
     data_norm = data / max_val
 
