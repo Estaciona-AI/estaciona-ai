@@ -11,6 +11,11 @@ from datetime import datetime, timedelta, timezone
 import time
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
+
+if __package__:
+    from .history import physical_history
+else:
+    from history import physical_history
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "../../.env"))
@@ -86,34 +91,16 @@ class PredictiveEngine:
         self.engine = get_db_engine()
 
     def get_history(self, hours_back):
-        end_time = datetime.now(timezone.utc)
+        end_time = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
         start_time = end_time - timedelta(hours=hours_back)
-
-        query = f"""
-            SELECT occupied_at, COALESCE(released_at, NOW()) AS released_at
-            FROM user_occupancy_history
-            WHERE released_at IS NULL OR released_at > '{start_time.isoformat()}'
-        """
-        df = pd.read_sql(query, self.engine)
-
-        hours = pd.date_range(
-            start=pd.Timestamp(start_time).floor("h"),
-            periods=hours_back,
-            freq="h",
-            tz="UTC",
+        frame = physical_history(self.engine, start_time, end_time)
+        hours = pd.date_range(start=start_time, periods=hours_back, freq="h", tz="UTC")
+        return (
+            frame.set_index("timestamp")["occupancy"]
+            .reindex(hours, fill_value=0)
+            .astype(int)
+            .tolist()
         )
-        occupancy_counts = []
-
-        if not df.empty:
-            df["occupied_at"] = pd.to_datetime(df["occupied_at"], utc=True)
-            df["released_at"] = pd.to_datetime(df["released_at"], utc=True)
-            for h in hours:
-                count = ((df["occupied_at"] <= h) & (df["released_at"] > h)).sum()
-                occupancy_counts.append(int(count))
-        else:
-            occupancy_counts = [0] * hours_back
-
-        return occupancy_counts
 
     def get_capacity(self):
         with self.engine.connect() as connection:

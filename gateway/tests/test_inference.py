@@ -137,3 +137,37 @@ def test_non_finite_future_prediction_is_not_queued_as_a_forecast():
     predictor.transformer = InvalidForecast()
     with pytest.raises(ValueError, match="invalid values"):
         predictor.predict_trends()
+
+
+def test_history_reads_physical_samples_without_personal_history():
+    import pandas as pd
+
+    engine = create_engine("sqlite://")
+    now = pd.Timestamp.now(tz="UTC").floor("h")
+    with engine.begin() as connection:
+        connection.execute(
+            text("CREATE TABLE spots (id TEXT PRIMARY KEY,is_active BOOLEAN)")
+        )
+        connection.execute(
+            text("INSERT INTO spots VALUES ('a',TRUE),('b',TRUE),('retired',FALSE)")
+        )
+        connection.execute(
+            text(
+                "CREATE TABLE physical_occupancy_hourly (spot_id TEXT,hour_start TEXT,status TEXT)"
+            )
+        )
+        for spot, status in [("a", "occupied"), ("b", "free"), ("retired", "occupied")]:
+            connection.execute(
+                text(
+                    "INSERT INTO physical_occupancy_hourly VALUES (:spot,:hour,:status)"
+                ),
+                {
+                    "spot": spot,
+                    "hour": (now - pd.Timedelta(hours=1)).isoformat(),
+                    "status": status,
+                },
+            )
+    predictor = PredictiveEngine.__new__(PredictiveEngine)
+    predictor.engine = engine
+    assert predictor.get_history(1) == [1]
+    engine.dispose()

@@ -14,6 +14,11 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from sqlalchemy import create_engine
 from dotenv import load_dotenv
+
+if __package__:
+    from .history import physical_history
+else:
+    from history import physical_history
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_error, r2_score
 
@@ -156,8 +161,12 @@ def create_sequences(ts_df, seq_len=168, pred_len=24):
     return torch.tensor(np.array(X)).unsqueeze(-1), torch.tensor(np.array(y)), max_val
 
 
-def train_forecasting_model(df):
-    ts_df = prepare_timeseries_data(df)
+def train_forecasting_model():
+    ts_df = physical_history(get_db_engine())
+    if len(ts_df) < 193:
+        raise ValueError(
+            "At least 193 hours of physical occupancy are required for training"
+        )
 
     print("[5/6] Preparando tensores para o PyTorch tranformer...")
     seq_len = 168
@@ -215,5 +224,6 @@ if __name__ == "__main__":
     print("Redistribution is permitted under Apache License 2.0;")
     print("see LICENSE for conditions and attribution requirements.\n")
     df = load_and_preprocess_data()
-    train_duration_model(df)
-    train_forecasting_model(df)
+    if not df.empty:
+        train_duration_model(df)
+    train_forecasting_model()
