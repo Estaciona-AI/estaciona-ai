@@ -226,3 +226,56 @@ async fn adoption_refuses_destructive_historical_migrations(pool: PgPool) {
         drop.push(table).build().execute(&pool).await.unwrap();
     }
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn startup_rechecks_identity_after_migrations(pool: PgPool) {
+    let expected = identity(2, "test");
+    store::bind(&pool, &expected, BindMode::EmptyDatabase)
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        "DROP TABLE physical_occupancy_hourly;
+         DELETE FROM _sqlx_migrations WHERE version=20261019000000;
+         CREATE FUNCTION synthetic_change_identity() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+           UPDATE installation_binding SET environment='production';
+           RETURN NEW;
+         END $$;
+         CREATE TRIGGER synthetic_change_identity AFTER INSERT ON _sqlx_migrations
+         FOR EACH ROW EXECUTE FUNCTION synthetic_change_identity();",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(matches!(
+        super::startup::prepare(&pool, &expected).await,
+        Err(store::StoreError::IdentityMismatch)
+    ));
+    assert_eq!(
+        store::check(&pool, &expected).await.unwrap(),
+        BindingStatus::Mismatch
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn migration_lock_timeout_releases_connection_for_retry(pool: PgPool) {
+    let expected = identity(2, "test");
+    store::bind(&pool, &expected, BindMode::EmptyDatabase)
+        .await
+        .unwrap();
+    let mut blocker = pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE _sqlx_migrations IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    assert!(matches!(
+        super::startup::prepare(&pool, &expected).await,
+        Err(store::StoreError::Migration)
+    ));
+    blocker.rollback().await.unwrap();
+    super::startup::prepare(&pool, &expected).await.unwrap();
+    assert_eq!(
+        store::check(&pool, &expected).await.unwrap(),
+        BindingStatus::Matching
+    );
+}

@@ -51,6 +51,7 @@ pub enum StoreError {
     Database(sqlx::Error),
     Timeout,
     MissingSchema,
+    Unbound,
     Migration,
     IdentityMismatch,
     ExistingData,
@@ -63,6 +64,9 @@ impl fmt::Display for StoreError {
         f.write_str(match self {
             Self::Database(_) => "Installation binding storage unavailable",
             Self::Timeout => "Installation binding operation timed out",
+            Self::Unbound => {
+                "Database is unbound; run --installation-init or --installation-adopt explicitly"
+            }
             Self::Migration => "Installation database migrations failed",
             Self::MissingSchema => "Installation binding migration required",
             Self::IdentityMismatch => "Database belongs to a different installation identity",
@@ -303,4 +307,20 @@ pub async fn preflight(
         tx.rollback().await?;
         Ok(())
     }).await.map_err(|_| StoreError::Timeout)?
+}
+
+/// A cancelled migrator must not return a session advisory lock to the pool.
+pub(crate) async fn migrate(pool: &PgPool) -> Result<(), StoreError> {
+    let mut connection = pool.acquire().await?;
+    connection.close_on_drop();
+    sqlx::query("SET lock_timeout='2s'")
+        .execute(&mut *connection)
+        .await?;
+    sqlx::query("SET statement_timeout='5s'")
+        .execute(&mut *connection)
+        .await?;
+    sqlx::migrate!()
+        .run(&mut *connection)
+        .await
+        .map_err(|_| StoreError::Migration)
 }

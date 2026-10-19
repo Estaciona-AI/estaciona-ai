@@ -91,18 +91,46 @@ async fn main() {
     if let Some(command) = installation_request {
         std::process::exit(installation::cli::run(command).await);
     }
-    let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL missing in .env");
-
-    let pool = PgPoolOptions::new()
+    let site_data_dir = match std::env::var("SITE_DATA_DIR") {
+        Ok(value) => value,
+        Err(_) => {
+            eprintln!("SITE_DATA_DIR is required: directory containing installation.json");
+            std::process::exit(2);
+        }
+    };
+    let descriptor = match installation::InstallationDescriptor::load(
+        &std::path::Path::new(&site_data_dir).join("installation.json"),
+    ) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+    };
+    let db_url = match std::env::var("DATABASE_URL") {
+        Ok(value) => value,
+        Err(_) => {
+            eprintln!("DATABASE_URL is required");
+            std::process::exit(1);
+        }
+    };
+    let pool = match PgPoolOptions::new()
         .max_connections(5)
+        .acquire_timeout(std::time::Duration::from_secs(5))
         .connect(&db_url)
         .await
-        .expect("Failed to connect to database");
-
-    sqlx::migrate!()
-        .run(&pool)
-        .await
-        .expect("Failed to run database migrations");
+    {
+        Ok(pool) => pool,
+        Err(_) => {
+            eprintln!("Installation database connection failed");
+            std::process::exit(1);
+        }
+    };
+    if let Err(error) = installation::startup::prepare(&pool, &descriptor.identity()).await {
+        eprintln!("{error}");
+        pool.close().await;
+        std::process::exit(1);
+    }
 
     match edge_cli::dispatch(&pool, &args).await {
         Ok(true) => return,
@@ -124,8 +152,6 @@ async fn main() {
     let plate_pepper =
         std::env::var("PLATE_SECRET_PEPPER").expect("PLATE_SECRET_PEPPER missing in .env");
     let jwt_secret = std::env::var("JWT_SECRET").expect("JWT_SECRET missing in .env");
-    let site_data_dir = std::env::var("SITE_DATA_DIR")
-        .expect("SITE_DATA_DIR required: directory containing config.json and spots_3d.json");
     let site = site_config::SiteConfig::load(site_data_dir)
         .expect("Failed to load installation maps from SITE_DATA_DIR");
     let lpr_setting = std::env::var("LPR_ENABLED");

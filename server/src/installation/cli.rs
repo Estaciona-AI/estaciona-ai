@@ -76,20 +76,7 @@ pub async fn execute(
     };
     tokio::time::timeout(Duration::from_secs(10), async {
         store::preflight(pool, identity, &mode).await?;
-        // A cancelled migrator must not return a connection holding its session advisory lock.
-        let mut connection = pool.acquire().await?;
-        connection.close_on_drop();
-        sqlx::query("SET lock_timeout='2s';")
-            .execute(&mut *connection)
-            .await?;
-        sqlx::query("SET statement_timeout='5s';")
-            .execute(&mut *connection)
-            .await?;
-        sqlx::migrate!()
-            .run(&mut *connection)
-            .await
-            .map_err(|_| StoreError::Migration)?;
-        drop(connection);
+        store::migrate(pool).await?;
         store::bind(pool, identity, mode).await?;
         Ok(BindingStatus::Matching)
     })

@@ -24,3 +24,5 @@ mod store_tests;
 mod cli_tests;
 
 pub mod cli;
+
+pub mod startup;
