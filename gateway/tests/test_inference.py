@@ -171,3 +171,90 @@ def test_history_reads_physical_samples_without_personal_history():
     predictor.engine = engine
     assert predictor.get_history(1) == [1]
     engine.dispose()
+
+
+@pytest.mark.parametrize("history", [[], [0] * 167, [float("nan")] * 192])
+def test_forecast_refuses_missing_recent_history(history):
+    with pytest.raises(ValueError, match="history"):
+        forecast_predictor(history).predict_trends()
+
+
+def test_forecast_can_predict_without_claiming_an_unavailable_backtest():
+    payload = forecast_predictor([float("nan")] * 24 + [0] * 168).predict_trends()
+    assert len(payload["next_24h_occupancy"]) == 24
+    assert payload["evaluation"]["status"] == "unavailable"
+    assert payload["evaluation"]["reason"] == "invalid_evaluation_window"
+
+
+def test_empty_physical_history_is_unknown_instead_of_zero():
+    import numpy as np
+
+    engine = create_engine("sqlite://")
+    with engine.begin() as connection:
+        connection.execute(
+            text("CREATE TABLE spots (id TEXT PRIMARY KEY,is_active BOOLEAN)")
+        )
+        connection.execute(text("INSERT INTO spots VALUES ('a',TRUE)"))
+        connection.execute(
+            text(
+                "CREATE TABLE physical_occupancy_hourly (spot_id TEXT,hour_start TEXT,status TEXT)"
+            )
+        )
+    predictor = PredictiveEngine.__new__(PredictiveEngine)
+    predictor.engine = engine
+    assert np.isnan(predictor.get_history(24)).all()
+    engine.dispose()
+
+
+@pytest.mark.parametrize("observed_spots", [1, 2])
+def test_partial_coverage_is_unknown_but_observed_empty_is_zero(observed_spots):
+    import numpy as np
+    import pandas as pd
+
+    engine = create_engine("sqlite://")
+    hour = (pd.Timestamp.now(tz="UTC").floor("h") - pd.Timedelta(hours=1)).isoformat()
+    with engine.begin() as connection:
+        connection.execute(
+            text("CREATE TABLE spots (id TEXT PRIMARY KEY,is_active BOOLEAN)")
+        )
+        connection.execute(text("INSERT INTO spots VALUES ('0',TRUE),('1',TRUE)"))
+        connection.execute(
+            text(
+                "CREATE TABLE physical_occupancy_hourly (spot_id TEXT,hour_start TEXT,status TEXT)"
+            )
+        )
+        for index in range(observed_spots):
+            connection.execute(
+                text("INSERT INTO physical_occupancy_hourly VALUES (:id,:hour,'free')"),
+                {"id": str(index), "hour": hour},
+            )
+    predictor = PredictiveEngine.__new__(PredictiveEngine)
+    predictor.engine = engine
+    values = predictor.get_history(2)
+    assert np.isnan(values[0])
+    if observed_spots == 2:
+        assert values[1] == 0
+    else:
+        assert np.isnan(values[1])
+    engine.dispose()
+
+
+@pytest.mark.parametrize("kind", ["missing", "gap", "short"])
+def test_training_rejects_unobserved_or_discontinuous_history(kind):
+    import pandas as pd
+    from ml.train import create_sequences
+
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2026-01-01", periods=193, freq="h", tz="UTC"),
+            "occupancy": [0.0] * 193,
+        }
+    )
+    if kind == "missing":
+        frame.loc[50, "occupancy"] = float("nan")
+    elif kind == "gap":
+        frame.loc[100:, "timestamp"] += pd.Timedelta(hours=1)
+    else:
+        frame = frame.iloc[:192]
+    with pytest.raises(ValueError, match="history"):
+        create_sequences(frame)
