@@ -14,6 +14,7 @@ mod edge_cli;
 mod edge_delivery;
 mod edge_operations;
 mod edge_state;
+pub mod installation;
 mod lpr;
 mod pathfinding;
 #[cfg(test)]
