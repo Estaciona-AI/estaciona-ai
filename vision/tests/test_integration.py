@@ -121,3 +121,78 @@ def test_safe_send_retries_queued_updates_after_reconnect_failure():
         assert client.local_delivery().outbox.first() is None
 
     asyncio.run(run())
+
+
+def test_main_emits_initial_transition_and_heartbeat_in_microsecond_order(monkeypatch):
+    import datetime
+    import time
+    from unittest.mock import Mock
+    import numpy as np
+
+    base = datetime.datetime(2026, 10, 19, 12, 0, 0, tzinfo=datetime.UTC)
+    offsets = [0.1, 0.2, 0.7, 0.8, 30.9]
+    clock = {"index": 0}
+
+    def instant():
+        return base + datetime.timedelta(seconds=offsets[clock["index"]])
+
+    class Clock(datetime.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return instant().astimezone(tz)
+
+    real_gmtime = time.gmtime
+    monkeypatch.setattr(client.datetime, "datetime", Clock)
+    monkeypatch.setattr(client.time, "time", lambda: instant().timestamp())
+    monkeypatch.setattr(
+        client.time, "gmtime", lambda: real_gmtime(instant().timestamp())
+    )
+    monkeypatch.setattr(client, "EDGE_API_KEY", "disposable")
+    monkeypatch.setattr(client, "VIDEO_PATH", "fixture.mp4")
+    monkeypatch.setattr(client.sys, "argv", ["client.py"])
+    monkeypatch.setattr(
+        client, "load_spots", lambda _: {"A": [[0, 0], [5, 0], [5, 5], [0, 5]]}
+    )
+    capture = Mock()
+    capture.isOpened.return_value = True
+    capture.read.side_effect = lambda: (True, np.zeros((8, 8, 3), dtype=np.uint8))
+    monkeypatch.setattr(client.cv2, "VideoCapture", lambda _: capture)
+    for name in ("namedWindow", "resizeWindow", "imshow", "destroyAllWindows"):
+        monkeypatch.setattr(client.cv2, name, Mock())
+
+    def next_frame(_):
+        if clock["index"] == len(offsets) - 1:
+            return ord("q")
+        clock["index"] += 1
+        return 0
+
+    monkeypatch.setattr(client.cv2, "waitKey", next_frame)
+    detector = Mock()
+    detector.detect.return_value = []
+    monkeypatch.setattr(client, "load_detector", lambda *args, **kwargs: detector)
+    monkeypatch.setattr(
+        client, "compute_occupancy", Mock(side_effect=[0.0, 0.5, 0.5, 0.5, 0.5])
+    )
+    socket = AsyncMock()
+    monkeypatch.setattr(client, "connect_ws", AsyncMock(return_value=socket))
+    emitted = []
+
+    async def send(ws, payload, headers):
+        emitted.append(json.loads(payload))
+        return ws
+
+    monkeypatch.setattr(client, "safe_send", send)
+    monkeypatch.setattr(client.asyncio, "sleep", AsyncMock())
+    asyncio.run(client.main())
+    assert [message["status"] for message in emitted] == [
+        "free",
+        "occupied",
+        "occupied",
+    ]
+    timestamps = [message["timestamp"] for message in emitted]
+    assert timestamps == [
+        "2026-10-19T12:00:00.100000Z",
+        "2026-10-19T12:00:00.800000Z",
+        "2026-10-19T12:00:30.900000Z",
+    ]
+    assert timestamps == sorted(timestamps)
