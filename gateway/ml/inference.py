@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 import time
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
+
 if __package__:
     from .history import physical_history
 else:

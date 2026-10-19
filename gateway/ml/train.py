@@ -14,6 +14,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from sqlalchemy import create_engine
 from dotenv import load_dotenv
+
 if __package__:
     from .history import physical_history
 else:
