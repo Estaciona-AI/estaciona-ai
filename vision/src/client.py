@@ -21,8 +21,8 @@ os.environ["QT_LOGGING_RULES"] = "*=false"
 import cv2
 import numpy as np
 from detector import load_detector
+from pipeline import VisionPipeline, preprocess_frame as preprocess_frame
 from occupancy import (
-    OccupancyTracker,
     build_spots_masks as build_spots_masks,
     compute_occupancy as compute_occupancy,
 )
@@ -46,29 +46,6 @@ def local_delivery():
         )
         DELIVERY = LocalDelivery(WS_URL, LocalOutbox(path))
     return DELIVERY
-
-
-CONF_THRESHOLD = 0.10
-BOX_SHRINK_FACTOR = 0.15
-GAMMA_CORRECTION = 1.4
-CLAHE_ENABLED = False
-
-
-def preprocess_frame(frame, gamma=1.0, clahe_enabled=False) -> np.ndarray:
-    processed = frame.copy()
-    if gamma != 1.0:
-        inv_gamma = 1.0 / gamma
-        table = np.array(
-            [((i / 255.0) ** inv_gamma) * 255 for i in np.arange(0, 256)]
-        ).astype("uint8")
-        processed = cv2.LUT(processed, table)
-    if clahe_enabled:
-        lab = cv2.cvtColor(processed, cv2.COLOR_BGR2LAB)
-        l, a, b = cv2.split(lab)
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        cl = clahe.apply(l)
-        processed = cv2.cvtColor(cv2.merge((cl, a, b)), cv2.COLOR_LAB2BGR)
-    return processed
 
 
 def load_spots(path: str) -> dict:
@@ -130,7 +107,7 @@ async def main():
         print("Error: could not read first frame.")
         return
 
-    tracker = OccupancyTracker(spots, frame.shape)
+    pipeline = VisionPipeline(model, spots, frame.shape)
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
     cv2.namedWindow("Estaciona AI - Vision", cv2.WINDOW_NORMAL)
@@ -156,7 +133,7 @@ async def main():
         ):
             last_sync_time = time.time()
             print("[VISION] Resyncing all spots state to gateway (30s heartbeat)")
-            for spot_id, status in tracker.confirmed_statuses().items():
+            for spot_id, status in pipeline.confirmed_statuses().items():
                 if status:
                     payload = {
                         "type": "SPOT_UPDATE",
@@ -181,21 +158,8 @@ async def main():
             cap = cv2.VideoCapture(video_list[current_video_idx])
             continue
 
-        inference_frame = preprocess_frame(
-            frame, gamma=GAMMA_CORRECTION, clahe_enabled=CLAHE_ENABLED
-        )
-
-        detections: list[tuple[int, int, int, int]] = []
-        for x1, y1, x2, y2 in model.detect(inference_frame, confidence=CONF_THRESHOLD):
-            w = x2 - x1
-            h = y2 - y1
-            shrink_w = int(w * BOX_SHRINK_FACTOR)
-            shrink_h = int(h * BOX_SHRINK_FACTOR)
-            detections.append(
-                (x1 + shrink_w, y1 + shrink_h, x2 - shrink_w, y2 - shrink_h)
-            )
-
-        for observation in tracker.update(detections, now=time.monotonic()):
+        result = pipeline.process(frame)
+        for observation in result.spots:
             spot_id, ratio = observation.spot_id, observation.ratio
             if observation.changed:
                 payload = {
@@ -230,7 +194,7 @@ async def main():
                 2,
             )
 
-        for x1, y1, x2, y2 in detections:
+        for x1, y1, x2, y2 in result.detections:
             cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
 
         curr_time = time.time()
