@@ -91,6 +91,7 @@ async def run_input(config, item, stop, report):
         sequence, epoch = 0, None
         next_sample, last_sync = 0.0, time.monotonic()
         period = 1.0 / item.fps
+        last_observation = None
         while not stop.is_set():
             now = time.monotonic()
             if now < next_sample:
@@ -113,7 +114,11 @@ async def run_input(config, item, stop, report):
                 raise PermanentInputError("frame does not match calibration dimensions")
             if pipeline is None:
                 pipeline = VisionPipeline(model, item.mapping.spots, frame.frame.shape)
-            elif epoch != frame.epoch:
+            elif epoch != frame.epoch or (
+                last_observation is not None
+                and frame.received_monotonic - last_observation
+                > max(config.max_frame_age, 2 * period)
+            ):
                 pipeline.reset_candidates(now=frame.received_monotonic)
             epoch = frame.epoch
             result = await asyncio.to_thread(
@@ -125,7 +130,9 @@ async def run_input(config, item, stop, report):
             # Never catch up missed sample slots with bursts of stale work.
             next_sample = max(now + period, time.monotonic())
             if result is None:
+                last_observation = None
                 continue
+            last_observation = frame.received_monotonic
             for observation in result.spots:
                 if observation.changed:
                     await persist(

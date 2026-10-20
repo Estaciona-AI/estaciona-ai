@@ -79,3 +79,18 @@ def test_reconnection_resets_candidates_but_preserves_confirmed_state():
     assert not pipeline.process(frame, now=10.1).spots[0].changed
     assert not pipeline.process(frame, now=10.2).spots[0].changed
     assert pipeline.process(frame, now=10.6).spots[0].changed
+
+
+def test_expired_inference_breaks_pending_confirmation(monkeypatch):
+    model = Mock()
+    model.detect.return_value = []
+    frame = np.zeros((10, 10, 3), dtype=np.uint8)
+    pipeline = VisionPipeline(
+        model, {"A": [[0, 0], [9, 0], [9, 9], [0, 9]]}, frame.shape
+    )
+    pipeline.process(frame, now=0)
+    model.detect.return_value = [(0, 0, 9, 9)]
+    pipeline.process(frame, now=1)
+    monkeypatch.setattr("pipeline.time.monotonic", lambda: 5)
+    assert pipeline.process(frame, now=2, expires_at=3) is None
+    assert not pipeline.process(frame, now=20).spots[0].changed
