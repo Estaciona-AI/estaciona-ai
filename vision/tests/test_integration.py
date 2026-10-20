@@ -126,11 +126,12 @@ def test_safe_send_retries_queued_updates_after_reconnect_failure():
 def test_main_emits_initial_transition_and_heartbeat_in_microsecond_order(monkeypatch):
     import datetime
     import time
+    import occupancy
     from unittest.mock import Mock
     import numpy as np
 
     base = datetime.datetime(2026, 10, 19, 12, 0, 0, tzinfo=datetime.UTC)
-    offsets = [0.1, 0.2, 0.7, 0.8, 30.9]
+    offsets = [0.1, 0.19, 0.7, 0.8, 30.9]
     clock = {"index": 0}
 
     def instant():
@@ -141,6 +142,7 @@ def test_main_emits_initial_transition_and_heartbeat_in_microsecond_order(monkey
         def now(cls, tz=None):
             return instant().astimezone(tz)
 
+    monkeypatch.setattr(client.time, "monotonic", lambda: offsets[clock["index"]])
     real_gmtime = time.gmtime
     monkeypatch.setattr(client.datetime, "datetime", Clock)
     monkeypatch.setattr(client.time, "time", lambda: instant().timestamp())
@@ -171,7 +173,7 @@ def test_main_emits_initial_transition_and_heartbeat_in_microsecond_order(monkey
     detector.detect.return_value = []
     monkeypatch.setattr(client, "load_detector", lambda *args, **kwargs: detector)
     monkeypatch.setattr(
-        client, "compute_occupancy", Mock(side_effect=[0.0, 0.5, 0.5, 0.5, 0.5])
+        occupancy, "compute_occupancy", Mock(side_effect=[0.0, 0.5, 0.5, 0.5, 0.5])
     )
     socket = AsyncMock()
     monkeypatch.setattr(client, "connect_ws", AsyncMock(return_value=socket))
