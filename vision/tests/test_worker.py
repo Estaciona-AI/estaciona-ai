@@ -219,3 +219,71 @@ def test_inference_does_not_block_delivery_of_previous_outbox(tmp_path, monkeypa
             assert outbox.first() is None or outbox.first()["event_id"] != event_id
 
     asyncio.run(scenario())
+
+
+def test_two_inputs_publish_distinct_spots_with_separate_outboxes(
+    tmp_path, monkeypatch
+):
+    from dataclasses import replace
+
+    module = importlib.import_module("worker")
+    monkeypatch.setenv("TEST_EDGE_KEY", "disposable")
+    monkeypatch.setattr(module, "LatestCapture", SyntheticCapture)
+    model = Mock()
+    model.detect.return_value = []
+    monkeypatch.setattr(module, "load_detector", lambda *args, **kwargs: model)
+    stop = threading.Event()
+    received = {}
+
+    async def scenario():
+        async def server(ws):
+            await ws.send(json.dumps({"type": "LOCAL_READY", "delivery_version": 1}))
+            event = json.loads(await ws.recv())
+            payload = event["payload"]
+            received[payload["camera_id"]] = payload["spot_id"]
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "LOCAL_ACK",
+                        "version": 1,
+                        "event_id": event["event_id"],
+                        "outcome": "persisted",
+                    }
+                )
+            )
+            if len(received) == 2:
+                await asyncio.sleep(0.1)
+                stop.set()
+
+        async with websockets.serve(server, "127.0.0.1", 0) as listener:
+            cfg = config(
+                tmp_path,
+                f"ws://127.0.0.1:{listener.sockets[0].getsockname()[1]}/ws/edge",
+            )
+            second = replace(
+                cfg.inputs[0],
+                input_id="cam-B",
+                mapping=Mapping(10, 10, {"B": [[0, 0], [9, 0], [9, 9], [0, 9]]}),
+            )
+            cfg = replace(cfg, inputs=(*cfg.inputs, second))
+            await asyncio.wait_for(
+                asyncio.gather(
+                    *(
+                        module.run_input(cfg, item, stop, lambda *args: None)
+                        for item in cfg.inputs
+                    )
+                ),
+                5,
+            )
+            directories = {
+                input_directory(cfg.state_dir, cfg.scope, item.input_id)
+                for item in cfg.inputs
+            }
+            assert len(directories) == 2
+            assert all(
+                LocalOutbox(directory / "outbox.db").first() is None
+                for directory in directories
+            )
+
+    asyncio.run(scenario())
+    assert received == {"cam-A": "A", "cam-B": "B"}
