@@ -166,3 +166,10 @@ def test_production_rejects_file_source(profile):
     path.write_text(json.dumps(descriptor))
     with pytest.raises(ValueError, match="production"):
         load(profile[0])
+
+
+def test_watchdog_must_allow_sampling_interval_and_processing_age(profile):
+    profile[1]["inputs"][0]["fps"] = 0.1
+    profile[1]["stall_timeout"] = 5
+    with pytest.raises(ValueError, match="sampling"):
+        load(save(profile))

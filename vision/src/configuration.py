@@ -296,6 +296,8 @@ def load_configuration(path) -> RuntimeConfiguration:
     stall = _number(data.get("stall_timeout", 30), 5, 300)
     if stall <= age:
         raise ConfigurationError("stall timeout must exceed frame age")
+    if any(stall <= 1.0 / item.fps + age for item in inputs):
+        raise ConfigurationError("stall timeout must allow sampling and processing age")
     return RuntimeConfiguration(
         org,
         installation,
