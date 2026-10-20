@@ -37,7 +37,7 @@ async fn verified_identity_reaches_runtime_and_uses_its_database(pool: PgPool) {
         verified,
         "test-jwt".into(),
         "test-pepper".into(),
-        site,
+        crate::installation::test_support::package(site),
         Default::default(),
     )
     .await
@@ -159,7 +159,7 @@ impl SiteFixture {
             verified,
             "synthetic-jwt".into(),
             "synthetic-pepper".into(),
-            crate::site_config::SiteConfig::load(&self.directory).unwrap(),
+            super::InstallationPackage::load(&self.directory).unwrap(),
             Default::default(),
         )
         .await

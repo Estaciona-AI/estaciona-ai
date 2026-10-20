@@ -474,13 +474,13 @@ mod origin_handshake_tests {
             crate::installation::test_support::provision(&pool).await,
             "r14-test-jwt".into(),
             "r14-test-pepper".into(),
-            SiteConfig {
+            crate::installation::test_support::package(SiteConfig {
                 directory: std::env::temp_dir(),
                 parkings: vec![ParkingLotConfig {
                     path: vec![PathNode { x: 0.0, z: 0.0 }, PathNode { x: 1.0, z: 0.0 }],
                 }],
                 spots: Vec::new(),
-            },
+            }),
             Default::default(),
         )
         .await

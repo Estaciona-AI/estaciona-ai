@@ -38,3 +38,9 @@ pub(crate) mod test_support;
 
 mod context;
 pub use context::InstallationContext;
+
+#[cfg(test)]
+mod package_tests;
+
+mod package;
+pub use package::{InstallationPackage, PackageError};

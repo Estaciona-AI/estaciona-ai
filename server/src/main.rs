@@ -155,7 +155,7 @@ async fn main() {
     let plate_pepper =
         std::env::var("PLATE_SECRET_PEPPER").expect("PLATE_SECRET_PEPPER missing in .env");
     let jwt_secret = std::env::var("JWT_SECRET").expect("JWT_SECRET missing in .env");
-    let site = site_config::SiteConfig::load(site_data_dir)
+    let site = installation::InstallationPackage::load(site_data_dir)
         .expect("Failed to load installation maps from SITE_DATA_DIR");
     let lpr_setting = std::env::var("LPR_ENABLED");
     let lpr_mode = match &lpr_setting {

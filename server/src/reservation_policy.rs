@@ -4,7 +4,10 @@
 //! Installation-owned policy, passed explicitly to the reservation service.
 //! A future tenant resolver can supply this value without transport-specific rules.
 use serde::Deserialize;
-use std::{io, path::Path};
+use std::{
+    io::{self, Read},
+    path::Path,
+};
 
 #[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -28,11 +31,28 @@ impl Default for ReservationPolicy {
 
 impl ReservationPolicy {
     pub fn load(directory: &Path) -> io::Result<Self> {
-        let content = match std::fs::read(directory.join("reservation_policy.json")) {
-            Ok(content) => content,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
+        let path = directory.join("reservation_policy.json");
+        let file = match std::fs::File::open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                if matches!(std::fs::symlink_metadata(&path), Err(ref e) if e.kind() == io::ErrorKind::NotFound)
+                {
+                    return Ok(Self::default());
+                }
+                return Err(error);
+            }
             Err(error) => return Err(error),
         };
+        const MAX_POLICY_BYTES: usize = 16 * 1024;
+        let mut content = Vec::new();
+        file.take((MAX_POLICY_BYTES + 1) as u64)
+            .read_to_end(&mut content)?;
+        if content.len() > MAX_POLICY_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Reservation policy exceeds 16 KiB",
+            ));
+        }
         let policy: Self = serde_json::from_slice(&content).map_err(io::Error::other)?;
         policy.validate()?;
         Ok(policy)
