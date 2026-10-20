@@ -219,8 +219,8 @@ mod tests {
     async fn principal(state: &crate::state::SharedState, role: &str) -> axum::http::HeaderMap {
         let id = uuid::Uuid::new_v4();
         sqlx::query("INSERT INTO users (id, name, email, password_hash, role) VALUES ($1, 'R10 fixture', $2, 'unused-hash', $3)")
-            .bind(id).bind(format!("{id}@example.invalid")).bind(role).execute(&state.pool).await.unwrap();
-        let token = crate::sessions::issue(&state.pool, id, role, &state.jwt_secret)
+            .bind(id).bind(format!("{id}@example.invalid")).bind(role).execute(state.installation.pool()).await.unwrap();
+        let token = crate::sessions::issue(state.installation.pool(), id, role, &state.jwt_secret)
             .await
             .unwrap();
         let mut headers = axum::http::HeaderMap::new();
@@ -274,7 +274,7 @@ mod tests {
         let original = fixture.read();
         let state = fixture.state(pool).await;
         let user_headers = principal(&state, "user").await;
-        let (release, task) = pause_writer(state.config_store.clone()).await;
+        let (release, task) = pause_writer(state.installation.config_store.clone()).await;
         for (headers, expected) in [
             (
                 axum::http::HeaderMap::new(),
@@ -303,7 +303,7 @@ mod tests {
         let original = fixture.read();
         let state = fixture.state(pool).await;
         let headers = principal(&state, "admin").await;
-        let (release, task) = pause_writer(state.config_store.clone()).await;
+        let (release, task) = pause_writer(state.installation.config_store.clone()).await;
         let response = crate::save_config(
             axum::extract::State(state.clone()),
             headers.clone(),
@@ -425,6 +425,7 @@ mod tests {
         assert_eq!(fixture.read(), initial);
         assert_eq!(
             state
+                .installation
                 .graph
                 .read()
                 .await

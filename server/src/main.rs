@@ -173,9 +173,9 @@ async fn main() {
         .await
         .expect("Failed to reconcile installation map");
 
-    tracing::info!(organization_id = %parking_state.installation_identity().organization_id(),
-        installation_id = %parking_state.installation_identity().installation_id(),
-        environment = ?parking_state.installation_identity().environment(),
+    tracing::info!(organization_id = %parking_state.installation.identity().organization_id(),
+        installation_id = %parking_state.installation.identity().installation_id(),
+        environment = ?parking_state.installation.identity().environment(),
         "Installation runtime ready");
 
     let cors = CorsLayer::new()
@@ -241,7 +241,7 @@ async fn main() {
     let listener = TcpListener::bind("0.0.0.0:8000").await.unwrap();
     tracing::info!("Server listening on {}", listener.local_addr().unwrap());
 
-    ws_tickets::spawn_cleanup(parking_state.pool.clone());
+    ws_tickets::spawn_cleanup(parking_state.installation.pool().clone());
     let state_for_bg_task = parking_state;
 
     tokio::spawn(async move {
@@ -253,7 +253,7 @@ async fn main() {
             let expired_ids = sqlx::query_scalar::<_, uuid::Uuid>(
                 "SELECT id FROM reservations WHERE status = 'active' AND expires_at < NOW()",
             )
-            .fetch_all(&state_for_bg_task.pool)
+            .fetch_all(state_for_bg_task.installation.pool())
             .await;
             let ids = match expired_ids {
                 Ok(ids) => ids,
@@ -265,7 +265,7 @@ async fn main() {
 
             for id in ids {
                 let transition = reservation_store::finish(
-                    &state_for_bg_task.pool,
+                    state_for_bg_task.installation.pool(),
                     id,
                     reservation_store::FinishReason::Expired,
                 )
@@ -277,7 +277,8 @@ async fn main() {
                         };
                         if let Ok(json) = serde_json::to_string(&expired_msg)
                             && let Some(user_id) = record.user_id
-                            && let Some(user_tx) = state_for_bg_task.user_sessions.get(&user_id)
+                            && let Some(user_tx) =
+                                state_for_bg_task.installation.user_sessions.get(&user_id)
                         {
                             let _ = user_tx.try_send(json);
                         }
@@ -287,7 +288,7 @@ async fn main() {
                                 status: status.to_string(),
                             };
                             if let Ok(json) = serde_json::to_string(&update_msg) {
-                                let _ = state_for_bg_task.tx.send(json);
+                                let _ = state_for_bg_task.installation.tx.send(json);
                             }
                         }
                     }
@@ -339,27 +340,32 @@ async fn save_config(
     headers: HeaderMap,
     axum::Json(payload): axum::Json<serde_json::Value>,
 ) -> Result<&'static str, (axum::http::StatusCode, String)> {
-    crate::security::require_admin(&headers, &state.jwt_secret, &state.pool).await?;
-    state.config_store.save(payload).await.map_err(|error| {
-        let error = match error {
-            config_store::ConfigWriteError::Busy => {
-                return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "Configuration write already in progress".to_owned(),
-                );
+    crate::security::require_admin(&headers, &state.jwt_secret, state.installation.pool()).await?;
+    state
+        .installation
+        .config_store
+        .save(payload)
+        .await
+        .map_err(|error| {
+            let error = match error {
+                config_store::ConfigWriteError::Busy => {
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "Configuration write already in progress".to_owned(),
+                    );
+                }
+                config_store::ConfigWriteError::Storage(error) => error,
+            };
+            if error.kind() == std::io::ErrorKind::InvalidData {
+                (StatusCode::BAD_REQUEST, error.to_string())
+            } else {
+                tracing::error!(%error, "Failed to persist parking configuration");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to save configuration".to_owned(),
+                )
             }
-            config_store::ConfigWriteError::Storage(error) => error,
-        };
-        if error.kind() == std::io::ErrorKind::InvalidData {
-            (StatusCode::BAD_REQUEST, error.to_string())
-        } else {
-            tracing::error!(%error, "Failed to persist parking configuration");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to save configuration".to_owned(),
-            )
-        }
-    })?;
+        })?;
 
     Ok(r#"{"status": "ok"}"#)
 }

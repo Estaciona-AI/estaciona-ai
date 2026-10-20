@@ -3,7 +3,7 @@
 
 use std::{
     net::SocketAddr,
-    sync::{Arc, Mutex, mpsc},
+    sync::{Arc, mpsc},
     time::{Duration, Instant},
 };
 
@@ -16,12 +16,11 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use dashmap::DashMap;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::{RwLock, broadcast, oneshot},
+    sync::oneshot,
     task::JoinHandle,
 };
 use uuid::Uuid;
@@ -35,23 +34,15 @@ use crate::{
 };
 
 fn fixture(pool: PgPool) -> SharedState {
-    let (tx, _) = broadcast::channel(100);
     Arc::new(AppState {
-        installation_binding: crate::installation::test_support::unverified_for_unit_test(&pool),
-        lpr_mode: Default::default(),
-        pool,
-        tx,
-        user_sessions: DashMap::new(),
-        graph: RwLock::new(ParkingGraph::new()),
-        jwt_secret: "r04-disposable-jwt-secret".to_owned(),
-        plate_pepper: "r04-disposable-plate-pepper".to_owned(),
-        reservation_policy: Default::default(),
-        auth_limits: Default::default(),
-        forecast_writer: Default::default(),
-        last_trend_prediction: Mutex::new(None),
-        config_store: crate::config_store::LocalConfigStore::new(
+        installation: crate::installation::InstallationContext::for_unit_test(
+            crate::installation::test_support::unverified_for_unit_test(&pool),
+            ParkingGraph::new(),
             std::env::temp_dir().join(format!("r04-auth-{}", Uuid::new_v4())),
         ),
+        jwt_secret: "r04-disposable-jwt-secret".to_owned(),
+        plate_pepper: "r04-disposable-plate-pepper".to_owned(),
+        auth_limits: Default::default(),
     })
 }
 

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Guilherme Pedroza
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::{
     Json,
@@ -11,9 +11,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use chrono::{Duration, Utc};
-use dashmap::DashMap;
 use sqlx::PgPool;
-use tokio::sync::{RwLock, broadcast};
 use uuid::Uuid;
 
 use crate::{
@@ -54,23 +52,15 @@ impl Fixture {
             .execute(&pool)
             .await?;
 
-        let (tx, _) = broadcast::channel(100);
         let state = Arc::new(AppState {
-            installation_binding: verified,
-            lpr_mode: Default::default(),
-            pool,
-            reservation_policy: Default::default(),
-            auth_limits: Default::default(),
-            tx,
-            user_sessions: DashMap::new(),
-            graph: RwLock::new(ParkingGraph::new()),
-            jwt_secret: "r01-disposable-jwt-secret".to_owned(),
-            plate_pepper: "r01-disposable-plate-pepper".to_owned(),
-            forecast_writer: Default::default(),
-            last_trend_prediction: Mutex::new(None),
-            config_store: crate::config_store::LocalConfigStore::new(
+            installation: crate::installation::InstallationContext::for_unit_test(
+                verified,
+                ParkingGraph::new(),
                 std::env::temp_dir().join(format!("r01-reservation-{owner}")),
             ),
+            auth_limits: Default::default(),
+            jwt_secret: "r01-disposable-jwt-secret".to_owned(),
+            plate_pepper: "r01-disposable-plate-pepper".to_owned(),
         });
 
         Ok(Self {
@@ -89,16 +79,16 @@ impl Fixture {
         let key = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         sqlx::query("INSERT INTO edge_gateways (id,name,credential_digest) VALUES ($1,'reservation-fixture',$2)")
             .bind(gateway_id).bind(crate::edge_auth::credential_digest(&key).as_slice())
-            .execute(&self.state.pool).await?;
+            .execute(self.state.installation.pool()).await?;
         sqlx::query("INSERT INTO edge_camera_grants (gateway_id,camera_id,spot_update) VALUES ($1,'fixture-camera',true)")
-            .bind(gateway_id).execute(&self.state.pool).await?;
+            .bind(gateway_id).execute(self.state.installation.pool()).await?;
         sqlx::query("INSERT INTO edge_camera_spots (gateway_id,camera_id,spot_id) VALUES ($1,'fixture-camera',$2)")
-            .bind(gateway_id).bind(&self.spot_id).execute(&self.state.pool).await?;
-        let principal = crate::edge_auth::authenticate(&self.state.pool, &key)
+            .bind(gateway_id).bind(&self.spot_id).execute(self.state.installation.pool()).await?;
+        let principal = crate::edge_auth::authenticate(self.state.installation.pool(), &key)
             .await?
             .expect("registered edge fixture");
         Ok(crate::edge_delivery::apply_legacy(
-            &self.state.pool,
+            self.state.installation.pool(),
             &principal,
             "fixture-camera",
             &self.spot_id,
@@ -110,9 +100,14 @@ impl Fixture {
     }
 
     async fn headers(&self, user_id: Uuid, role: &str) -> HeaderMap {
-        let token = crate::sessions::issue(&self.state.pool, user_id, role, &self.state.jwt_secret)
-            .await
-            .expect("fixture JWT must be valid");
+        let token = crate::sessions::issue(
+            self.state.installation.pool(),
+            user_id,
+            role,
+            &self.state.jwt_secret,
+        )
+        .await
+        .expect("fixture JWT must be valid");
         let mut headers = HeaderMap::new();
         headers.insert(
             header::AUTHORIZATION,
@@ -165,14 +160,14 @@ impl Fixture {
     async fn spot_status(&self) -> Result<String, sqlx::Error> {
         sqlx::query_scalar("SELECT status FROM spots WHERE id = $1")
             .bind(&self.spot_id)
-            .fetch_one(&self.state.pool)
+            .fetch_one(self.state.installation.pool())
             .await
     }
 
     async fn reservation_status(&self, id: Uuid) -> Result<String, sqlx::Error> {
         sqlx::query_scalar("SELECT status FROM reservations WHERE id = $1")
             .bind(id)
-            .fetch_one(&self.state.pool)
+            .fetch_one(self.state.installation.pool())
             .await
     }
 
@@ -181,7 +176,7 @@ impl Fixture {
             "SELECT COUNT(*) FROM reservations WHERE spot_id = $1 AND status = 'active'",
         )
         .bind(&self.spot_id)
-        .fetch_one(&self.state.pool)
+        .fetch_one(self.state.installation.pool())
         .await
     }
 }
@@ -192,7 +187,7 @@ async fn r03_demoted_admin_cannot_mutate_a_spot(pool: PgPool) -> Result<(), sqlx
     let headers = fixture.headers(fixture.admin, "admin").await;
     sqlx::query("UPDATE users SET role = 'user' WHERE id = $1")
         .bind(fixture.admin)
-        .execute(&fixture.state.pool)
+        .execute(fixture.state.installation.pool())
         .await?;
     let response = reservations::update_spot_status(
         State(fixture.state.clone()),
@@ -215,7 +210,7 @@ async fn r03_deleted_user_cannot_create_a_reservation(pool: PgPool) -> Result<()
     let headers = fixture.headers(fixture.owner, "user").await;
     sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(fixture.owner)
-        .execute(&fixture.state.pool)
+        .execute(fixture.state.installation.pool())
         .await?;
     let response = reservations::create_reservation(
         State(fixture.state.clone()),
@@ -239,7 +234,7 @@ async fn r03_authorization_database_failure_denies_admin_mutation(
 ) -> Result<(), sqlx::Error> {
     let fixture = Fixture::new(pool).await?;
     sqlx::query("ALTER TABLE users RENAME TO unavailable_users")
-        .execute(&fixture.state.pool)
+        .execute(fixture.state.installation.pool())
         .await?;
     let response = reservations::update_spot_status(
         State(fixture.state.clone()),
@@ -298,7 +293,7 @@ async fn database_rejects_two_active_reservations_for_one_spot(
     .bind(Uuid::new_v4())
     .bind(fixture.other)
     .bind(&fixture.spot_id)
-    .execute(&fixture.state.pool)
+    .execute(fixture.state.installation.pool())
     .await;
 
     let error = result.expect_err("the database must enforce one active reservation per spot");
@@ -353,7 +348,7 @@ async fn rest_cancel_rolls_back_when_releasing_the_spot_fails(
              BEFORE UPDATE ON spots
              FOR EACH ROW EXECUTE FUNCTION reject_test_spot_release();",
     )
-    .execute(&fixture.state.pool)
+    .execute(fixture.state.installation.pool())
     .await?;
 
     let response = reservations::cancel_reservation(
@@ -380,7 +375,7 @@ async fn unconfirmed_occupancy_does_not_overwrite_a_newer_free_observation(
     fixture.update_spot("free").await;
 
     let outcome = crate::reservation_store::finish(
-        &fixture.state.pool,
+        fixture.state.installation.pool(),
         id,
         crate::reservation_store::FinishReason::UnconfirmedOccupancy,
     )
@@ -400,7 +395,7 @@ async fn unconfirmed_occupancy_finishes_only_the_active_reservation(
     fixture.update_spot("occupied").await;
 
     let outcome = crate::reservation_store::finish(
-        &fixture.state.pool,
+        fixture.state.installation.pool(),
         id,
         crate::reservation_store::FinishReason::UnconfirmedOccupancy,
     )
@@ -418,7 +413,7 @@ async fn failed_reservation_insert_rolls_back_the_spot_claim(
 ) -> Result<(), sqlx::Error> {
     let fixture = Fixture::new(pool).await?;
     let outcome = crate::reservation_store::create(
-        &fixture.state.pool,
+        fixture.state.installation.pool(),
         &fixture.spot_id,
         Uuid::new_v4(), // Missing user: a persistence failure, not spot contention.
         &crate::reservation_policy::ReservationPolicy::default(),
@@ -441,7 +436,7 @@ async fn occupied_observation_rolls_back_if_capturing_its_reservation_fails(
     fixture.create_for_owner().await;
     // Simulate a persistence failure after the spot write, not a valid empty lookup.
     sqlx::query("DROP TABLE reservations")
-        .execute(&fixture.state.pool)
+        .execute(fixture.state.installation.pool())
         .await?;
 
     let result = fixture.observe_occupied().await;
@@ -473,16 +468,16 @@ async fn retired_spot_rejects_admin_mutation_without_releasing_history(pool: PgP
     let f = Fixture::new(pool).await.unwrap();
     sqlx::query("UPDATE spots SET is_active=FALSE,status='occupied' WHERE id=$1")
         .bind(&f.spot_id)
-        .execute(&f.state.pool)
+        .execute(f.state.installation.pool())
         .await
         .unwrap();
     sqlx::query("INSERT INTO user_occupancy_history (user_id,spot_id) VALUES ($1,$2)")
         .bind(f.owner)
         .bind(&f.spot_id)
-        .execute(&f.state.pool)
+        .execute(f.state.installation.pool())
         .await
         .unwrap();
-    let mut updates = f.state.tx.subscribe();
+    let mut updates = f.state.installation.tx.subscribe();
     let response = reservations::update_spot_status(
         State(f.state.clone()),
         Path(f.spot_id.clone()),
@@ -500,7 +495,7 @@ async fn retired_spot_rejects_admin_mutation_without_releasing_history(pool: PgP
             "SELECT COUNT(*) FROM user_occupancy_history WHERE spot_id=$1 AND released_at IS NULL"
         )
         .bind(&f.spot_id)
-        .fetch_one(&f.state.pool)
+        .fetch_one(f.state.installation.pool())
         .await
         .unwrap(),
         1
@@ -510,11 +505,11 @@ async fn retired_spot_rejects_admin_mutation_without_releasing_history(pool: PgP
 async fn assert_recommendation_ignores_retired(pool: PgPool, branch: &str) {
     let f = Fixture::new(pool).await.unwrap();
     let retired = if branch == "priority" { "A-01" } else { "B-07" };
-    sqlx::query("INSERT INTO spots (id,status,x,y,is_active) VALUES ($1,'free',1,0,FALSE),('C-01','free',10,0,TRUE)").bind(retired).execute(&f.state.pool).await.unwrap();
+    sqlx::query("INSERT INTO spots (id,status,x,y,is_active) VALUES ($1,'free',1,0,FALSE),('C-01','free',10,0,TRUE)").bind(retired).execute(f.state.installation.pool()).await.unwrap();
     if branch == "priority" {
         sqlx::query("UPDATE users SET pcd_status=TRUE WHERE id=$1")
             .bind(f.owner)
-            .execute(&f.state.pool)
+            .execute(f.state.installation.pool())
             .await
             .unwrap();
     }
@@ -523,7 +518,7 @@ async fn assert_recommendation_ignores_retired(pool: PgPool, branch: &str) {
             sqlx::query("INSERT INTO user_occupancy_history (user_id,spot_id) VALUES ($1,$2)")
                 .bind(f.owner)
                 .bind(retired)
-                .execute(&f.state.pool)
+                .execute(f.state.installation.pool())
                 .await
                 .unwrap();
         }
@@ -534,7 +529,7 @@ async fn assert_recommendation_ignores_retired(pool: PgPool, branch: &str) {
     let current = graph.add_node("C-01", 10.0, 0.0).unwrap();
     graph.add_edge(cam, old, 1, true);
     graph.add_edge(cam, current, 10, true);
-    *f.state.graph.write().await = graph;
+    *f.state.installation.graph.write().await = graph;
     let response = reservations::recommend_spot(
         State(f.state.clone()),
         f.headers(f.owner, "user").await,
@@ -566,7 +561,7 @@ async fn recommendation_fixture(pool: PgPool) -> Fixture {
     let camera = graph.add_node("cam-01", 0.0, 0.0).unwrap();
     let spot = graph.add_node(&f.spot_id, 1.0, 0.0).unwrap();
     graph.add_edge(camera, spot, 1, true);
-    *f.state.graph.write().await = graph;
+    *f.state.installation.graph.write().await = graph;
     f
 }
 
@@ -581,7 +576,7 @@ async fn recommendation_response(f: &Fixture) -> Response {
 }
 
 async fn assert_recommendation_unavailable(f: &Fixture) {
-    let mut updates = f.state.tx.subscribe();
+    let mut updates = f.state.installation.tx.subscribe();
     let response = recommendation_response(f).await;
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let body = to_bytes(response.into_body(), 16384).await.unwrap();
@@ -609,7 +604,7 @@ async fn r08_priority_query_failure_does_not_fall_back_to_an_ordinary_spot(pool:
     let f = recommendation_fixture(pool).await;
     // Break the priority query at prepare time, while the role lookup still works.
     sqlx::query("ALTER TABLE users RENAME COLUMN pcd_status TO r08_unavailable")
-        .execute(&f.state.pool)
+        .execute(f.state.installation.pool())
         .await
         .unwrap();
     assert_recommendation_unavailable(&f).await;
@@ -619,7 +614,7 @@ async fn r08_priority_query_failure_does_not_fall_back_to_an_ordinary_spot(pool:
 async fn r08_history_count_failure_does_not_fall_back_to_the_closest_spot(pool: PgPool) {
     let f = recommendation_fixture(pool).await;
     sqlx::query("ALTER TABLE user_occupancy_history RENAME TO r08_unavailable")
-        .execute(&f.state.pool)
+        .execute(f.state.installation.pool())
         .await
         .unwrap();
     assert_recommendation_unavailable(&f).await;
@@ -632,13 +627,13 @@ async fn r08_favorite_lookup_failure_does_not_fall_back_to_the_closest_spot(pool
         sqlx::query("INSERT INTO user_occupancy_history (user_id,spot_id) VALUES ($1,$2)")
             .bind(f.owner)
             .bind(&f.spot_id)
-            .execute(&f.state.pool)
+            .execute(f.state.installation.pool())
             .await
             .unwrap();
     }
     // COUNT(*) still works; only the subsequent favorite lookup loses its column.
     sqlx::query("ALTER TABLE user_occupancy_history RENAME COLUMN spot_id TO r08_unavailable")
-        .execute(&f.state.pool)
+        .execute(f.state.installation.pool())
         .await
         .unwrap();
     assert_recommendation_unavailable(&f).await;
@@ -661,7 +656,7 @@ async fn r08_free_spots_query_failure_is_unavailable_instead_of_full(pool: PgPoo
          CREATE VIEW spots AS SELECT * FROM r08_original_spots
          WHERE r08_free_read_allowed();",
     )
-    .execute(&f.state.pool)
+    .execute(f.state.installation.pool())
     .await
     .unwrap();
     assert_recommendation_unavailable(&f).await;
@@ -671,7 +666,7 @@ async fn r08_free_spots_query_failure_is_unavailable_instead_of_full(pool: PgPoo
 async fn r08_successful_empty_lookup_still_reports_full(pool: PgPool) {
     let f = recommendation_fixture(pool).await;
     sqlx::query("UPDATE spots SET status='occupied'")
-        .execute(&f.state.pool)
+        .execute(f.state.installation.pool())
         .await
         .unwrap();
     let response = recommendation_response(&f).await;
@@ -692,7 +687,7 @@ async fn assert_recommended_spot(f: &Fixture, expected: &str) {
 async fn add_preferred_spot(f: &Fixture, spot_id: &str) {
     sqlx::query("INSERT INTO spots (id,status,x,y) VALUES ($1,'free',10,0)")
         .bind(spot_id)
-        .execute(&f.state.pool)
+        .execute(f.state.installation.pool())
         .await
         .unwrap();
     let mut graph = ParkingGraph::new();
@@ -701,7 +696,7 @@ async fn add_preferred_spot(f: &Fixture, spot_id: &str) {
     let preferred = graph.add_node(spot_id, 10.0, 0.0).unwrap();
     graph.add_edge(camera, ordinary, 1, true);
     graph.add_edge(camera, preferred, 10, true);
-    *f.state.graph.write().await = graph;
+    *f.state.installation.graph.write().await = graph;
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -710,7 +705,7 @@ async fn r08_valid_priority_still_takes_precedence_over_distance(pool: PgPool) {
     add_preferred_spot(&f, "A-01").await;
     sqlx::query("UPDATE users SET pcd_status=TRUE WHERE id=$1")
         .bind(f.owner)
-        .execute(&f.state.pool)
+        .execute(f.state.installation.pool())
         .await
         .unwrap();
     assert_recommended_spot(&f, "A-01").await;
@@ -723,7 +718,7 @@ async fn r08_valid_history_still_takes_precedence_over_distance(pool: PgPool) {
     for _ in 0..3 {
         sqlx::query("INSERT INTO user_occupancy_history (user_id,spot_id) VALUES ($1,'B-07')")
             .bind(f.owner)
-            .execute(&f.state.pool)
+            .execute(f.state.installation.pool())
             .await
             .unwrap();
     }
@@ -761,7 +756,7 @@ async fn server_ignores_client_expiry_and_uses_its_hold_period(
         "SELECT created_at,expires_at FROM reservations WHERE spot_id=$1 AND status='active'",
     )
     .bind(&fixture.spot_id)
-    .fetch_one(&fixture.state.pool)
+    .fetch_one(fixture.state.installation.pool())
     .await?;
     assert!((expires - created).num_seconds() <= 900);
     assert!((expires - created).num_seconds() >= 899);
@@ -774,7 +769,7 @@ async fn concurrent_same_user_cannot_reserve_two_distinct_spots(
 ) -> Result<(), sqlx::Error> {
     let fixture = Fixture::new(pool).await?;
     sqlx::query("INSERT INTO spots (id,status,x,y) VALUES ('policy-second','free',0,0)")
-        .execute(&fixture.state.pool)
+        .execute(fixture.state.installation.pool())
         .await?;
     let first = reservations::create_reservation(
         State(fixture.state.clone()),
@@ -799,7 +794,7 @@ async fn concurrent_same_user_cannot_reserve_two_distinct_spots(
     ];
     statuses.sort();
     assert_eq!(statuses, [200, 409]);
-    let (active,free): (i64,i64) = sqlx::query_as("SELECT (SELECT count(*) FROM reservations WHERE user_id=$1 AND status='active'),(SELECT count(*) FROM spots WHERE id IN ($2,'policy-second') AND status='free')").bind(fixture.owner).bind(&fixture.spot_id).fetch_one(&fixture.state.pool).await?;
+    let (active,free): (i64,i64) = sqlx::query_as("SELECT (SELECT count(*) FROM reservations WHERE user_id=$1 AND status='active'),(SELECT count(*) FROM spots WHERE id IN ($2,'policy-second') AND status='free')").bind(fixture.owner).bind(&fixture.spot_id).fetch_one(fixture.state.installation.pool()).await?;
     assert_eq!((active, free), (1, 1));
     Ok(())
 }
@@ -810,7 +805,7 @@ async fn extension_cannot_revive_expired_reservation(pool: PgPool) -> Result<(),
     let id = fixture.create_for_owner().await;
     sqlx::query("UPDATE reservations SET expires_at=NOW()-INTERVAL '1 second' WHERE id=$1")
         .bind(id)
-        .execute(&fixture.state.pool)
+        .execute(fixture.state.installation.pool())
         .await?;
     let response = reservations::extend_reservation(
         State(fixture.state.clone()),
@@ -828,19 +823,24 @@ async fn policy_can_allow_two_reservations_without_a_global_user_constraint(
     pool: PgPool,
 ) -> Result<(), sqlx::Error> {
     let fixture = Fixture::new(pool).await?;
-    sqlx::query("INSERT INTO spots (id,status,x,y) VALUES ('policy-second','free',0,0),('policy-third','free',0,0)").execute(&fixture.state.pool).await?;
+    sqlx::query("INSERT INTO spots (id,status,x,y) VALUES ('policy-second','free',0,0),('policy-third','free',0,0)").execute(fixture.state.installation.pool()).await?;
     let policy = crate::reservation_policy::ReservationPolicy {
         max_active_per_user: 2,
         ..Default::default()
     };
     for spot in [&fixture.spot_id, "policy-second"] {
-        crate::reservation_store::create(&fixture.state.pool, spot, fixture.owner, &policy)
-            .await
-            .expect("policy allows two active reservations");
+        crate::reservation_store::create(
+            fixture.state.installation.pool(),
+            spot,
+            fixture.owner,
+            &policy,
+        )
+        .await
+        .expect("policy allows two active reservations");
     }
     assert!(matches!(
         crate::reservation_store::create(
-            &fixture.state.pool,
+            fixture.state.installation.pool(),
             "policy-third",
             fixture.owner,
             &policy
@@ -858,7 +858,7 @@ async fn renewal_preserves_occupied_status_and_caps_total_lifetime(
     let fixture = Fixture::new(pool).await?;
     let id = fixture.create_for_owner().await;
     fixture.update_spot("occupied").await;
-    sqlx::query("UPDATE reservations SET created_at=NOW()-INTERVAL '29 minutes 50 seconds',expires_at=NOW()+INTERVAL '5 seconds' WHERE id=$1").bind(id).execute(&fixture.state.pool).await?;
+    sqlx::query("UPDATE reservations SET created_at=NOW()-INTERVAL '29 minutes 50 seconds',expires_at=NOW()+INTERVAL '5 seconds' WHERE id=$1").bind(id).execute(fixture.state.installation.pool()).await?;
     let headers = fixture.headers(fixture.owner, "user").await;
     let response =
         reservations::extend_reservation(State(fixture.state.clone()), Path(id), headers)
@@ -870,7 +870,7 @@ async fn renewal_preserves_occupied_status_and_caps_total_lifetime(
         "SELECT EXTRACT(EPOCH FROM expires_at-created_at)::float8 FROM reservations WHERE id=$1",
     )
     .bind(id)
-    .fetch_one(&fixture.state.pool)
+    .fetch_one(fixture.state.installation.pool())
     .await?;
     assert_eq!(lifetime, 1800.0);
     let response = reservations::extend_reservation(
@@ -903,7 +903,7 @@ async fn confirmation_before_observation_preserves_active_reservation(
     let history: i64 =
         sqlx::query_scalar("SELECT count(*) FROM user_occupancy_history WHERE spot_id=$1")
             .bind(&fixture.spot_id)
-            .fetch_one(&fixture.state.pool)
+            .fetch_one(fixture.state.installation.pool())
             .await?;
     assert_eq!(history, 0);
     Ok(())
@@ -918,7 +918,7 @@ async fn confirmation_rejects_expired_reservation_even_when_occupied(
     fixture.update_spot("occupied").await;
     sqlx::query("UPDATE reservations SET expires_at=NOW()-INTERVAL '1 second' WHERE id=$1")
         .bind(id)
-        .execute(&fixture.state.pool)
+        .execute(fixture.state.installation.pool())
         .await?;
     let response = reservations::confirm_occupancy(
         State(fixture.state.clone()),
@@ -954,7 +954,7 @@ async fn confirmation_records_history_once_after_observation(
     let history: i64 =
         sqlx::query_scalar("SELECT count(*) FROM user_occupancy_history WHERE spot_id=$1")
             .bind(&fixture.spot_id)
-            .fetch_one(&fixture.state.pool)
+            .fetch_one(fixture.state.installation.pool())
             .await?;
     assert_eq!(history, 1);
     Ok(())
@@ -967,7 +967,7 @@ async fn confirmation_rolls_back_when_history_insert_fails(
     let fixture = Fixture::new(pool).await?;
     let id = fixture.create_for_owner().await;
     fixture.update_spot("occupied").await;
-    sqlx::raw_sql("CREATE FUNCTION reject_confirmation_history() RETURNS TRIGGER LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected history failure'; END; $$; CREATE TRIGGER reject_confirmation_history BEFORE INSERT ON user_occupancy_history FOR EACH ROW EXECUTE FUNCTION reject_confirmation_history();").execute(&fixture.state.pool).await?;
+    sqlx::raw_sql("CREATE FUNCTION reject_confirmation_history() RETURNS TRIGGER LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected history failure'; END; $$; CREATE TRIGGER reject_confirmation_history BEFORE INSERT ON user_occupancy_history FOR EACH ROW EXECUTE FUNCTION reject_confirmation_history();").execute(fixture.state.installation.pool()).await?;
     let response = reservations::confirm_occupancy(
         State(fixture.state.clone()),
         Path(id),
@@ -989,9 +989,9 @@ async fn confirmation_and_cancellation_have_one_terminal_winner(
     let id = fixture.create_for_owner().await;
     fixture.update_spot("occupied").await;
     let (confirmation, cancellation) = tokio::join!(
-        crate::reservation_store::confirm(&fixture.state.pool, id, fixture.owner),
+        crate::reservation_store::confirm(fixture.state.installation.pool(), id, fixture.owner),
         crate::reservation_store::finish(
-            &fixture.state.pool,
+            fixture.state.installation.pool(),
             id,
             crate::reservation_store::FinishReason::Cancel {
                 user_id: fixture.owner
@@ -1003,7 +1003,7 @@ async fn confirmation_and_cancellation_have_one_terminal_winner(
     let history: i64 =
         sqlx::query_scalar("SELECT count(*) FROM user_occupancy_history WHERE spot_id=$1")
             .bind(&fixture.spot_id)
-            .fetch_one(&fixture.state.pool)
+            .fetch_one(fixture.state.installation.pool())
             .await?;
     if confirmation.is_ok() {
         assert_eq!(terminal, "completed");

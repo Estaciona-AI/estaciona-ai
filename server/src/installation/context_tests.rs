@@ -42,7 +42,33 @@ async fn verified_identity_reaches_runtime_and_uses_its_database(pool: PgPool) {
     )
     .await
     .unwrap();
-    assert_eq!(state.installation_identity(), identity);
+    assert_eq!(state.installation.identity(), identity);
+    assert_eq!(state.installation.reservation_policy.hold_seconds, 900);
+    assert!(
+        state
+            .installation
+            .last_trend_prediction
+            .lock()
+            .unwrap()
+            .is_none()
+    );
+    assert!(state.installation.user_sessions.is_empty());
+    let mut updates = state.installation.tx.subscribe();
+    state
+        .installation
+        .tx
+        .send("synthetic-update".into())
+        .unwrap();
+    assert_eq!(updates.recv().await.unwrap(), "synthetic-update");
+    assert!(
+        state
+            .installation
+            .graph
+            .read()
+            .await
+            .calculate_route("cam-01", "verified-spot")
+            .is_some()
+    );
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM spots WHERE id='verified-spot'")
         .fetch_one(&pool)
         .await

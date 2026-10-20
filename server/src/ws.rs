@@ -20,16 +20,19 @@ pub(crate) async fn handle_app_socket(socket: WebSocket, state: SharedState, ses
     let (mut sender, mut receiver) = socket.split();
 
     let (private_tx, mut private_rx, mut private_closed) = private_session::channel();
-    state.user_sessions.insert(user_id, private_tx.clone());
+    state
+        .installation
+        .user_sessions
+        .insert(user_id, private_tx.clone());
 
-    let mut broadcast_rx = state.tx.subscribe();
+    let mut broadcast_rx = state.installation.tx.subscribe();
 
     // Keep the snapshot and both IO loops under the same session supervisor.
     // Dropping these futures also cancels pending reads/writes; no detached tasks.
     let send_task = async {
-        session.revalidate(&state.pool).await?;
+        session.revalidate(state.installation.pool()).await?;
         let db_spots = sqlx::query!("SELECT id, status FROM spots WHERE is_active")
-            .fetch_all(&state.pool)
+            .fetch_all(state.installation.pool())
             .await
             .map_err(|error| {
                 tracing::error!(%error, "WebSocket snapshot query failed");
@@ -76,13 +79,13 @@ pub(crate) async fn handle_app_socket(socket: WebSocket, state: SharedState, ses
     let recv_task = async {
         while let Some(Ok(Message::Text(text))) = receiver.next().await {
             if let Ok(msg) = serde_json::from_str::<AppToServerMsg>(&text) {
-                session.revalidate(&value.pool).await?;
+                session.revalidate(value.installation.pool()).await?;
                 match msg {
                     AppToServerMsg::ReserveSpot { spot_id, .. } => match reservation_store::create(
-                        &value.pool,
+                        value.installation.pool(),
                         &spot_id,
                         user_id,
-                        &value.reservation_policy,
+                        &value.installation.reservation_policy,
                     )
                     .await
                     {
@@ -104,7 +107,7 @@ pub(crate) async fn handle_app_socket(socket: WebSocket, state: SharedState, ses
                                 let _ = private_tx.try_send(json);
                             }
                             if let Ok(json) = serde_json::to_string(&update) {
-                                let _ = value.tx.send(json);
+                                let _ = value.installation.tx.send(json);
                             }
                         }
                         Err(error @ (CreateError::Unavailable | CreateError::UserLimit)) => {
@@ -127,7 +130,7 @@ pub(crate) async fn handle_app_socket(socket: WebSocket, state: SharedState, ses
                     },
                     AppToServerMsg::CancelReservation { reservation_id } => {
                         match reservation_store::finish(
-                            &value.pool,
+                            value.installation.pool(),
                             reservation_id,
                             FinishReason::Cancel { user_id },
                         )
@@ -140,7 +143,7 @@ pub(crate) async fn handle_app_socket(socket: WebSocket, state: SharedState, ses
                                         status: status.to_string(),
                                     };
                                     if let Ok(json) = serde_json::to_string(&update) {
-                                        let _ = value.tx.send(json);
+                                        let _ = value.installation.tx.send(json);
                                     }
                                 }
                             }
@@ -159,7 +162,7 @@ pub(crate) async fn handle_app_socket(socket: WebSocket, state: SharedState, ses
     let invalidation = tokio::select! {
         biased;
         _ = tokio::time::sleep_until(session.deadline) => Some((axum::http::StatusCode::UNAUTHORIZED, "Expired session".to_owned())),
-        error = session.wait_for_invalidation(&state.pool) => Some(error),
+        error = session.wait_for_invalidation(state.installation.pool()) => Some(error),
         _ = private_closed.wait_for(|closed| *closed) => None,
         result = send_task => result.err(),
         result = recv_task => result.err(),
@@ -168,6 +171,7 @@ pub(crate) async fn handle_app_socket(socket: WebSocket, state: SharedState, ses
     // The most recent connection owns the private queue. An older connection's
     // cleanup must not remove a newer queue for this user.
     state
+        .installation
         .user_sessions
         .remove_if(&user_id, |_, current| current.same_channel(&private_tx));
     if let Some((status, _)) = invalidation {
@@ -183,12 +187,12 @@ pub(crate) async fn handle_dashboard_socket(
     session: AuthSession,
 ) {
     let (mut sender, mut receiver) = socket.split();
-    let mut broadcast_rx = state.tx.subscribe();
+    let mut broadcast_rx = state.installation.tx.subscribe();
 
     let send_task = async {
-        session.revalidate(&state.pool).await?;
+        session.revalidate(state.installation.pool()).await?;
         let db_spots = sqlx::query!("SELECT id, status FROM spots WHERE is_active")
-            .fetch_all(&state.pool)
+            .fetch_all(state.installation.pool())
             .await
             .map_err(|error| {
                 tracing::error!(%error, "WebSocket snapshot query failed");
@@ -213,6 +217,7 @@ pub(crate) async fn handle_dashboard_socket(
         }
 
         let cached_trend = state
+            .installation
             .last_trend_prediction
             .lock()
             .ok()
@@ -247,7 +252,7 @@ pub(crate) async fn handle_dashboard_socket(
     let invalidation = tokio::select! {
         biased;
         _ = tokio::time::sleep_until(session.deadline) => true,
-        _ = session.wait_for_invalidation(&state.pool) => true,
+        _ = session.wait_for_invalidation(state.installation.pool()) => true,
         result = send_task => result.is_err(),
         _ = recv_task => false,
     };

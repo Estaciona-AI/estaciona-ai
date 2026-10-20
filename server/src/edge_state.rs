@@ -47,12 +47,13 @@ impl Prepared<'_> {
             Self::Forecast { json, writer } => {
                 // The durable value is authoritative even if a previous task poisoned the cache.
                 let mut cache = state
+                    .installation
                     .last_trend_prediction
                     .lock()
                     .unwrap_or_else(|error| error.into_inner());
                 *cache = Some(json.clone());
                 drop(cache);
-                let _ = state.tx.send(json);
+                let _ = state.installation.tx.send(json);
                 drop(writer);
             }
             Self::Terminal(..) => {}
@@ -87,7 +88,7 @@ pub(crate) async fn prepare<'a>(
             to_node,
             is_active,
         } => {
-            let graph = state.graph.write().await;
+            let graph = state.installation.graph.write().await;
             if !graph.has_edge(&from_node, &to_node) {
                 return Ok(Prepared::Terminal(Outcome::Rejected, "unknown_edge"));
             }
@@ -138,7 +139,7 @@ async fn persist_forecast<'a>(
 ) -> Result<Prepared<'a>, AuthError> {
     // PostgreSQL releases its advisory lock before commit().await necessarily
     // resumes. Hold an in-process writer through cache publication as well.
-    let writer = state.forecast_writer.lock().await;
+    let writer = state.installation.forecast_writer.lock().await;
     let json =
         serde_json::to_value(frame).map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
     sqlx::query("INSERT INTO edge_forecast_state (singleton,payload) VALUES (true,$1) ON CONFLICT (singleton) DO UPDATE SET payload=EXCLUDED.payload")
