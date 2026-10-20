@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{
-    InstallationDescriptor, InstallationIdentity,
+    InstallationDescriptor, InstallationIdentity, InstallationPackage,
     store::{self, BindMode, BindingStatus, StoreError},
 };
 use sqlx::PgPool;
@@ -16,13 +16,18 @@ pub enum Operation {
 }
 
 #[derive(Debug)]
-pub struct Command {
-    pub manifest: PathBuf,
-    pub operation: Operation,
+pub enum Command {
+    Database {
+        manifest: PathBuf,
+        operation: Operation,
+    },
+    Validate {
+        manifest: PathBuf,
+    },
 }
 
 pub fn parse(args: &[String]) -> Result<Option<Command>, &'static str> {
-    const USAGE: &str = "Usage: --installation-{check|init} --manifest PATH; --installation-adopt --manifest PATH --confirm-database DATABASE_NAME";
+    const USAGE: &str = "Usage: --installation-{check|init|validate} --manifest PATH; --installation-adopt --manifest PATH --confirm-database DATABASE_NAME";
     let Some(flag) = args.get(1) else {
         return Ok(None);
     };
@@ -37,6 +42,14 @@ pub fn parse(args: &[String]) -> Result<Option<Command>, &'static str> {
     if args.len() < 4 || args[2] != "--manifest" || args[3].is_empty() || args[3].starts_with("--")
     {
         return Err(USAGE);
+    }
+    if flag == "--installation-validate" {
+        if args.len() != 4 {
+            return Err(USAGE);
+        }
+        return Ok(Some(Command::Validate {
+            manifest: PathBuf::from(&args[3]),
+        }));
     }
     let operation = match flag.as_str() {
         "--installation-check" if args.len() == 4 => Operation::Check,
@@ -53,7 +66,7 @@ pub fn parse(args: &[String]) -> Result<Option<Command>, &'static str> {
         }
         _ => return Err(USAGE),
     };
-    Ok(Some(Command {
+    Ok(Some(Command::Database {
         manifest: PathBuf::from(&args[3]),
         operation,
     }))
@@ -86,7 +99,32 @@ pub async fn execute(
 
 /// Exit codes: matching=0, operational/unbound/mismatch=1, invalid descriptor=2.
 pub async fn run(command: Command) -> i32 {
-    let descriptor = match InstallationDescriptor::load(&command.manifest) {
+    match command {
+        Command::Validate { manifest } => match InstallationPackage::from_manifest(&manifest) {
+            Ok(package) => {
+                let identity = package.identity();
+                println!(
+                    "Deployment package valid; organization={}; installation={}; environment={:?}",
+                    identity.organization_id(),
+                    identity.installation_id(),
+                    identity.environment()
+                );
+                0
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                2
+            }
+        },
+        Command::Database {
+            manifest,
+            operation,
+        } => run_database(manifest, operation).await,
+    }
+}
+
+async fn run_database(manifest: PathBuf, operation: Operation) -> i32 {
+    let descriptor = match InstallationDescriptor::load(&manifest) {
         Ok(value) => value,
         Err(error) => {
             eprintln!("{error}");
@@ -109,7 +147,7 @@ pub async fn run(command: Command) -> i32 {
             return 1;
         }
     };
-    let result = execute(&pool, &descriptor.identity(), &command.operation).await;
+    let result = execute(&pool, &descriptor.identity(), &operation).await;
     pool.close().await;
     match result {
         Ok(status) => {

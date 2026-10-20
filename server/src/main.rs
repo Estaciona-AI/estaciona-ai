@@ -88,6 +88,13 @@ async fn main() {
             std::process::exit(2);
         }
     };
+    // File-only validation does not capture environment settings or load dotenv.
+    let installation_request = match installation_request {
+        Some(command @ installation::cli::Command::Validate { .. }) => {
+            std::process::exit(installation::cli::run(command).await);
+        }
+        request => request,
+    };
     dotenvy::from_path("../.env").ok();
     if let Some(command) = installation_request {
         std::process::exit(installation::cli::run(command).await);

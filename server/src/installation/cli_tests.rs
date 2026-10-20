@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Guilherme Pedroza
 // SPDX-License-Identifier: Apache-2.0
 
-use super::cli::{self, Operation};
+use super::cli::{self, Command, Operation};
 use super::store::{self, BindMode, BindingStatus};
 use super::store_tests::identity;
 use sqlx::PgPool;
@@ -22,8 +22,15 @@ fn parses_only_complete_unambiguous_installation_commands() {
         let parsed = cli::parse(&args(&[flag, "--manifest", "/synthetic.json"]))
             .unwrap()
             .unwrap();
-        assert_eq!(parsed.operation, operation);
-        assert_eq!(parsed.manifest.to_str(), Some("/synthetic.json"));
+        let Command::Database {
+            manifest,
+            operation: actual,
+        } = parsed
+        else {
+            panic!("expected database command");
+        };
+        assert_eq!(actual, operation);
+        assert_eq!(manifest.to_str(), Some("/synthetic.json"));
     }
     assert!(matches!(
         cli::parse(&args(&[
@@ -34,9 +41,11 @@ fn parses_only_complete_unambiguous_installation_commands() {
             "testdb"
         ]))
         .unwrap()
-        .unwrap()
-        .operation,
-        Operation::Adopt { .. }
+        .unwrap(),
+        Command::Database {
+            operation: Operation::Adopt { .. },
+            ..
+        }
     ));
     for invalid in [
         vec!["--installation-init"],
@@ -280,4 +289,29 @@ async fn migration_lock_timeout_releases_connection_for_retry(pool: PgPool) {
         store::check(&pool, &expected).await.unwrap(),
         BindingStatus::Matching
     );
+}
+
+#[test]
+fn offline_package_validation_has_an_explicit_complete_command() {
+    assert!(matches!(
+        cli::parse(&args(&[
+            "--installation-validate",
+            "--manifest",
+            "synthetic.json"
+        ])),
+        Ok(Some(Command::Validate { .. }))
+    ));
+    for values in [
+        vec!["--installation-validate"],
+        vec!["--installation-validate", "--manifest", ""],
+        vec![
+            "--installation-validate",
+            "--manifest",
+            "a",
+            "--confirm-database",
+            "b",
+        ],
+    ] {
+        assert!(cli::parse(&args(&values)).is_err());
+    }
 }
