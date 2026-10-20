@@ -248,7 +248,7 @@ async fn startup_rechecks_identity_after_migrations(pool: PgPool) {
     .await
     .unwrap();
     assert!(matches!(
-        super::startup::prepare(&pool, &expected).await,
+        super::startup::prepare(pool.clone(), expected).await,
         Err(store::StoreError::IdentityMismatch)
     ));
     assert_eq!(
@@ -269,11 +269,13 @@ async fn migration_lock_timeout_releases_connection_for_retry(pool: PgPool) {
         .await
         .unwrap();
     assert!(matches!(
-        super::startup::prepare(&pool, &expected).await,
+        super::startup::prepare(pool.clone(), expected).await,
         Err(store::StoreError::Migration)
     ));
     blocker.rollback().await.unwrap();
-    super::startup::prepare(&pool, &expected).await.unwrap();
+    super::startup::prepare(pool.clone(), expected)
+        .await
+        .unwrap();
     assert_eq!(
         store::check(&pool, &expected).await.unwrap(),
         BindingStatus::Matching

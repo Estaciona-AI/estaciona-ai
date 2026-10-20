@@ -199,7 +199,7 @@ mod tests {
 
         async fn state(&self, pool: sqlx::PgPool) -> crate::state::SharedState {
             crate::state::init_state(
-                pool,
+                crate::installation::test_support::provision(&pool).await,
                 "r10-disposable-jwt".into(),
                 "r10-disposable-pepper".into(),
                 crate::site_config::SiteConfig::load(&self.0).unwrap(),

@@ -126,13 +126,16 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    if let Err(error) = installation::startup::prepare(&pool, &descriptor.identity()).await {
-        eprintln!("{error}");
-        pool.close().await;
-        std::process::exit(1);
-    }
+    let verified = match installation::startup::prepare(pool.clone(), descriptor.identity()).await {
+        Ok(verified) => verified,
+        Err(error) => {
+            eprintln!("{error}");
+            pool.close().await;
+            std::process::exit(1);
+        }
+    };
 
-    match edge_cli::dispatch(&pool, &args).await {
+    match edge_cli::dispatch(verified.pool(), &args).await {
         Ok(true) => return,
         Ok(false) => {}
         Err(error) => {
@@ -141,7 +144,7 @@ async fn main() {
         }
     }
     if let Some(request) = admin_request {
-        if let Err(error) = admin_cli::create(&pool, request).await {
+        if let Err(error) = admin_cli::create(verified.pool(), request).await {
             tracing::error!(%error, "Administrator provisioning failed");
             std::process::exit(1);
         }
@@ -166,9 +169,14 @@ async fn main() {
     let ws_origin_policy = ws_origin::WsOriginPolicy::parse(&ws_origins).expect(
         "WS_ALLOWED_ORIGINS must be a comma-separated list of exact canonical HTTP(S) origins",
     );
-    let parking_state: SharedState = init_state(pool, jwt_secret, plate_pepper, site, lpr_mode)
+    let parking_state: SharedState = init_state(verified, jwt_secret, plate_pepper, site, lpr_mode)
         .await
         .expect("Failed to reconcile installation map");
+
+    tracing::info!(organization_id = %parking_state.installation_identity().organization_id(),
+        installation_id = %parking_state.installation_identity().installation_id(),
+        environment = ?parking_state.installation_identity().environment(),
+        "Installation runtime ready");
 
     let cors = CorsLayer::new()
         .allow_origin(Any)

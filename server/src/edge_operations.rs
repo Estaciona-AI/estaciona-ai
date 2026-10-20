@@ -70,6 +70,7 @@ mod tests {
     }
 
     async fn fixture(pool: PgPool) -> Fixture {
+        let verified = crate::installation::test_support::provision(&pool).await;
         for (id, x) in [("outside", 1.0f64), ("allowed", 10.0)] {
             sqlx::query("INSERT INTO spots (id,status,x,y) VALUES ($1,'free',$2,0)")
                 .bind(id)
@@ -124,6 +125,7 @@ mod tests {
         let sessions = DashMap::new();
         sessions.insert(user, nav_tx);
         let state = Arc::new(AppState {
+            installation_binding: verified,
             lpr_mode: crate::lpr::LprMode::Enabled,
             pool,
             reservation_policy: Default::default(),

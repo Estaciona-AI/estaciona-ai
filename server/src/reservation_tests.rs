@@ -32,6 +32,7 @@ struct Fixture {
 
 impl Fixture {
     async fn new(pool: PgPool) -> Result<Self, sqlx::Error> {
+        let verified = crate::installation::test_support::provision(&pool).await;
         let owner = Uuid::new_v4();
         let other = Uuid::new_v4();
         let admin = Uuid::new_v4();
@@ -55,6 +56,7 @@ impl Fixture {
 
         let (tx, _) = broadcast::channel(100);
         let state = Arc::new(AppState {
+            installation_binding: verified,
             lpr_mode: Default::default(),
             pool,
             reservation_policy: Default::default(),

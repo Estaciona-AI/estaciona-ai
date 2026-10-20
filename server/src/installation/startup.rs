@@ -2,18 +2,22 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{
-    InstallationIdentity,
+    InstallationIdentity, VerifiedInstallation,
     store::{self, BindingStatus, StoreError},
 };
 use sqlx::PgPool;
 use std::time::Duration;
 
 /// No application writes, administrative dispatch or listener may precede this guard.
-pub async fn prepare(pool: &PgPool, identity: &InstallationIdentity) -> Result<(), StoreError> {
+pub async fn prepare(
+    pool: PgPool,
+    identity: InstallationIdentity,
+) -> Result<VerifiedInstallation, StoreError> {
     tokio::time::timeout(Duration::from_secs(10), async {
-        require_match(pool, identity).await?;
-        store::migrate(pool).await?;
-        require_match(pool, identity).await
+        require_match(&pool, &identity).await?;
+        store::migrate(&pool).await?;
+        require_match(&pool, &identity).await?;
+        Ok(VerifiedInstallation::new(pool, identity))
     })
     .await
     .map_err(|_| StoreError::Timeout)?

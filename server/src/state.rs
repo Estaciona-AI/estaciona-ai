@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Guilherme Pedroza
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::installation::{InstallationIdentity, VerifiedInstallation};
 use dashmap::DashMap;
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -12,6 +13,7 @@ use crate::pathfinding::ParkingGraph;
 use crate::site_config::SiteConfig;
 
 pub struct AppState {
+    pub(crate) installation_binding: VerifiedInstallation,
     pub pool: PgPool,
     pub lpr_mode: crate::lpr::LprMode,
     pub reservation_policy: crate::reservation_policy::ReservationPolicy,
@@ -29,12 +31,13 @@ pub struct AppState {
 pub type SharedState = Arc<AppState>;
 
 pub async fn init_state(
-    pool: PgPool,
+    installation: VerifiedInstallation,
     jwt_secret: String,
     plate_pepper: String,
     site: SiteConfig,
     lpr_mode: crate::lpr::LprMode,
 ) -> Result<SharedState, crate::site_reconciliation::ReconcileError> {
+    let pool = installation.pool().clone();
     let reservation_policy = crate::reservation_policy::ReservationPolicy::load(&site.directory)
         .map_err(|error| {
             crate::site_reconciliation::ReconcileError::InvalidMap(format!(
@@ -51,6 +54,7 @@ pub async fn init_state(
     let (tx, _) = broadcast::channel(100);
 
     Ok(Arc::new(AppState {
+        installation_binding: installation,
         pool,
         lpr_mode,
         reservation_policy,
@@ -64,4 +68,10 @@ pub async fn init_state(
         last_trend_prediction: Mutex::new(forecast),
         config_store: crate::config_store::LocalConfigStore::new(site.directory),
     }))
+}
+
+impl AppState {
+    pub fn installation_identity(&self) -> InstallationIdentity {
+        self.installation_binding.identity()
+    }
 }
