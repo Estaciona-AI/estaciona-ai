@@ -279,6 +279,12 @@ def test_startup_and_all_administration_refuse_wrong_binding_without_writes(
     )
     secret = server.root / "new-credential"
     before = database_snapshot(server)
+    site_directory = server.root / "site"
+    files_before = {
+        path.name: path.read_bytes()
+        for path in site_directory.iterdir()
+        if path.is_file()
+    }
     operations = [
         (),
         ("--create-admin", "new-admin@example.invalid", "--password-file", password),
@@ -293,6 +299,11 @@ def test_startup_and_all_administration_refuse_wrong_binding_without_writes(
             result.stdout + result.stderr
         )
         assert database_snapshot(server) == before
+        assert {
+            path.name: path.read_bytes()
+            for path in site_directory.iterdir()
+            if path.is_file()
+        } == files_before
         assert not secret.exists()
     with socket.socket() as probe:
         probe.settimeout(0.2)
