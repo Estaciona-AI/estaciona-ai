@@ -13,7 +13,10 @@ from uuid import UUID, uuid4
 
 import pytest
 import websockets
+from jsonschema import ValidationError
 from websockets.exceptions import InvalidStatus
+
+from contract_validation import ContractValidator
 
 from test_delivery_integration import KEY, server as delivery_server
 from test_rest_contract_integration import call
@@ -39,6 +42,19 @@ class Consumer:
         assert self.catalog["version"] == self.capabilities["contract_version"]
         self.operations = {item["id"]: item for item in self.catalog["http"]}
         self.sockets = {item["id"]: item for item in self.catalog["websockets"]}
+        documents = {"messages.json": self.artifact("messages.json")}
+        for name, uri in self.manifest["channels"].items():
+            path = f"v1/{name}.schema.json"
+            documents[path] = self.artifact(path)
+            assert documents[path]["$id"] == uri
+        for item in self.manifest["rest"]["schemas"].values():
+            documents[item["path"]] = self.artifact(item["path"])
+            assert documents[item["path"]]["$id"] == item["id"]
+        self.validator = ContractValidator(documents)
+        self.validator.validate(
+            self.operations["capabilities"]["responses"]["200"]["schema"],
+            self.capabilities,
+        )
 
     def get_json(self, path):
         status, _, body = call(self.server, path)
@@ -70,9 +86,19 @@ class Consumer:
                 assert raw == b""
             elif response["encoding"] == "json":
                 assert headers["Content-Type"].startswith("application/json")
-                json.loads(raw)
+                if response["schema"] is not None:
+                    self.validator.validate(
+                        response["schema"],
+                        json.loads(raw),
+                        collection=response.get("collection", False),
+                    )
+                else:
+                    json.loads(raw)
             else:
                 assert headers["Content-Type"].startswith("text/plain")
+        elif status >= 400 and operation["error_schema"] is not None:
+            assert headers["Content-Type"].startswith("application/json")
+            self.validator.validate(operation["error_schema"], json.loads(raw))
         return result
 
     def ticket_url(self, destination, bearer):
@@ -110,10 +136,13 @@ def consumer(server):
     return Consumer(server)
 
 
-async def receive(socket, kind):
+async def receive(socket, kind, consumer, channel):
     async with asyncio.timeout(5):
         while True:
             message = json.loads(await socket.recv())
+            consumer.validator.validate(
+                consumer.sockets[channel]["send"]["schema"], message
+            )
             if message["type"] == kind:
                 return message
 
@@ -238,7 +267,7 @@ def test_browser_consumer_ticket_is_single_use_and_commands_use_session_identity
 
     async def run():
         async with websockets.connect(url, origin="http://localhost") as socket:
-            snapshot = await receive(socket, "SPOT_UPDATE")
+            snapshot = await receive(socket, "SPOT_UPDATE", consumer, "app")
             assert snapshot == {
                 "type": "SPOT_UPDATE",
                 "spot_id": "R02-A",
@@ -253,14 +282,14 @@ def test_browser_consumer_ticket_is_single_use_and_commands_use_session_identity
                     }
                 )
             )
-            confirmed = await receive(socket, "RESERVATION_CONFIRMED")
+            confirmed = await receive(socket, "RESERVATION_CONFIRMED", consumer, "app")
             assert confirmed["spot_id"] == "R02-A"
             assert consumer.server.query(
                 "SELECT user_id::text FROM reservations WHERE id=%s",
                 (confirmed["reservation_id"],),
             ) == [(user_id,)]
             await socket.send(json.dumps({"type": "RESERVE_SPOT", "spot_id": "R02-A"}))
-            rejected = await receive(socket, "RESERVATION_REJECTED")
+            rejected = await receive(socket, "RESERVATION_REJECTED", consumer, "app")
             assert rejected["reason"] in {"active_reservation_limit", "already_taken"}
         with pytest.raises(InvalidStatus) as reused:
             async with websockets.connect(url, origin="http://localhost"):
@@ -311,7 +340,9 @@ def test_edge_and_dashboard_consumers_observe_committed_occupancy_and_forecast(
         async with websockets.connect(
             dashboard_url, origin="http://localhost"
         ) as dashboard:
-            assert (await receive(dashboard, "SPOT_UPDATE"))["status"] == "free"
+            assert (await receive(dashboard, "SPOT_UPDATE", consumer, "dashboard"))[
+                "status"
+            ] == "free"
             with pytest.raises(InvalidStatus) as denied:
                 async with websockets.connect(edge_url):
                     pytest.fail("Anonymous edge connected")
@@ -319,7 +350,7 @@ def test_edge_and_dashboard_consumers_observe_committed_occupancy_and_forecast(
             async with websockets.connect(
                 edge_url, additional_headers={"Authorization": f"Bearer {KEY}"}
             ) as edge:
-                ready = await receive(edge, "EDGE_READY")
+                ready = await receive(edge, "EDGE_READY", consumer, "edge")
                 assert "SPOT_UPDATE" in ready["durable_events"]
                 assert "TREND_PREDICTION_V2" in ready["durable_events"]
                 frame = {
@@ -329,23 +360,27 @@ def test_edge_and_dashboard_consumers_observe_committed_occupancy_and_forecast(
                     "payload": spot,
                 }
                 await edge.send(json.dumps(frame))
-                ack = await receive(edge, "EDGE_ACK")
+                ack = await receive(edge, "EDGE_ACK", consumer, "edge")
                 assert (
                     ack["event_id"] == frame["event_id"] and ack["outcome"] == "applied"
                 )
                 assert consumer.server.query(
                     "SELECT status FROM spots WHERE id='R02-A'"
                 ) == [("occupied",)]
-                assert (await receive(dashboard, "SPOT_UPDATE"))["status"] == "occupied"
+                assert (await receive(dashboard, "SPOT_UPDATE", consumer, "dashboard"))[
+                    "status"
+                ] == "occupied"
                 await edge.send(json.dumps(frame))
-                assert (await receive(edge, "EDGE_ACK"))["duplicate"] is True
+                assert (await receive(edge, "EDGE_ACK", consumer, "edge"))[
+                    "duplicate"
+                ] is True
                 forbidden = {
                     **frame,
                     "event_id": str(uuid4()),
                     "payload": {**spot, "camera_id": "ungranted-camera"},
                 }
                 await edge.send(json.dumps(forbidden))
-                rejection = await receive(edge, "EDGE_ACK")
+                rejection = await receive(edge, "EDGE_ACK", consumer, "edge")
                 assert (
                     rejection["outcome"] == "rejected"
                     and rejection["reason"] == "scope_forbidden"
@@ -359,19 +394,26 @@ def test_edge_and_dashboard_consumers_observe_committed_occupancy_and_forecast(
                     "payload": forecast,
                 }
                 await edge.send(json.dumps(denied_forecast))
-                assert (await receive(edge, "EDGE_ACK"))["outcome"] == "rejected"
+                assert (await receive(edge, "EDGE_ACK", consumer, "edge"))[
+                    "outcome"
+                ] == "rejected"
                 consumer.server.query(
                     "UPDATE edge_gateways SET trend_prediction=TRUE WHERE id=%s",
                     (consumer.server.gateway_id,),
                 )
                 allowed_forecast = {**denied_forecast, "event_id": str(uuid4())}
                 await edge.send(json.dumps(allowed_forecast))
-                ack = await receive(edge, "EDGE_ACK")
+                ack = await receive(edge, "EDGE_ACK", consumer, "edge")
                 assert (
                     ack["outcome"] == "applied"
                     and ack["event_id"] == allowed_forecast["event_id"]
                 )
-                assert await receive(dashboard, "TREND_PREDICTION_V2") == forecast
+                assert (
+                    await receive(
+                        dashboard, "TREND_PREDICTION_V2", consumer, "dashboard"
+                    )
+                    == forecast
+                )
                 receipt = consumer.server.query(
                     "SELECT outcome FROM edge_event_receipts WHERE gateway_id=%s AND event_id=%s",
                     (consumer.server.gateway_id, allowed_forecast["event_id"]),
@@ -381,6 +423,67 @@ def test_edge_and_dashboard_consumers_observe_committed_occupancy_and_forecast(
         async with websockets.connect(
             consumer.ticket_url("dashboard", bearer), origin="http://localhost"
         ) as dashboard:
-            assert await receive(dashboard, "TREND_PREDICTION_V2") == forecast
+            assert (
+                await receive(dashboard, "TREND_PREDICTION_V2", consumer, "dashboard")
+                == forecast
+            )
+
+    asyncio.run(run())
+
+
+def test_http_consumer_rejects_a_response_incompatible_with_advertised_schema(consumer):
+    consumer.operations["register"]["responses"]["201"]["schema"] = (
+        "v1/rest-issued-ws-ticket.schema.json"
+    )
+    with pytest.raises(ValidationError):
+        consumer.request(
+            "register",
+            payload={
+                "name": "Schema regression",
+                "email": f"{uuid4()}@example.invalid",
+                "password": "disposable-schema-password",
+            },
+        )
+
+
+def test_http_consumer_rejects_an_error_incompatible_with_advertised_schema(consumer):
+    consumer.operations["list_reservations"]["error_schema"] = (
+        "v1/rest-issued-ws-ticket.schema.json"
+    )
+    with pytest.raises(ValidationError):
+        consumer.request("list_reservations")
+
+
+def test_http_consumer_validates_nonempty_collections_and_their_items(consumer):
+    _, bearer = consumer.register_and_login()
+    assert (
+        consumer.request(
+            "create_reservation", payload={"spot_id": "R02-A"}, bearer=bearer
+        )[0]
+        == 200
+    )
+    admin_id = insert_user(consumer.server, role="admin")
+    admin_bearer = token(consumer.server, admin_id, "admin", int(time.time()) + 60)
+    status, _, raw = consumer.request("list_reservations", bearer=admin_bearer)
+    assert status == 200 and json.loads(raw)[0]["spot_id"] == "R02-A"
+    consumer.operations["list_reservations"]["responses"]["200"]["schema"] = (
+        "v1/rest-issued-ws-ticket.schema.json"
+    )
+    with pytest.raises(ValidationError):
+        consumer.request("list_reservations", bearer=admin_bearer)
+
+
+@pytest.mark.parametrize("kind", ["SPOT_UPDATE", "RESERVATION_CONFIRMED"])
+def test_websocket_consumer_checks_every_frame_against_advertised_schema(
+    consumer, kind
+):
+    _, bearer = consumer.register_and_login()
+    url = consumer.ticket_url("app", bearer)
+    consumer.sockets["app"]["send"]["schema"] = "v1/gateway-to-vision.schema.json"
+
+    async def run():
+        async with websockets.connect(url, origin="http://localhost") as socket:
+            with pytest.raises(ValidationError):
+                await receive(socket, kind, consumer, "app")
 
     asyncio.run(run())
