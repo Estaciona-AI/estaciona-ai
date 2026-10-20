@@ -161,6 +161,7 @@ jobs:
 
   contracts-ci:
     name: Contract compatibility CI
+    needs: rust-ci
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -172,6 +173,19 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: "shared/uv.lock"
+      - name: Download contract exporter
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: delivery-test-server
+          path: test-server
+      - name: Verify offline export matches published contract bundle
+        env:
+          DATABASE_URL: invalid-offline-probe
+        run: |
+          chmod +x ../test-server/estaciona-ai-rust-server
+          ../test-server/estaciona-ai-rust-server --export-contracts "$RUNNER_TEMP/generated-contracts"
+          diff -u messages.json "$RUNNER_TEMP/generated-contracts/messages.json"
+          diff -ru v1 "$RUNNER_TEMP/generated-contracts/v1"
       - name: Check first-party licensing policy
         run: python ../scripts/check_licenses.py
       - name: Lint contract checks
