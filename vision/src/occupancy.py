@@ -74,6 +74,12 @@ class OccupancyTracker:
     def confirmed_statuses(self) -> dict[str, str]:
         return {spot_id: state.confirmed for spot_id, state in self._states.items()}
 
+    def reset_candidates(self, *, now: float):
+        for state in self._states.values():
+            state.candidate = state.confirmed
+            state.consecutive_frames = 0
+            state.last_change_time = now
+
     def update(self, detections, *, now: float) -> tuple[SpotObservation, ...]:
         observations = []
         for spot_id, (mask, area) in self.spot_masks.items():

@@ -48,7 +48,18 @@ class VisionPipeline:
     def confirmed_statuses(self) -> dict[str, str]:
         return self._occupancy.confirmed_statuses()
 
-    def process(self, frame: np.ndarray, *, now: float | None = None) -> FrameResult:
+    def reset_candidates(self, *, now: float):
+        self._occupancy.reset_candidates(now=now)
+
+    def process(
+        self,
+        frame: np.ndarray,
+        *,
+        now: float | None = None,
+        expires_at: float | None = None,
+    ) -> FrameResult | None:
+        if expires_at is not None and time.monotonic() > expires_at:
+            return None
         inference_frame = preprocess_frame(
             frame, gamma=GAMMA_CORRECTION, clahe_enabled=CLAHE_ENABLED
         )
@@ -61,6 +72,8 @@ class VisionPipeline:
             detections.append(
                 (x1 + shrink_w, y1 + shrink_h, x2 - shrink_w, y2 - shrink_h)
             )
+        if expires_at is not None and time.monotonic() > expires_at:
+            return None
         observations = self._occupancy.update(
             detections, now=time.monotonic() if now is None else now
         )

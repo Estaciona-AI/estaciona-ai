@@ -49,3 +49,33 @@ def test_pipeline_confirmations_use_monotonic_time(monkeypatch):
     result = pipeline.process(frame)
     assert (result.spots[0].status, result.spots[0].changed) == ("occupied", True)
     assert pipeline.confirmed_statuses() == {"A": "occupied"}
+
+
+def test_expired_inference_does_not_change_occupancy(monkeypatch):
+    model = Mock()
+    model.detect.return_value = [(0, 0, 9, 9)]
+    frame = np.zeros((10, 10, 3), dtype=np.uint8)
+    pipeline = VisionPipeline(
+        model, {"A": [[0, 0], [9, 0], [9, 9], [0, 9]]}, frame.shape
+    )
+    clock = iter([0.0, 2.1])
+    monkeypatch.setattr("pipeline.time.monotonic", lambda: next(clock))
+    assert pipeline.process(frame, expires_at=2.0) is None
+    assert pipeline.confirmed_statuses() == {}
+
+
+def test_reconnection_resets_candidates_but_preserves_confirmed_state():
+    model = Mock()
+    model.detect.return_value = []
+    frame = np.zeros((10, 10, 3), dtype=np.uint8)
+    pipeline = VisionPipeline(
+        model, {"A": [[0, 0], [9, 0], [9, 9], [0, 9]]}, frame.shape
+    )
+    pipeline.process(frame, now=0.0)
+    model.detect.return_value = [(0, 0, 9, 9)]
+    pipeline.process(frame, now=0.1)
+    pipeline.reset_candidates(now=10.0)
+    assert pipeline.confirmed_statuses() == {"A": "free"}
+    assert not pipeline.process(frame, now=10.1).spots[0].changed
+    assert not pipeline.process(frame, now=10.2).spots[0].changed
+    assert pipeline.process(frame, now=10.6).spots[0].changed
