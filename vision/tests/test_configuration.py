@@ -1,0 +1,168 @@
+# SPDX-FileCopyrightText: 2026 Guilherme Pedroza
+# SPDX-License-Identifier: Apache-2.0
+
+import importlib
+import json
+from uuid import uuid4
+
+import pytest
+
+
+def load(path):
+    module = importlib.import_module("configuration")
+    return module.load_configuration(path)
+
+
+@pytest.fixture
+def profile(tmp_path):
+    (tmp_path / "installation.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "organization": {"id": str(uuid4())},
+                "installation": {"id": str(uuid4())},
+                "environment": "test",
+            }
+        )
+    )
+    (tmp_path / "model.onnx").write_bytes(b"fixture-not-an-actual-model")
+    (tmp_path / "source.avi").write_bytes(b"fixture-not-an-actual-video")
+    (tmp_path / "mapping.json").write_text(
+        json.dumps(
+            {
+                "width": 64,
+                "height": 64,
+                "spots": {"A": [[0, 0], [20, 0], [20, 20], [0, 20]]},
+            }
+        )
+    )
+    data = {
+        "version": 1,
+        "installation_manifest": "installation.json",
+        "state_dir": "state",
+        "gateway_url": "ws://127.0.0.1:8001/ws/edge",
+        "credential_env": "TEST_EDGE_KEY",
+        "detectors": {
+            "main": {"adapter": "rtdetr", "path": "model.onnx", "device": "cpu"}
+        },
+        "sources": {"video": {"kind": "file", "path": "source.avi", "loop": True}},
+        "inputs": [
+            {
+                "input_id": "cam-01",
+                "source": "video",
+                "detector": "main",
+                "mapping": "mapping.json",
+            }
+        ],
+    }
+    path = tmp_path / "runtime.json"
+    path.write_text(json.dumps(data))
+    return path, data
+
+
+def save(profile):
+    path, data = profile
+    path.write_text(json.dumps(data))
+    return path
+
+
+def test_loads_relative_paths_identity_and_defaults(profile):
+    config = load(profile[0])
+    item = config.inputs[0]
+    assert item.input_id == "cam-01"
+    assert item.mapping.width == 64
+    assert item.fps == 2.5
+    assert item.detector.path == profile[0].parent / "model.onnx"
+    assert item.source.path == profile[0].parent / "source.avi"
+    assert config.state_dir == profile[0].parent / "state"
+    assert config.environment == "test"
+    assert not config.state_dir.exists()  # validation has no runtime side effects
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "duplicate_input",
+        "duplicate_spot",
+        "missing_source",
+        "bad_model",
+        "bad_device",
+        "zero_fps",
+        "nan_fps",
+        "bool_fps",
+        "unknown_field",
+        "empty_inputs",
+        "inline_secret",
+    ],
+)
+def test_invalid_profiles_are_rejected(profile, mutation):
+    path, data = profile
+    if mutation == "duplicate_input":
+        data["inputs"].append(dict(data["inputs"][0]))
+    elif mutation == "duplicate_spot":
+        data["inputs"].append(dict(data["inputs"][0], input_id="cam-02"))
+    elif mutation == "missing_source":
+        data["inputs"][0]["source"] = "missing"
+    elif mutation == "bad_model":
+        data["detectors"]["main"]["adapter"] = "python-plugin"
+    elif mutation == "bad_device":
+        data["detectors"]["main"]["device"] = "automatic"
+    elif mutation in ("zero_fps", "nan_fps", "bool_fps"):
+        data["inputs"][0]["fps"] = {
+            "zero_fps": 0,
+            "nan_fps": float("nan"),
+            "bool_fps": True,
+        }[mutation]
+    elif mutation == "unknown_field":
+        data["typo"] = 1
+    elif mutation == "empty_inputs":
+        data["inputs"] = []
+    else:
+        data["sources"]["video"] = {
+            "kind": "rtsp",
+            "url": "rtsp://user:secret@host/live",
+        }
+    with pytest.raises(ValueError):
+        load(save(profile))
+
+
+def test_rtsp_secret_is_only_resolved_from_environment(profile, monkeypatch):
+    _, data = profile
+    data["sources"]["video"] = {"kind": "rtsp", "env": "TEST_RTSP"}
+    monkeypatch.setenv("TEST_RTSP", "rtsp://user:secret@localhost/live")
+    config = load(save(profile))
+    assert config.inputs[0].source.resolve() == "rtsp://user:secret@localhost/live"
+    assert "user:secret" not in repr(config)
+    monkeypatch.delenv("TEST_RTSP")
+    with pytest.raises(ValueError, match="source environment"):
+        config.inputs[0].source.resolve()
+
+
+@pytest.mark.parametrize(
+    "mapping",
+    [
+        {"width": 0, "height": 64, "spots": {"A": [[0, 0], [2, 0], [2, 2]]}},
+        {"width": 64, "height": 64, "spots": {"A": [[0, 0], [80, 0], [2, 2]]}},
+        {"width": 64, "height": 64, "spots": {"A": [[0, 0], [1, 1], [2, 2]]}},
+        {"width": 64, "height": 64, "spots": {}},
+    ],
+)
+def test_invalid_mapping_is_rejected(profile, mapping):
+    (profile[0].parent / "mapping.json").write_text(json.dumps(mapping))
+    with pytest.raises(ValueError):
+        load(profile[0])
+
+
+def test_rejects_duplicate_json_keys(profile):
+    profile[0].write_text('{"version":1,"version":1}')
+    with pytest.raises(ValueError):
+        load(profile[0])
+
+
+def test_production_rejects_file_source(profile):
+    path = profile[0].parent / "installation.json"
+    descriptor = json.loads(path.read_text())
+    descriptor["environment"] = "production"
+    path.write_text(json.dumps(descriptor))
+    with pytest.raises(ValueError, match="production"):
+        load(profile[0])
