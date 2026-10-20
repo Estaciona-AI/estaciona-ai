@@ -185,6 +185,10 @@ async def run_input(config, item, stop, report):
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         for task in done:
             task.result()
+        if tasks[0] not in done:
+            # A normal pump shutdown must not cancel and hide a producer error.
+            # A genuinely blocked producer is still bounded by the supervisor.
+            await tasks[0]
     finally:
         stop.set()
         for task in tasks:

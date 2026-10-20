@@ -294,6 +294,18 @@ def test_delivery_drains_while_model_is_starting_or_failed(
     tmp_path, monkeypatch, load_failure
 ):
     module = importlib.import_module("worker")
+    if load_failure:
+        from types import SimpleNamespace
+
+        async def pump_finishes_first(tasks, **kwargs):
+            await tasks[1]
+            return {tasks[1]}, {tasks[0]}
+
+        # Exercise the shutdown ordering seen on CI, without modifying asyncio
+        # globally (the real WebSocket server also uses it).
+        scheduler = SimpleNamespace(**vars(asyncio))
+        scheduler.wait = pump_finishes_first
+        monkeypatch.setattr(module, "asyncio", scheduler)
     monkeypatch.setenv("TEST_EDGE_KEY", "disposable")
     monkeypatch.setattr(module, "LatestCapture", SyntheticCapture)
     entered, released = threading.Event(), threading.Event()
