@@ -335,6 +335,14 @@ def test_bound_administration_does_not_require_map_files(unstarted_server):
     assert provision(server).returncode == 0
     for name in ("config.json", "spots_3d.json"):
         (server.root / "site" / name).unlink()
+    for name in (
+        "JWT_SECRET",
+        "PLATE_SECRET_PEPPER",
+        "WS_ALLOWED_ORIGINS",
+        "LPR_ENABLED",
+    ):
+        server.environment.pop(name, None)
+
     password = server.root / "password"
     password.write_text("synthetic-password\n")
     password.chmod(0o600)
@@ -372,3 +380,51 @@ def test_unbound_startup_does_not_create_schema(unstarted_server):
     assert result.returncode == 1
     assert "--installation-init" in result.stderr
     assert server.query("SELECT to_regclass('public._sqlx_migrations')")[0][0] is None
+
+
+@pytest.mark.parametrize(
+    "setting",
+    [
+        "config.json",
+        "spots_3d.json",
+        "reservation_policy.json",
+        "JWT_SECRET",
+        "PLATE_SECRET_PEPPER",
+        "WS_ALLOWED_ORIGINS",
+        "LPR_ENABLED",
+        "DATABASE_URL",
+    ],
+)
+def test_invalid_runtime_configuration_is_refused_before_migrations(
+    unstarted_server, setting
+):
+    server = unstarted_server
+    assert provision(server).returncode == 0
+    server.query("DROP TABLE physical_occupancy_hourly")
+    server.query("DELETE FROM _sqlx_migrations WHERE version=20261019000000")
+    env = dict(server.environment)
+    if setting.endswith(".json"):
+        (server.root / "site" / setting).write_text("do-not-echo-this-input")
+    else:
+        env[setting] = {
+            "JWT_SECRET": "",
+            "PLATE_SECRET_PEPPER": "",
+            "WS_ALLOWED_ORIGINS": "https://do-not-echo.example/path",
+            "LPR_ENABLED": "do-not-echo-this-input",
+            "DATABASE_URL": "postgres://synthetic:do-not-echo-this-input@127.0.0.1:bad/test",
+        }[setting]
+    before = database_snapshot(server)
+    directory = server.root / "site"
+    files = {
+        path.name: path.read_bytes() for path in directory.iterdir() if path.is_file()
+    }
+    result = command(server, environment=env)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "do-not-echo" not in result.stdout + result.stderr
+    assert database_snapshot(server) == before
+    assert {
+        path.name: path.read_bytes() for path in directory.iterdir() if path.is_file()
+    } == files
+    with socket.socket() as probe:
+        probe.settimeout(0.2)
+        assert probe.connect_ex((server.host, 8000)) != 0
