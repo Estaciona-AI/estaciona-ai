@@ -428,3 +428,102 @@ def test_invalid_runtime_configuration_is_refused_before_migrations(
     with socket.socket() as probe:
         probe.settimeout(0.2)
         assert probe.connect_ex((server.host, 8000)) != 0
+
+
+@pytest.mark.parametrize("relative", [False, True])
+@pytest.mark.parametrize("database_setting", [None, "do-not-echo-invalid-database-url"])
+def test_offline_package_validation_is_read_only_and_does_not_require_runtime(
+    unstarted_server, relative, database_setting
+):
+    server = unstarted_server
+    directory = server.root / "site"
+    manifest = directory / "client-manifest.json"
+    (directory / "installation.json").rename(manifest)
+    (server.root / ".env").write_text(
+        "DATABASE_URL=do-not-echo-from-dotenv\nLPR_ENABLED=invalid\n"
+    )
+    env = {
+        key: value
+        for key, value in server.environment.items()
+        if key
+        not in (
+            "DATABASE_URL",
+            "SITE_DATA_DIR",
+            "JWT_SECRET",
+            "PLATE_SECRET_PEPPER",
+            "WS_ALLOWED_ORIGINS",
+            "LPR_ENABLED",
+        )
+    }
+    if database_setting is not None:
+        env["DATABASE_URL"] = database_setting
+    before = {
+        path.relative_to(server.root): path.read_bytes()
+        for path in server.root.rglob("*")
+        if path.is_file()
+    }
+    result = subprocess.run(
+        [
+            server.binary,
+            "--installation-validate",
+            "--manifest",
+            manifest.name if relative else str(manifest),
+        ],
+        cwd=directory if relative else server.root / "server",
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "do-not-echo" not in result.stdout + result.stderr
+    assert {
+        path.relative_to(server.root): path.read_bytes()
+        for path in server.root.rglob("*")
+        if path.is_file()
+    } == before
+    assert server.query("SELECT to_regclass('public._sqlx_migrations')")[0][0] is None
+    check = command(server, "--installation-check", "--manifest", manifest)
+    assert check.returncode == 1
+    assert server.query("SELECT to_regclass('public._sqlx_migrations')")[0][0] is None
+    with socket.socket() as probe:
+        probe.settimeout(0.2)
+        assert probe.connect_ex((server.host, 8000)) != 0
+
+
+@pytest.mark.parametrize("invalid", ["missing-map", "invalid-policy", "extra-argument"])
+def test_offline_package_validation_refuses_invalid_input_without_writes(
+    unstarted_server, invalid
+):
+    server = unstarted_server
+    directory = server.root / "site"
+    if invalid == "missing-map":
+        (directory / "spots_3d.json").unlink()
+    elif invalid == "invalid-policy":
+        (directory / "reservation_policy.json").write_text('{"secret":"do-not-echo"}')
+    args = ["--installation-validate", "--manifest", directory / "installation.json"]
+    if invalid == "extra-argument":
+        args.append("do-not-echo")
+    env = {
+        key: value
+        for key, value in server.environment.items()
+        if key
+        not in (
+            "DATABASE_URL",
+            "SITE_DATA_DIR",
+            "JWT_SECRET",
+            "PLATE_SECRET_PEPPER",
+            "WS_ALLOWED_ORIGINS",
+            "LPR_ENABLED",
+        )
+    }
+    before = {
+        path.name: path.read_bytes() for path in directory.iterdir() if path.is_file()
+    }
+    result = command(server, *args, environment=env)
+    assert result.returncode == 2
+    assert "do-not-echo" not in result.stdout + result.stderr
+    assert {
+        path.name: path.read_bytes() for path in directory.iterdir() if path.is_file()
+    } == before
+    assert server.query("SELECT to_regclass('public._sqlx_migrations')")[0][0] is None
