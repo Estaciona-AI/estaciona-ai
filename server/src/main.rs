@@ -26,6 +26,7 @@ mod reservation_store;
 #[cfg(test)]
 mod reservation_tests;
 mod reservations;
+mod runtime_config;
 mod security;
 mod sessions;
 mod site_config;
@@ -91,33 +92,61 @@ async fn main() {
     if let Some(command) = installation_request {
         std::process::exit(installation::cli::run(command).await);
     }
-    let site_data_dir = match std::env::var("SITE_DATA_DIR") {
-        Ok(value) => value,
-        Err(_) => {
-            eprintln!("SITE_DATA_DIR is required: directory containing installation.json");
-            std::process::exit(2);
-        }
-    };
-    let descriptor = match installation::InstallationDescriptor::load(
-        &std::path::Path::new(&site_data_dir).join("installation.json"),
-    ) {
-        Ok(value) => value,
-        Err(error) => {
-            eprintln!("{error}");
-            std::process::exit(2);
-        }
-    };
-    let db_url = match std::env::var("DATABASE_URL") {
-        Ok(value) => value,
-        Err(_) => {
-            eprintln!("DATABASE_URL is required");
-            std::process::exit(1);
-        }
+    let administrative =
+        admin_request.is_some() || args.get(1).is_some_and(|arg| arg.starts_with("--edge-"));
+    let (identity, database, runtime) = if administrative {
+        let site_data_dir = match std::env::var("SITE_DATA_DIR") {
+            Ok(value) if !value.is_empty() => value,
+            _ => {
+                eprintln!("SITE_DATA_DIR is required: directory containing installation.json");
+                std::process::exit(2);
+            }
+        };
+        let descriptor = match installation::InstallationDescriptor::load(
+            &std::path::Path::new(&site_data_dir).join("installation.json"),
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(2);
+            }
+        };
+        let database = match std::env::var("DATABASE_URL")
+            .ok()
+            .and_then(|value| value.parse::<sqlx::postgres::PgConnectOptions>().ok())
+        {
+            Some(value) => value,
+            None => {
+                eprintln!("DATABASE_URL is required and must be valid");
+                std::process::exit(1);
+            }
+        };
+        (descriptor.identity(), database, None)
+    } else {
+        let config = match runtime_config::RuntimeConfig::from_env() {
+            Ok(config) => config,
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(2);
+            }
+        };
+        let package = match installation::InstallationPackage::load(&config.site_data_dir) {
+            Ok(package) => package,
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(2);
+            }
+        };
+        (
+            package.identity(),
+            config.database.clone(),
+            Some((config, package)),
+        )
     };
     let pool = match PgPoolOptions::new()
         .max_connections(5)
         .acquire_timeout(std::time::Duration::from_secs(5))
-        .connect(&db_url)
+        .connect_with(database)
         .await
     {
         Ok(pool) => pool,
@@ -126,7 +155,7 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    let verified = match installation::startup::prepare(pool.clone(), descriptor.identity()).await {
+    let verified = match installation::startup::prepare(pool.clone(), identity).await {
         Ok(verified) => verified,
         Err(error) => {
             eprintln!("{error}");
@@ -152,26 +181,19 @@ async fn main() {
         return;
     }
 
-    let plate_pepper =
-        std::env::var("PLATE_SECRET_PEPPER").expect("PLATE_SECRET_PEPPER missing in .env");
-    let jwt_secret = std::env::var("JWT_SECRET").expect("JWT_SECRET missing in .env");
-    let site = installation::InstallationPackage::load(site_data_dir)
-        .expect("Failed to load installation maps from SITE_DATA_DIR");
-    let lpr_setting = std::env::var("LPR_ENABLED");
-    let lpr_mode = match &lpr_setting {
-        Ok(value) => lpr::LprMode::parse(Some(value)),
-        Err(std::env::VarError::NotPresent) => lpr::LprMode::parse(None),
-        Err(_) => Err("LPR_ENABLED must be UTF-8"),
-    }
-    .expect("Invalid optional LPR configuration");
-    let ws_origins = std::env::var("WS_ALLOWED_ORIGINS")
-        .expect("WS_ALLOWED_ORIGINS missing: configure exact HTTP(S) frontend origins");
-    let ws_origin_policy = ws_origin::WsOriginPolicy::parse(&ws_origins).expect(
-        "WS_ALLOWED_ORIGINS must be a comma-separated list of exact canonical HTTP(S) origins",
-    );
-    let parking_state: SharedState = init_state(verified, jwt_secret, plate_pepper, site, lpr_mode)
-        .await
-        .expect("Failed to reconcile installation map");
+    let (config, package) =
+        runtime.expect("administrative commands return before runtime initialization");
+    let ws_origin_policy = config.ws_origins;
+    let lpr_mode = config.lpr_mode;
+    let parking_state: SharedState = init_state(
+        verified,
+        config.jwt_secret,
+        config.plate_pepper,
+        package,
+        lpr_mode,
+    )
+    .await
+    .expect("Failed to reconcile installation map");
 
     tracing::info!(organization_id = %parking_state.installation.identity().organization_id(),
         installation_id = %parking_state.installation.identity().installation_id(),
