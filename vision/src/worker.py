@@ -158,15 +158,30 @@ async def run_input(config, item, stop, report):
                 last_sync = time.monotonic()
             report(Status.ACTIVE, True, sequence)
 
+    async def initialize_and_produce():
+        try:
+            model = await asyncio.to_thread(
+                load_detector, item.detector.path, device=item.detector.device
+            )
+        except Exception:
+            report(Status.FAILED, False, 0)
+            # Give durable events a delivery path even with an invalid model.
+            # The supervisor still bounds a stalled worker's lifetime.
+            while (
+                not stop.is_set() and await asyncio.to_thread(outbox.first) is not None
+            ):
+                await asyncio.sleep(0.1)
+            raise
+        if not stop.is_set():
+            capture.start()
+            report(Status.WAITING, True, 0)
+            await produce(model)
+
     try:
-        model = await asyncio.to_thread(
-            load_detector, item.detector.path, device=item.detector.device
-        )
-        if stop.is_set():
-            return
-        capture.start()
-        report(Status.WAITING, True, 0)
-        tasks = [asyncio.create_task(produce(model)), asyncio.create_task(pump())]
+        tasks = [
+            asyncio.create_task(initialize_and_produce()),
+            asyncio.create_task(pump()),
+        ]
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         for task in done:
             task.result()

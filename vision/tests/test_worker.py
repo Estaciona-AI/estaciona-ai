@@ -287,3 +287,74 @@ def test_two_inputs_publish_distinct_spots_with_separate_outboxes(
 
     asyncio.run(scenario())
     assert received == {"cam-A": "A", "cam-B": "B"}
+
+
+@pytest.mark.parametrize("load_failure", [False, True])
+def test_delivery_drains_while_model_is_starting_or_failed(
+    tmp_path, monkeypatch, load_failure
+):
+    module = importlib.import_module("worker")
+    monkeypatch.setenv("TEST_EDGE_KEY", "disposable")
+    monkeypatch.setattr(module, "LatestCapture", SyntheticCapture)
+    entered, released = threading.Event(), threading.Event()
+    stop = threading.Event()
+
+    def loader(*args, **kwargs):
+        entered.set()
+        if load_failure:
+            raise ValueError("invalid model fixture")
+        assert released.wait(3), "delivery was blocked by model startup"
+        model = Mock()
+        model.detect.return_value = []
+        return model
+
+    monkeypatch.setattr(module, "load_detector", loader)
+    received = []
+
+    async def scenario():
+        async def server(ws):
+            await ws.send(json.dumps({"type": "LOCAL_READY", "delivery_version": 1}))
+            event = json.loads(await ws.recv())
+            received.append(event["event_id"])
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "LOCAL_ACK",
+                        "version": 1,
+                        "event_id": event["event_id"],
+                        "outcome": "persisted",
+                    }
+                )
+            )
+            released.set()
+            await asyncio.sleep(0.1)
+            stop.set()
+
+        async with websockets.serve(server, "127.0.0.1", 0) as listener:
+            cfg = config(
+                tmp_path,
+                f"ws://127.0.0.1:{listener.sockets[0].getsockname()[1]}/ws/edge",
+            )
+            outbox = LocalOutbox(
+                input_directory(cfg.state_dir, cfg.scope, "cam-A") / "outbox.db"
+            )
+            event_id = outbox.enqueue('{"type":"SPOT_UPDATE","spot_id":"previous"}')
+            try:
+                if load_failure:
+                    with pytest.raises(ValueError, match="invalid model"):
+                        await asyncio.wait_for(
+                            module.run_input(
+                                cfg, cfg.inputs[0], stop, lambda *args: None
+                            ),
+                            5,
+                        )
+                else:
+                    await asyncio.wait_for(
+                        module.run_input(cfg, cfg.inputs[0], stop, lambda *args: None),
+                        5,
+                    )
+            finally:
+                released.set()
+            assert event_id in received
+
+    asyncio.run(scenario())
