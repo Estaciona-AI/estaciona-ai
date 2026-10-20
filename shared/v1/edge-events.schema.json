@@ -358,5 +358,5 @@
     }
   ],
   "title": "EdgeToServerMsg",
-  "x-contract-version": "1.2.0"
+  "x-contract-version": "1.3.0"
 }
