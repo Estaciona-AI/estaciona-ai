@@ -1,4 +1,5 @@
 {
+  "catalog": "v1/catalog.json",
   "channels": {
     "app-to-server": "urn:estaciona-ai:ws:app-to-server:v1",
     "edge-events": "urn:estaciona-ai:ws:edge-events:v1",
@@ -80,6 +81,6 @@
       }
     }
   },
-  "version": "1.2.0",
+  "version": "1.3.0",
   "wire_version": 1
 }
