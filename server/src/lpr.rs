@@ -33,10 +33,10 @@ pub async fn car_detected(
     plate: &str,
     camera_id: &str,
 ) -> Result<bool, AuthError> {
-    if state.lpr_mode == LprMode::Disabled {
+    if state.installation.lpr_mode == LprMode::Disabled {
         return Ok(true);
     }
-    let mut tx = edge_auth::begin_authorized(&state.pool, principal).await?;
+    let mut tx = edge_auth::begin_authorized(state.installation.pool(), principal).await?;
     if !edge_auth::camera_allowed(&mut tx, principal, camera_id, CameraOperation::CarDetected)
         .await?
     {
@@ -67,7 +67,12 @@ pub async fn car_detected(
             tx.rollback().await?;
             return Ok(true);
         }
-        let route = state.graph.read().await.calculate_route(camera_id, &spot);
+        let route = state
+            .installation
+            .graph
+            .read()
+            .await
+            .calculate_route(camera_id, &spot);
         (spot, route, false)
     } else {
         let free: Vec<String> = sqlx::query_scalar(
@@ -78,7 +83,7 @@ pub async fn car_detected(
         .fetch_all(&mut *tx)
         .await?;
         let candidates = {
-            let graph = state.graph.read().await;
+            let graph = state.installation.graph.read().await;
             let mut candidates: Vec<_> = free
                 .into_iter()
                 .filter_map(|spot| {
@@ -101,7 +106,7 @@ pub async fn car_detected(
                 &mut attempt,
                 &spot,
                 user_id,
-                &state.reservation_policy,
+                &state.installation.reservation_policy,
             )
             .await
             {
@@ -134,10 +139,10 @@ pub async fn car_detected(
             status: "reserved".into(),
         };
         if let Ok(json) = serde_json::to_string(&update) {
-            let _ = state.tx.send(json);
+            let _ = state.installation.tx.send(json);
         }
     }
-    if let Some(session) = state.user_sessions.get(&user_id) {
+    if let Some(session) = state.installation.user_sessions.get(&user_id) {
         let navigation = match route {
             Some(route) => ServerToAppMsg::NavigationStart { spot_id, route },
             None => ServerToAppMsg::NavigationUnavailable {

@@ -188,7 +188,14 @@ pub async fn apply_with_state(
     event_id: Uuid,
     payload: Value,
 ) -> Result<Delivery, AuthError> {
-    apply_inner(&state.pool, Some(state), principal, event_id, payload).await
+    apply_inner(
+        state.installation.pool(),
+        Some(state),
+        principal,
+        event_id,
+        payload,
+    )
+    .await
 }
 
 fn plate_receipt_fingerprint(payload: &Value, key: &[u8]) -> Value {
@@ -362,7 +369,9 @@ async fn apply_inner(
             projection = Some(effect);
         }
         Some(crate::ws::messages::EdgeToServerMsg::CarDetected { .. })
-            if state.is_some_and(|state| state.lpr_mode == crate::lpr::LprMode::Disabled) =>
+            if state.is_some_and(|state| {
+                state.installation.lpr_mode == crate::lpr::LprMode::Disabled
+            }) =>
         {
             delivery.ack.outcome = Outcome::Ignored;
             delivery.ack.reason = Some("lpr_disabled".into());

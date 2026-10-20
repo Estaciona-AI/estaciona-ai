@@ -46,10 +46,11 @@ async fn require_reservation_owner(
     reservation_id: Uuid,
 ) -> Result<(), (StatusCode, String)> {
     let requester =
-        crate::security::authenticated_user(headers, &state.jwt_secret, &state.pool).await?;
+        crate::security::authenticated_user(headers, &state.jwt_secret, state.installation.pool())
+            .await?;
     let owner: Option<Uuid> = sqlx::query_scalar("SELECT user_id FROM reservations WHERE id = $1")
         .bind(reservation_id)
-        .fetch_optional(&state.pool)
+        .fetch_optional(state.installation.pool())
         .await
         .map_err(|_| {
             (
@@ -70,12 +71,12 @@ pub async fn update_spot_status(
     headers: HeaderMap,
     Json(payload): Json<UpdateSpotStatus>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    crate::security::require_admin(&headers, &state.jwt_secret, &state.pool).await?;
+    crate::security::require_admin(&headers, &state.jwt_secret, state.installation.pool()).await?;
     if payload.status != "occupied" && payload.status != "free" && payload.status != "reserved" {
         return Err((StatusCode::BAD_REQUEST, "Invalid status".to_string()));
     }
 
-    let mut tx = state.pool.begin().await.map_err(|_| {
+    let mut tx = state.installation.pool().begin().await.map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             "Database error".to_owned(),
@@ -128,7 +129,7 @@ pub async fn update_spot_status(
         status: payload.status,
     };
     if let Ok(json_str) = serde_json::to_string(&update_msg) {
-        let _ = state.tx.send(json_str);
+        let _ = state.installation.tx.send(json_str);
     }
 
     Ok(StatusCode::OK)
@@ -140,13 +141,14 @@ pub async fn create_reservation(
     Json(payload): Json<CreateReservation>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let user_id =
-        crate::security::authenticated_user(&headers, &state.jwt_secret, &state.pool).await?;
+        crate::security::authenticated_user(&headers, &state.jwt_secret, state.installation.pool())
+            .await?;
     let _legacy_client_expiry = payload.expires_at;
     let record = reservation_store::create(
-        &state.pool,
+        state.installation.pool(),
         &payload.spot_id,
         user_id,
-        &state.reservation_policy,
+        &state.installation.reservation_policy,
     )
     .await
     .map_err(|error| match error {
@@ -169,7 +171,7 @@ pub async fn create_reservation(
         status: "reserved".to_string(),
     };
     if let Ok(json_str) = serde_json::to_string(&update_msg) {
-        let _ = state.tx.send(json_str);
+        let _ = state.installation.tx.send(json_str);
     }
 
     Ok(Json(ReservationResponse {
@@ -187,7 +189,7 @@ pub async fn get_reservations(
     State(state): State<SharedState>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    crate::security::require_admin(&headers, &state.jwt_secret, &state.pool).await?;
+    crate::security::require_admin(&headers, &state.jwt_secret, state.installation.pool()).await?;
     let records = sqlx::query_as!(
         ReservationResponse,
         r#"
@@ -203,7 +205,7 @@ pub async fn get_reservations(
         WHERE status = 'active'
         "#
     )
-    .fetch_all(&state.pool)
+    .fetch_all(state.installation.pool())
     .await
     .map_err(|e| {
         tracing::error!("Database error: {}", e);
@@ -223,16 +225,21 @@ pub async fn cancel_reservation(
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     require_reservation_owner(&state, &headers, id).await?;
     let user_id =
-        crate::security::authenticated_user(&headers, &state.jwt_secret, &state.pool).await?;
-    let transition = reservation_store::finish(&state.pool, id, FinishReason::Cancel { user_id })
-        .await
-        .map_err(|error| {
-            tracing::error!("Failed to cancel reservation: {}", error);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Database error".to_string(),
-            )
-        })?;
+        crate::security::authenticated_user(&headers, &state.jwt_secret, state.installation.pool())
+            .await?;
+    let transition = reservation_store::finish(
+        state.installation.pool(),
+        id,
+        FinishReason::Cancel { user_id },
+    )
+    .await
+    .map_err(|error| {
+        tracing::error!("Failed to cancel reservation: {}", error);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Database error".to_string(),
+        )
+    })?;
 
     match transition {
         Some(transition) => {
@@ -242,7 +249,7 @@ pub async fn cancel_reservation(
                     status: status.to_string(),
                 };
                 if let Ok(json) = serde_json::to_string(&update_msg) {
-                    let _ = state.tx.send(json);
+                    let _ = state.installation.tx.send(json);
                 }
             }
             Ok((StatusCode::OK, "Reservation cancelled.".to_string()))
@@ -260,8 +267,9 @@ pub async fn confirm_occupancy(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let user_id =
-        crate::security::authenticated_user(&headers, &state.jwt_secret, &state.pool).await?;
-    reservation_store::confirm(&state.pool, id, user_id)
+        crate::security::authenticated_user(&headers, &state.jwt_secret, state.installation.pool())
+            .await?;
+    reservation_store::confirm(state.installation.pool(), id, user_id)
         .await
         .map_err(|error| match error {
             reservation_store::ConfirmError::NotFound => (
@@ -293,21 +301,27 @@ pub async fn extend_reservation(
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     require_reservation_owner(&state, &headers, id).await?;
     let user_id =
-        crate::security::authenticated_user(&headers, &state.jwt_secret, &state.pool).await?;
-    let result = reservation_store::extend(&state.pool, id, user_id, &state.reservation_policy)
-        .await
-        .map_err(|error| {
-            tracing::error!(%error,"Failed to extend reservation");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Database error".to_owned(),
-            )
-        })?;
+        crate::security::authenticated_user(&headers, &state.jwt_secret, state.installation.pool())
+            .await?;
+    let result = reservation_store::extend(
+        state.installation.pool(),
+        id,
+        user_id,
+        &state.installation.reservation_policy,
+    )
+    .await
+    .map_err(|error| {
+        tracing::error!(%error,"Failed to extend reservation");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Database error".to_owned(),
+        )
+    })?;
     match result {
         Some((spot_id, status)) => {
             let update_msg = ServerToAppMsg::SpotUpdate { spot_id, status };
             if let Ok(json) = serde_json::to_string(&update_msg) {
-                let _ = state.tx.send(json);
+                let _ = state.installation.tx.send(json);
             }
             Ok((StatusCode::OK, "Reservation extended.".to_owned()))
         }
@@ -354,7 +368,8 @@ pub async fn recommend_spot(
     Query(query): Query<RecommendQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let requester =
-        crate::security::authenticated_user(&headers, &state.jwt_secret, &state.pool).await?;
+        crate::security::authenticated_user(&headers, &state.jwt_secret, state.installation.pool())
+            .await?;
     if requester != query.user_id {
         return Err((StatusCode::FORBIDDEN, "User access denied".to_string()));
     }
@@ -377,7 +392,7 @@ pub async fn recommend_spot(
         "#,
         query.user_id
     )
-    .fetch_optional(&state.pool)
+    .fetch_optional(state.installation.pool())
     .await
     .map_err(|source| {
         RecommendationQueryError {
@@ -388,7 +403,7 @@ pub async fn recommend_spot(
     })?;
 
     if let Some(priority) = priority_spot {
-        let graph = state.graph.read().await;
+        let graph = state.installation.graph.read().await;
         let route = graph.calculate_route("cam-01", &priority.id);
         return Ok((
             StatusCode::OK,
@@ -403,7 +418,7 @@ pub async fn recommend_spot(
         "SELECT COUNT(*) FROM user_occupancy_history WHERE user_id = $1",
         query.user_id
     )
-    .fetch_one(&state.pool)
+    .fetch_one(state.installation.pool())
     .await
     .map_err(|source| {
         RecommendationQueryError {
@@ -429,7 +444,7 @@ pub async fn recommend_spot(
             "#,
             query.user_id
         )
-        .fetch_optional(&state.pool)
+        .fetch_optional(state.installation.pool())
         .await
         .map_err(|source| {
             RecommendationQueryError {
@@ -440,7 +455,7 @@ pub async fn recommend_spot(
         })?;
 
         if let Some(fav) = favorite_spot {
-            let graph = state.graph.read().await;
+            let graph = state.installation.graph.read().await;
             let route = graph.calculate_route("cam-01", &fav.spot_id);
             return Ok((
                 StatusCode::OK,
@@ -460,7 +475,7 @@ pub async fn recommend_spot(
           AND id NOT IN ('A-01', 'A-02', 'A-03', 'A-04')
         "#
     )
-    .fetch_all(&state.pool)
+    .fetch_all(state.installation.pool())
     .await
     .map_err(|source| {
         RecommendationQueryError {
@@ -478,7 +493,7 @@ pub async fn recommend_spot(
     let mut min_cost = u32::MAX;
 
     {
-        let graph = state.graph.read().await;
+        let graph = state.installation.graph.read().await;
         for spot in &free_spots {
             if let Some(cost) = graph.calculate_cost("cam-01", &spot.id)
                 && cost < min_cost
@@ -491,7 +506,7 @@ pub async fn recommend_spot(
 
     match closest_spot_id {
         Some(spot_id) => {
-            let graph = state.graph.read().await;
+            let graph = state.installation.graph.read().await;
             let route = graph.calculate_route("cam-01", &spot_id);
             Ok((
                 StatusCode::OK,

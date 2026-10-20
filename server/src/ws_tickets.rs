@@ -117,7 +117,7 @@ async fn issue(
     let (ticket, digest) = new_ticket();
     let operation = async {
         session
-            .revalidate(&state.pool)
+            .revalidate(state.installation.pool())
             .await
             .map_err(|(status, _)| (status, "Session authorization failed"))?;
         if request.destination == Destination::Dashboard && session.role != "admin" {
@@ -131,7 +131,12 @@ async fn issue(
             DateTime::from_timestamp(session.expires_at() as i64, 0)
                 .ok_or((StatusCode::UNAUTHORIZED, "Invalid or expired session"))?,
         );
-        let mut tx = state.pool.begin().await.map_err(service_unavailable)?;
+        let mut tx = state
+            .installation
+            .pool()
+            .begin()
+            .await
+            .map_err(service_unavailable)?;
         set_transaction_limits(&mut tx)
             .await
             .map_err(service_unavailable)?;
@@ -344,7 +349,7 @@ pub async fn app_handler(
     if let Err(error) = origin_policy.authorize(&headers) {
         return error.into_response();
     }
-    let session = match consume(&state.pool, &query.ticket, Destination::App).await {
+    let session = match consume(state.installation.pool(), &query.ticket, Destination::App).await {
         Ok(session) => session,
         Err((status, message)) => return (status, message).into_response(),
     };
@@ -362,7 +367,13 @@ pub async fn dashboard_handler(
     if let Err(error) = origin_policy.authorize(&headers) {
         return error.into_response();
     }
-    let session = match consume(&state.pool, &query.ticket, Destination::Dashboard).await {
+    let session = match consume(
+        state.installation.pool(),
+        &query.ticket,
+        Destination::Dashboard,
+    )
+    .await
+    {
         Ok(session) => session,
         Err((status, message)) => return (status, message).into_response(),
     };

@@ -64,7 +64,7 @@ pub async fn login_dashboard(
         "SELECT id, password_hash as \"password_hash!\", role, name FROM users WHERE email = $1",
         payload.email
     )
-    .fetch_optional(&state.pool)
+    .fetch_optional(state.installation.pool())
     .await
     .map_err(|e| {
         tracing::error!("Database error during login: {}", e);
@@ -95,7 +95,7 @@ pub async fn login_dashboard(
     }
 
     let token = crate::sessions::issue(
-        &state.pool,
+        state.installation.pool(),
         user_record.id,
         &user_record.role,
         &state.jwt_secret,

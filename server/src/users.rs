@@ -66,7 +66,7 @@ pub async fn create_user(
     let duplicate =
         sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM users WHERE email = $1)")
             .bind(&payload.email)
-            .fetch_one(&state.pool)
+            .fetch_one(state.installation.pool())
             .await
             .map_err(|error| {
                 tracing::error!(%error, "Registration preflight failed");
@@ -83,7 +83,7 @@ pub async fn create_user(
     let new_id = Uuid::new_v4();
 
     let requested_plate = hashed_plate.clone();
-    let mut tx = state.pool.begin().await.map_err(|error| {
+    let mut tx = state.installation.pool().begin().await.map_err(|error| {
         tracing::error!(%error, "Registration transaction unavailable");
         AuthError::Status(StatusCode::INTERNAL_SERVER_ERROR, "Failed to create user")
     })?;
@@ -154,8 +154,12 @@ pub async fn get_user(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let requester =
-        crate::security::authenticated_session(&headers, &state.jwt_secret, &state.pool).await?;
+    let requester = crate::security::authenticated_session(
+        &headers,
+        &state.jwt_secret,
+        state.installation.pool(),
+    )
+    .await?;
     if requester.role != "admin" && requester.user_id != id {
         return Err((StatusCode::FORBIDDEN, "User access denied".to_string()));
     }
@@ -176,7 +180,7 @@ pub async fn get_user(
         "#,
         id
     )
-    .fetch_optional(&state.pool)
+    .fetch_optional(state.installation.pool())
     .await
     .map_err(|e| {
         tracing::error!("Database error: {}", e);

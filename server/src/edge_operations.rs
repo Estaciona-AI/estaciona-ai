@@ -41,7 +41,7 @@ async fn legacy_projection(
     principal: &Principal,
     message: EdgeToServerMsg,
 ) -> Result<bool, AuthError> {
-    let mut tx = edge_auth::begin_authorized(&state.pool, principal).await?;
+    let mut tx = edge_auth::begin_authorized(state.installation.pool(), principal).await?;
     let effect = crate::edge_state::prepare(&mut tx, state, principal, message).await?;
     let allowed = effect.outcome().0 != crate::edge_delivery::Outcome::Rejected;
     tx.commit().await?;
@@ -57,8 +57,8 @@ mod tests {
     use dashmap::DashMap;
     use sha2::{Digest, Sha256};
     use sqlx::PgPool;
-    use std::sync::{Arc, Mutex};
-    use tokio::sync::{RwLock, broadcast, mpsc};
+    use std::sync::Arc;
+    use tokio::sync::{broadcast, mpsc};
     use uuid::Uuid;
 
     struct Fixture {
@@ -124,20 +124,19 @@ mod tests {
         let (nav_tx, nav, _) = crate::ws::private_session::channel();
         let sessions = DashMap::new();
         sessions.insert(user, nav_tx);
+        let mut installation = crate::installation::InstallationContext::for_unit_test(
+            verified,
+            graph,
+            std::env::temp_dir(),
+        );
+        installation.lpr_mode = crate::lpr::LprMode::Enabled;
+        installation.tx = tx;
+        installation.user_sessions = sessions;
         let state = Arc::new(AppState {
-            installation_binding: verified,
-            lpr_mode: crate::lpr::LprMode::Enabled,
-            pool,
-            reservation_policy: Default::default(),
+            installation,
             auth_limits: AuthLimits::default(),
-            tx,
-            user_sessions: sessions,
-            graph: RwLock::new(graph),
             jwt_secret: "unused".into(),
             plate_pepper: "fixture-pepper".into(),
-            forecast_writer: Default::default(),
-            last_trend_prediction: Mutex::new(None),
-            config_store: crate::config_store::LocalConfigStore::new(std::env::temp_dir()),
         });
         Fixture {
             state,
@@ -156,7 +155,7 @@ mod tests {
             .unwrap();
         let spots: Vec<(String, String)> =
             sqlx::query_as("SELECT id,status FROM spots ORDER BY id")
-                .fetch_all(&f.state.pool)
+                .fetch_all(f.state.installation.pool())
                 .await
                 .unwrap();
         assert_eq!(
@@ -186,7 +185,7 @@ mod tests {
     ) {
         let mut f = fixture(pool).await;
         crate::reservation_store::create(
-            &f.state.pool,
+            f.state.installation.pool(),
             "outside",
             f.user,
             &crate::reservation_policy::ReservationPolicy::default(),
@@ -200,7 +199,7 @@ mod tests {
         assert!(f.updates.try_recv().is_err());
         let targets: Vec<String> =
             sqlx::query_scalar("SELECT spot_id FROM reservations WHERE status='active'")
-                .fetch_all(&f.state.pool)
+                .fetch_all(f.state.installation.pool())
                 .await
                 .unwrap();
         assert_eq!(targets, ["outside"]);
@@ -214,7 +213,7 @@ mod tests {
             .unwrap();
         sqlx::query("UPDATE edge_camera_grants SET car_detected=false WHERE gateway_id=$1")
             .bind(f.principal.gateway_id)
-            .execute(&f.state.pool)
+            .execute(f.state.installation.pool())
             .await
             .unwrap();
         car_detected(&f.state, &f.principal, "ABC1D23", "cam-01")
@@ -223,7 +222,7 @@ mod tests {
         assert!(f.nav.try_recv().is_err());
         assert!(f.updates.try_recv().is_err());
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM reservations")
-            .fetch_one(&f.state.pool)
+            .fetch_one(f.state.installation.pool())
             .await
             .unwrap();
         assert_eq!(count, 0);
@@ -234,7 +233,7 @@ mod tests {
         let mut f = fixture(pool).await;
         sqlx::query("UPDATE edge_gateways SET revoked_at=NOW() WHERE id=$1")
             .bind(f.principal.gateway_id)
-            .execute(&f.state.pool)
+            .execute(f.state.installation.pool())
             .await
             .unwrap();
         assert!(matches!(
@@ -243,7 +242,7 @@ mod tests {
         ));
         assert!(f.nav.try_recv().is_err());
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM reservations")
-            .fetch_one(&f.state.pool)
+            .fetch_one(f.state.installation.pool())
             .await
             .unwrap();
         assert_eq!(count, 0);
@@ -258,6 +257,7 @@ mod tests {
         );
         assert_eq!(
             f.state
+                .installation
                 .graph
                 .read()
                 .await
@@ -266,7 +266,7 @@ mod tests {
         );
         sqlx::query("UPDATE edge_gateways SET path_update=true WHERE id=$1")
             .bind(f.principal.gateway_id)
-            .execute(&f.state.pool)
+            .execute(f.state.installation.pool())
             .await
             .unwrap();
         assert!(
@@ -276,6 +276,7 @@ mod tests {
         );
         assert!(
             f.state
+                .installation
                 .graph
                 .read()
                 .await
@@ -289,7 +290,7 @@ mod tests {
         );
         sqlx::query("UPDATE edge_gateways SET path_update=false WHERE id=$1")
             .bind(f.principal.gateway_id)
-            .execute(&f.state.pool)
+            .execute(f.state.installation.pool())
             .await
             .unwrap();
         assert!(
@@ -299,6 +300,7 @@ mod tests {
         );
         assert!(
             f.state
+                .installation
                 .graph
                 .read()
                 .await
@@ -312,7 +314,7 @@ mod tests {
         let f = fixture(pool).await;
         sqlx::query("UPDATE edge_gateways SET path_update=true,revoked_at=NOW() WHERE id=$1")
             .bind(f.principal.gateway_id)
-            .execute(&f.state.pool)
+            .execute(f.state.installation.pool())
             .await
             .unwrap();
         assert!(matches!(
@@ -321,6 +323,7 @@ mod tests {
         ));
         assert!(
             f.state
+                .installation
                 .graph
                 .read()
                 .await
@@ -348,11 +351,18 @@ mod tests {
                 .await
                 .unwrap()
         );
-        assert!(f.state.last_trend_prediction.lock().unwrap().is_none());
+        assert!(
+            f.state
+                .installation
+                .last_trend_prediction
+                .lock()
+                .unwrap()
+                .is_none()
+        );
         assert!(f.updates.try_recv().is_err());
         sqlx::query("UPDATE edge_gateways SET trend_prediction=true WHERE id=$1")
             .bind(f.principal.gateway_id)
-            .execute(&f.state.pool)
+            .execute(f.state.installation.pool())
             .await
             .unwrap();
         assert!(
@@ -362,6 +372,7 @@ mod tests {
         );
         let cached = f
             .state
+            .installation
             .last_trend_prediction
             .lock()
             .unwrap()
@@ -374,7 +385,7 @@ mod tests {
         assert_eq!(f.updates.try_recv().unwrap(), cached);
         sqlx::query("UPDATE edge_gateways SET trend_prediction=false WHERE id=$1")
             .bind(f.principal.gateway_id)
-            .execute(&f.state.pool)
+            .execute(f.state.installation.pool())
             .await
             .unwrap();
         assert!(
@@ -383,7 +394,12 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(
-            f.state.last_trend_prediction.lock().unwrap().as_deref(),
+            f.state
+                .installation
+                .last_trend_prediction
+                .lock()
+                .unwrap()
+                .as_deref(),
             Some(cached.as_str())
         );
         assert!(f.updates.try_recv().is_err());
@@ -394,21 +410,28 @@ mod tests {
         let mut f = fixture(pool).await;
         sqlx::query("UPDATE edge_gateways SET trend_prediction=true,revoked_at=NOW() WHERE id=$1")
             .bind(f.principal.gateway_id)
-            .execute(&f.state.pool)
+            .execute(f.state.installation.pool())
             .await
             .unwrap();
         assert!(matches!(
             forecast(&f.state, &f.principal, prediction()).await,
             Err(AuthError::Unauthenticated)
         ));
-        assert!(f.state.last_trend_prediction.lock().unwrap().is_none());
+        assert!(
+            f.state
+                .installation
+                .last_trend_prediction
+                .lock()
+                .unwrap()
+                .is_none()
+        );
         assert!(f.updates.try_recv().is_err());
     }
 
     async fn assert_reserved_navigation_unavailable(pool: PgPool, missing: &str) {
         let mut f = fixture(pool).await;
         let reservation = reservation_store::create(
-            &f.state.pool,
+            f.state.installation.pool(),
             "allowed",
             f.user,
             &crate::reservation_policy::ReservationPolicy::default(),
@@ -423,7 +446,7 @@ mod tests {
             graph.add_edge(camera, target, 10, true);
             graph.set_edge_status("cam-01", "allowed", false);
         }
-        *f.state.graph.write().await = graph;
+        *f.state.installation.graph.write().await = graph;
         assert!(
             car_detected(&f.state, &f.principal, "ABC1D23", "cam-01")
                 .await
@@ -440,7 +463,7 @@ mod tests {
         assert!(f.updates.try_recv().is_err());
         let reservations: Vec<(Uuid, Uuid, String, String)> =
             sqlx::query_as("SELECT id,user_id,spot_id,status FROM reservations ORDER BY id")
-                .fetch_all(&f.state.pool)
+                .fetch_all(f.state.installation.pool())
                 .await
                 .unwrap();
         assert_eq!(
@@ -449,7 +472,7 @@ mod tests {
         );
         let statuses: Vec<(String, String)> =
             sqlx::query_as("SELECT id,status FROM spots ORDER BY id")
-                .fetch_all(&f.state.pool)
+                .fetch_all(f.state.installation.pool())
                 .await
                 .unwrap();
         assert_eq!(
@@ -464,7 +487,7 @@ mod tests {
         let camera = graph.add_node("cam-01", 0.0, 0.0).unwrap();
         let target = graph.add_node("allowed", 10.0, 0.0).unwrap();
         graph.add_edge(camera, target, 10, true);
-        *f.state.graph.write().await = graph;
+        *f.state.installation.graph.write().await = graph;
         car_detected(&f.state, &f.principal, "ABC1D23", "cam-01")
             .await
             .unwrap();
@@ -475,7 +498,7 @@ mod tests {
         );
         assert!(f.updates.try_recv().is_err());
         let ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM reservations")
-            .fetch_all(&f.state.pool)
+            .fetch_all(f.state.installation.pool())
             .await
             .unwrap();
         assert_eq!(ids, vec![reservation.id]);
@@ -497,7 +520,7 @@ mod tests {
     async fn retired_granted_spot_is_not_a_destination_for_automatic_arrival(pool: PgPool) {
         let mut f = fixture(pool).await;
         sqlx::query("UPDATE spots SET is_active=FALSE WHERE id='allowed'")
-            .execute(&f.state.pool)
+            .execute(f.state.installation.pool())
             .await
             .unwrap();
         assert!(
@@ -509,7 +532,7 @@ mod tests {
         assert!(f.updates.try_recv().is_err());
         assert_eq!(
             sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM reservations")
-                .fetch_one(&f.state.pool)
+                .fetch_one(f.state.installation.pool())
                 .await
                 .unwrap(),
             0
@@ -521,7 +544,7 @@ mod tests {
         let existing = matches!(stage, "reservation" | "grant");
         if existing {
             crate::reservation_store::create(
-                &f.state.pool,
+                f.state.installation.pool(),
                 "allowed",
                 f.user,
                 &crate::reservation_policy::ReservationPolicy::default(),
@@ -539,7 +562,7 @@ mod tests {
         sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
             "ALTER TABLE {table} RENAME COLUMN {column} TO r08_unavailable"
         )))
-        .execute(&f.state.pool)
+        .execute(f.state.installation.pool())
         .await
         .unwrap();
         let result = car_detected(&f.state, &f.principal, "ABC1D23", "cam-01").await;
@@ -557,12 +580,12 @@ mod tests {
         sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
             "ALTER TABLE {table} RENAME COLUMN r08_unavailable TO {column}"
         )))
-        .execute(&f.state.pool)
+        .execute(f.state.installation.pool())
         .await
         .unwrap();
         let reservations: Vec<(String, String)> =
             sqlx::query_as("SELECT spot_id,status FROM reservations ORDER BY spot_id")
-                .fetch_all(&f.state.pool)
+                .fetch_all(f.state.installation.pool())
                 .await
                 .unwrap();
         let expected = if existing {
@@ -573,7 +596,7 @@ mod tests {
         assert_eq!(reservations, expected);
         let spots: Vec<(String, String)> =
             sqlx::query_as("SELECT id,status FROM spots ORDER BY id")
-                .fetch_all(&f.state.pool)
+                .fetch_all(f.state.installation.pool())
                 .await
                 .unwrap();
         assert_eq!(
@@ -619,7 +642,13 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn r09_full_private_queue_does_not_undo_committed_arrival_or_its_broadcast(pool: PgPool) {
         let mut f = fixture(pool).await;
-        let session = f.state.user_sessions.get(&f.user).unwrap().clone();
+        let session = f
+            .state
+            .installation
+            .user_sessions
+            .get(&f.user)
+            .unwrap()
+            .clone();
         for _ in 0..32 {
             session.try_send("queued".into()).unwrap();
         }
@@ -635,13 +664,13 @@ mod tests {
         let claims: Vec<(String, String)> =
             sqlx::query_as("SELECT spot_id,status FROM reservations WHERE user_id=$1")
                 .bind(f.user)
-                .fetch_all(&f.state.pool)
+                .fetch_all(f.state.installation.pool())
                 .await
                 .unwrap();
         assert_eq!(claims, [("allowed".into(), "active".into())]);
         assert_eq!(
             sqlx::query_scalar::<_, String>("SELECT status FROM spots WHERE id='allowed'")
-                .fetch_one(&f.state.pool)
+                .fetch_one(f.state.installation.pool())
                 .await
                 .unwrap(),
             "reserved"
@@ -664,7 +693,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn r12_disabled_lpr_is_inert_even_for_an_ungranted_camera(pool: PgPool) {
         let mut f = fixture(pool).await;
-        Arc::get_mut(&mut f.state).unwrap().lpr_mode = crate::lpr::LprMode::Disabled;
+        Arc::get_mut(&mut f.state).unwrap().installation.lpr_mode = crate::lpr::LprMode::Disabled;
         for camera in ["cam-01", "ungranted-camera"] {
             assert!(
                 car_detected(&f.state, &f.principal, "ABC1D23", camera)
@@ -674,7 +703,7 @@ mod tests {
         }
         assert_eq!(
             sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM reservations")
-                .fetch_one(&f.state.pool)
+                .fetch_one(f.state.installation.pool())
                 .await
                 .unwrap(),
             0
@@ -687,7 +716,7 @@ mod tests {
     async fn r12_pending_vehicle_does_not_identify_the_declaring_account(pool: PgPool) {
         let mut f = fixture(pool).await;
         sqlx::query("UPDATE vehicle_bindings SET status='pending'")
-            .execute(&f.state.pool)
+            .execute(f.state.installation.pool())
             .await
             .unwrap();
         assert!(
@@ -697,7 +726,7 @@ mod tests {
         );
         assert_eq!(
             sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM reservations")
-                .fetch_one(&f.state.pool)
+                .fetch_one(f.state.installation.pool())
                 .await
                 .unwrap(),
             0
@@ -718,7 +747,7 @@ mod tests {
     async fn grant_projections(f: &Fixture) {
         sqlx::query("UPDATE edge_gateways SET path_update=true,trend_prediction=true WHERE id=$1")
             .bind(f.principal.gateway_id)
-            .execute(&f.state.pool)
+            .execute(f.state.installation.pool())
             .await
             .unwrap();
     }
@@ -738,13 +767,13 @@ mod tests {
                 .unwrap();
         assert_eq!(result.ack.outcome, crate::edge_delivery::Outcome::Applied);
         let mut graph = restart_graph();
-        crate::edge_state::restore(&f.state.pool, &mut graph)
+        crate::edge_state::restore(f.state.installation.pool(), &mut graph)
             .await
             .unwrap();
         assert!(graph.calculate_route("cam-01", "allowed").is_none());
         let mut changed = restart_graph();
         changed.add_node("new-map-node", 3.0, 4.0).unwrap();
-        crate::edge_state::restore(&f.state.pool, &mut changed)
+        crate::edge_state::restore(f.state.installation.pool(), &mut changed)
             .await
             .unwrap();
         assert!(changed.calculate_route("cam-01", "allowed").is_some());
@@ -758,7 +787,7 @@ mod tests {
         .unwrap();
         sqlx::query("UPDATE edge_gateways SET path_update=false WHERE id=$1")
             .bind(f.principal.gateway_id)
-            .execute(&f.state.pool)
+            .execute(f.state.installation.pool())
             .await
             .unwrap();
         let duplicate =
@@ -768,13 +797,14 @@ mod tests {
         assert!(duplicate.ack.duplicate);
         assert!(
             f.state
+                .installation
                 .graph
                 .read()
                 .await
                 .calculate_route("cam-01", "allowed")
                 .is_some()
         );
-        crate::edge_state::restore(&f.state.pool, &mut graph)
+        crate::edge_state::restore(f.state.installation.pool(), &mut graph)
             .await
             .unwrap();
         assert!(graph.calculate_route("cam-01", "allowed").is_some());
@@ -785,7 +815,7 @@ mod tests {
         let f = fixture(pool).await;
         grant_projections(&f).await;
         sqlx::raw_sql("CREATE FUNCTION fail_receipt() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected receipt failure'; END $$; CREATE TRIGGER fail_receipt BEFORE UPDATE ON edge_event_receipts FOR EACH ROW EXECUTE FUNCTION fail_receipt();")
-            .execute(&f.state.pool).await.unwrap();
+            .execute(f.state.installation.pool()).await.unwrap();
         let id = Uuid::new_v4();
         assert!(
             crate::edge_delivery::apply_with_state(&f.state, &f.principal, id, path_event(false))
@@ -794,6 +824,7 @@ mod tests {
         );
         assert!(
             f.state
+                .installation
                 .graph
                 .read()
                 .await
@@ -801,10 +832,10 @@ mod tests {
                 .is_some()
         );
         let count: i64 = sqlx::query_scalar("SELECT (SELECT COUNT(*) FROM edge_path_state)+(SELECT COUNT(*) FROM edge_event_receipts)")
-            .fetch_one(&f.state.pool).await.unwrap();
+            .fetch_one(f.state.installation.pool()).await.unwrap();
         assert_eq!(count, 0);
         sqlx::query("DROP TRIGGER fail_receipt ON edge_event_receipts")
-            .execute(&f.state.pool)
+            .execute(f.state.installation.pool())
             .await
             .unwrap();
         assert_eq!(
@@ -829,9 +860,10 @@ mod tests {
                 .unwrap();
         assert_eq!(result.ack.outcome, crate::edge_delivery::Outcome::Applied);
         let first = f.updates.try_recv().unwrap();
-        let restored = crate::edge_state::restore(&f.state.pool, &mut restart_graph())
-            .await
-            .unwrap();
+        let restored =
+            crate::edge_state::restore(f.state.installation.pool(), &mut restart_graph())
+                .await
+                .unwrap();
         assert_eq!(restored, Some(first));
         let replay = crate::edge_delivery::apply_with_state(&f.state, &f.principal, id, payload)
             .await
@@ -867,11 +899,12 @@ mod tests {
             crate::edge_delivery::Outcome::Applied
         );
         let active: bool = sqlx::query_scalar("SELECT is_active FROM edge_path_state")
-            .fetch_one(&f.state.pool)
+            .fetch_one(f.state.installation.pool())
             .await
             .unwrap();
         assert_eq!(
             f.state
+                .installation
                 .graph
                 .read()
                 .await
@@ -884,7 +917,7 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn r02b_disabled_lpr_is_explicit_and_does_not_create_reservations(pool: PgPool) {
         let mut f = fixture(pool).await;
-        Arc::get_mut(&mut f.state).unwrap().lpr_mode = crate::lpr::LprMode::Disabled;
+        Arc::get_mut(&mut f.state).unwrap().installation.lpr_mode = crate::lpr::LprMode::Disabled;
         let event = serde_json::json!({"type":"CAR_DETECTED", "plate":"ABC1D23", "camera_id":"cam-01", "timestamp":"2026-10-18T00:00:00Z"});
         let ack =
             crate::edge_delivery::apply_with_state(&f.state, &f.principal, Uuid::new_v4(), event)
@@ -894,7 +927,7 @@ mod tests {
         assert_eq!(ack.outcome, crate::edge_delivery::Outcome::Ignored);
         assert_eq!(ack.reason.as_deref(), Some("lpr_disabled"));
         let stored: String = sqlx::query_scalar("SELECT payload::text FROM edge_event_receipts")
-            .fetch_one(&f.state.pool)
+            .fetch_one(f.state.installation.pool())
             .await
             .unwrap();
         assert!(
@@ -902,7 +935,7 @@ mod tests {
             "inactive LPR must not archive raw plates"
         );
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM reservations")
-            .fetch_one(&f.state.pool)
+            .fetch_one(f.state.installation.pool())
             .await
             .unwrap();
         assert_eq!(count, 0);
@@ -911,7 +944,7 @@ mod tests {
     async fn r02b_forecast_publication_cannot_overtake_an_earlier_commit(pool: PgPool) {
         let f = fixture(pool).await;
         grant_projections(&f).await;
-        let mut first_tx = edge_auth::begin_authorized(&f.state.pool, &f.principal)
+        let mut first_tx = edge_auth::begin_authorized(f.state.installation.pool(), &f.principal)
             .await
             .unwrap();
         let first = crate::edge_state::prepare(&mut first_tx, &f.state, &f.principal, prediction())
@@ -941,6 +974,7 @@ mod tests {
         );
         let stored: serde_json::Value = serde_json::from_str(
             f.state
+                .installation
                 .last_trend_prediction
                 .lock()
                 .unwrap()
