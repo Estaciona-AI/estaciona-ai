@@ -4,7 +4,7 @@
 use serde::Deserialize;
 use serde_json::Value;
 use std::{
-    io::{self, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -78,10 +78,18 @@ fn invalid_data(error: impl std::fmt::Display) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error.to_string())
 }
 
+pub(crate) const MAX_MAP_BYTES: usize = 2 * 1024 * 1024;
+
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<T> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|error| io::Error::new(error.kind(), format!("{}: {error}", path.display())))?;
-    serde_json::from_str(&content)
+    let mut content = Vec::new();
+    std::fs::File::open(path)
+        .map_err(|error| io::Error::new(error.kind(), format!("{}: {error}", path.display())))?
+        .take((MAX_MAP_BYTES + 1) as u64)
+        .read_to_end(&mut content)?;
+    if content.len() > MAX_MAP_BYTES {
+        return Err(invalid_data("Map file exceeds 2 MiB"));
+    }
+    serde_json::from_slice(&content)
         .map_err(|error| invalid_data(format!("{}: {error}", path.display())))
 }
 
@@ -132,6 +140,9 @@ pub fn save_parking_config(directory: &Path, payload: &Value) -> io::Result<()> 
     validate_spots(&spots).map_err(io::Error::other)?;
     crate::site_graph::validate_names(&parkings, &spots).map_err(invalid_data)?;
     let content = serde_json::to_string_pretty(payload).map_err(invalid_data)?;
+    if content.len() > MAX_MAP_BYTES {
+        return Err(invalid_data("Formatted configuration exceeds 2 MiB"));
+    }
     replace_config_file(directory, |file| file.write_all(content.as_bytes()))
 }
 

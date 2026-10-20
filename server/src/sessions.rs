@@ -158,13 +158,13 @@ mod tests {
             verified,
             "session-test-secret".into(),
             "test-pepper".into(),
-            SiteConfig {
+            crate::installation::test_support::package(SiteConfig {
                 directory: std::env::temp_dir(),
                 spots: vec![],
                 parkings: vec![ParkingLotConfig {
                     path: vec![PathNode { x: 0.0, z: 0.0 }, PathNode { x: 1.0, z: 0.0 }],
                 }],
-            },
+            }),
             Default::default(),
         )
         .await

@@ -202,7 +202,9 @@ mod tests {
                 crate::installation::test_support::provision(&pool).await,
                 "r10-disposable-jwt".into(),
                 "r10-disposable-pepper".into(),
-                crate::site_config::SiteConfig::load(&self.0).unwrap(),
+                crate::installation::test_support::package(
+                    crate::site_config::SiteConfig::load(&self.0).unwrap(),
+                ),
                 Default::default(),
             )
             .await

@@ -31,7 +31,7 @@ async fn moved_spot_coordinates_follow_the_applied_map(pool: PgPool) {
         crate::installation::test_support::provision(&pool).await,
         "test".into(),
         "test".into(),
-        site(&[("R07-A", 2.0)]),
+        crate::installation::test_support::package(site(&[("R07-A", 2.0)])),
         Default::default(),
     )
     .await
@@ -40,7 +40,7 @@ async fn moved_spot_coordinates_follow_the_applied_map(pool: PgPool) {
         crate::installation::test_support::provision(&pool).await,
         "test".into(),
         "test".into(),
-        site(&[("R07-A", 8.0)]),
+        crate::installation::test_support::package(site(&[("R07-A", 8.0)])),
         Default::default(),
     )
     .await
@@ -356,7 +356,7 @@ async fn r11_navigation_collision_does_not_reconcile_any_database_changes(pool: 
         crate::installation::test_support::provision(&pool).await,
         "test".into(),
         "test".into(),
-        site(&[("R11-A", 2.0)]),
+        crate::installation::test_support::package(site(&[("R11-A", 2.0)])),
         Default::default(),
     )
     .await
@@ -375,7 +375,11 @@ async fn r11_navigation_collision_does_not_reconcile_any_database_changes(pool: 
             crate::installation::test_support::provision(&pool).await,
             "test".into(),
             "test".into(),
-            site(&[("R11-A", 9.0), (collision, 3.0), ("R11-new", 4.0)]),
+            crate::installation::test_support::package(site(&[
+                ("R11-A", 9.0),
+                (collision, 3.0),
+                ("R11-new", 4.0),
+            ])),
             Default::default(),
         )
         .await;

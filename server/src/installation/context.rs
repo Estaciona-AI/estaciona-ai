@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Guilherme Pedroza
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{InstallationIdentity, VerifiedInstallation};
-use crate::{pathfinding::ParkingGraph, site_config::SiteConfig};
+use super::{InstallationIdentity, InstallationPackage, VerifiedInstallation};
+use crate::pathfinding::ParkingGraph;
 use dashmap::DashMap;
 use sqlx::PgPool;
 use std::sync::Mutex;
@@ -32,17 +32,13 @@ impl InstallationContext {
 
     pub(crate) async fn load(
         binding: VerifiedInstallation,
-        site: SiteConfig,
+        package: InstallationPackage,
         lpr_mode: crate::lpr::LprMode,
     ) -> Result<Self, crate::site_reconciliation::ReconcileError> {
-        let reservation_policy = crate::reservation_policy::ReservationPolicy::load(
-            &site.directory,
-        )
-        .map_err(|error| {
-            crate::site_reconciliation::ReconcileError::InvalidMap(format!(
-                "Reservation policy: {error}"
-            ))
-        })?;
+        if package.identity() != binding.identity() {
+            return Err(crate::site_reconciliation::ReconcileError::InstallationMismatch);
+        }
+        let (site, reservation_policy) = package.into_parts();
         let mut graph = crate::site_graph::build(&site).map_err(|error| {
             crate::site_reconciliation::ReconcileError::InvalidMap(error.to_string())
         })?;
