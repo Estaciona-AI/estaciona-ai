@@ -3,15 +3,21 @@
 
 """Synthetic consumers discover a real core; no customer panel or ML is mocked in."""
 
+import asyncio
+import datetime
 import json
 import os
+import time
 from urllib.parse import urlencode
 from uuid import UUID, uuid4
 
 import pytest
+import websockets
+from websockets.exceptions import InvalidStatus
 
-from test_delivery_integration import server as delivery_server
+from test_delivery_integration import KEY, server as delivery_server
 from test_rest_contract_integration import call
+from test_session_integration import insert_user, token
 
 server = delivery_server
 pytestmark = pytest.mark.skipif(
@@ -69,6 +75,18 @@ class Consumer:
                 assert headers["Content-Type"].startswith("text/plain")
         return result
 
+    def ticket_url(self, destination, bearer):
+        socket = self.sockets[destination]
+        status, headers, raw = self.request(
+            "websocket_ticket",
+            payload={"destination": socket["ticket_destination"]},
+            bearer=bearer,
+        )
+        assert status == 201, raw
+        assert headers["Cache-Control"] == "no-store"
+        ticket = json.loads(raw)["ticket"]
+        return f"ws://{self.server.host}:8000{socket['path']}?{urlencode({'ticket': ticket})}"
+
     def register_and_login(self):
         credentials = {
             "email": f"{uuid4()}@example.invalid",
@@ -90,6 +108,14 @@ class Consumer:
 @pytest.fixture
 def consumer(server):
     return Consumer(server)
+
+
+async def receive(socket, kind):
+    async with asyncio.timeout(5):
+        while True:
+            message = json.loads(await socket.recv())
+            if message["type"] == kind:
+                return message
 
 
 def assert_error(status, headers, raw, expected_status, expected_code):
@@ -195,3 +221,166 @@ def test_browser_consumer_login_reservation_ownership_and_logout(consumer):
         401,
         "UNAUTHORIZED",
     )
+
+
+def test_browser_consumer_ticket_is_single_use_and_commands_use_session_identity(
+    consumer,
+):
+    user_id, bearer = consumer.register_and_login()
+    assert_error(
+        *consumer.request(
+            "websocket_ticket", payload={"destination": "dashboard"}, bearer=bearer
+        ),
+        403,
+        "FORBIDDEN",
+    )
+    url = consumer.ticket_url("app", bearer)
+
+    async def run():
+        async with websockets.connect(url, origin="http://localhost") as socket:
+            snapshot = await receive(socket, "SPOT_UPDATE")
+            assert snapshot == {
+                "type": "SPOT_UPDATE",
+                "spot_id": "R02-A",
+                "status": "free",
+            }
+            await socket.send(
+                json.dumps(
+                    {
+                        "type": "RESERVE_SPOT",
+                        "spot_id": "R02-A",
+                        "user_id": str(uuid4()),
+                    }
+                )
+            )
+            confirmed = await receive(socket, "RESERVATION_CONFIRMED")
+            assert confirmed["spot_id"] == "R02-A"
+            assert consumer.server.query(
+                "SELECT user_id::text FROM reservations WHERE id=%s",
+                (confirmed["reservation_id"],),
+            ) == [(user_id,)]
+            await socket.send(json.dumps({"type": "RESERVE_SPOT", "spot_id": "R02-A"}))
+            rejected = await receive(socket, "RESERVATION_REJECTED")
+            assert rejected["reason"] in {"active_reservation_limit", "already_taken"}
+        with pytest.raises(InvalidStatus) as reused:
+            async with websockets.connect(url, origin="http://localhost"):
+                pytest.fail("A used ticket opened another connection")
+        assert reused.value.response.status_code == 401
+
+    asyncio.run(run())
+
+
+def test_edge_and_dashboard_consumers_observe_committed_occupancy_and_forecast(
+    consumer,
+):
+    admin_id = insert_user(consumer.server, role="admin")
+    bearer = token(consumer.server, admin_id, "admin", int(time.time()) + 120)
+    dashboard_url = consumer.ticket_url("dashboard", bearer)
+    edge_url = f"ws://{consumer.server.host}:8000{consumer.sockets['edge']['path']}"
+    now = datetime.datetime.now(datetime.UTC)
+    spot = {
+        "type": "SPOT_UPDATE",
+        "spot_id": "R02-A",
+        "status": "occupied",
+        "camera_id": "test-camera",
+        "confidence": 0.9,
+        "timestamp": now.isoformat().replace("+00:00", "Z"),
+    }
+    # Missing evaluation metrics stay explicitly unavailable; no fabricated accuracy.
+    forecast = {
+        "type": "TREND_PREDICTION_V2",
+        "timestamp": now.isoformat().replace("+00:00", "Z"),
+        "max_capacity": 1,
+        "evaluation": {
+            "status": "unavailable",
+            "reason": "evaluation_failed",
+            "inference_time_ms": 1.0,
+        },
+        "stay_duration": {"status": "unavailable", "reason": "not_measured"},
+        "next_24h_occupancy": [
+            {
+                "timestamp": (now + datetime.timedelta(hours=1))
+                .isoformat()
+                .replace("+00:00", "Z"),
+                "occupancy": 1,
+            }
+        ],
+    }
+
+    async def run():
+        async with websockets.connect(
+            dashboard_url, origin="http://localhost"
+        ) as dashboard:
+            assert (await receive(dashboard, "SPOT_UPDATE"))["status"] == "free"
+            with pytest.raises(InvalidStatus) as denied:
+                async with websockets.connect(edge_url):
+                    pytest.fail("Anonymous edge connected")
+            assert denied.value.response.status_code == 401
+            async with websockets.connect(
+                edge_url, additional_headers={"Authorization": f"Bearer {KEY}"}
+            ) as edge:
+                ready = await receive(edge, "EDGE_READY")
+                assert "SPOT_UPDATE" in ready["durable_events"]
+                assert "TREND_PREDICTION_V2" in ready["durable_events"]
+                frame = {
+                    "type": "EDGE_EVENT",
+                    "version": 1,
+                    "event_id": str(uuid4()),
+                    "payload": spot,
+                }
+                await edge.send(json.dumps(frame))
+                ack = await receive(edge, "EDGE_ACK")
+                assert (
+                    ack["event_id"] == frame["event_id"] and ack["outcome"] == "applied"
+                )
+                assert consumer.server.query(
+                    "SELECT status FROM spots WHERE id='R02-A'"
+                ) == [("occupied",)]
+                assert (await receive(dashboard, "SPOT_UPDATE"))["status"] == "occupied"
+                await edge.send(json.dumps(frame))
+                assert (await receive(edge, "EDGE_ACK"))["duplicate"] is True
+                forbidden = {
+                    **frame,
+                    "event_id": str(uuid4()),
+                    "payload": {**spot, "camera_id": "ungranted-camera"},
+                }
+                await edge.send(json.dumps(forbidden))
+                rejection = await receive(edge, "EDGE_ACK")
+                assert (
+                    rejection["outcome"] == "rejected"
+                    and rejection["reason"] == "scope_forbidden"
+                )
+                assert consumer.server.query(
+                    "SELECT status FROM spots WHERE id='R02-A'"
+                ) == [("occupied",)]
+                denied_forecast = {
+                    **frame,
+                    "event_id": str(uuid4()),
+                    "payload": forecast,
+                }
+                await edge.send(json.dumps(denied_forecast))
+                assert (await receive(edge, "EDGE_ACK"))["outcome"] == "rejected"
+                consumer.server.query(
+                    "UPDATE edge_gateways SET trend_prediction=TRUE WHERE id=%s",
+                    (consumer.server.gateway_id,),
+                )
+                allowed_forecast = {**denied_forecast, "event_id": str(uuid4())}
+                await edge.send(json.dumps(allowed_forecast))
+                ack = await receive(edge, "EDGE_ACK")
+                assert (
+                    ack["outcome"] == "applied"
+                    and ack["event_id"] == allowed_forecast["event_id"]
+                )
+                assert await receive(dashboard, "TREND_PREDICTION_V2") == forecast
+                receipt = consumer.server.query(
+                    "SELECT outcome FROM edge_event_receipts WHERE gateway_id=%s AND event_id=%s",
+                    (consumer.server.gateway_id, allowed_forecast["event_id"]),
+                )
+                assert receipt == [("applied",)]
+        # New dashboard connections recover the persisted forecast via the cache.
+        async with websockets.connect(
+            consumer.ticket_url("dashboard", bearer), origin="http://localhost"
+        ) as dashboard:
+            assert await receive(dashboard, "TREND_PREDICTION_V2") == forecast
+
+    asyncio.run(run())
