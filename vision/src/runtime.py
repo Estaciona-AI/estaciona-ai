@@ -139,7 +139,10 @@ class Supervisor:
                 continue
             if slot.process is None:
                 if now >= slot.retry_at:
-                    self._start(slot, now)
+                    try:
+                        self._start(slot, now)
+                    except OSError:
+                        self._retry(slot, now)
                 continue
             snapshot = slot.snapshot()
             code = slot.process.exitcode

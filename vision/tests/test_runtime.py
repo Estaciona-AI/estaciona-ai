@@ -120,8 +120,9 @@ def test_failed_spawn_does_not_leave_an_unstarted_process_owned(tmp_path):
             return process
 
     supervisor.context = Context()
-    with pytest.raises(OSError, match="spawn failed"):
-        supervisor.step()
+    supervisor.step()
+    assert supervisor.slots[0].failures == 1
+    assert supervisor.slots[0].retry_at > time.monotonic()
     assert supervisor.slots[0].process is None
     assert process.closed
     supervisor.close()
