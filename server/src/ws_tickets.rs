@@ -460,7 +460,7 @@ mod origin_handshake_tests {
 
     async fn test_state(pool: PgPool) -> SharedState {
         state::init_state(
-            pool,
+            crate::installation::test_support::provision(&pool).await,
             "r14-test-jwt".into(),
             "r14-test-pepper".into(),
             SiteConfig {

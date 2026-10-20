@@ -26,3 +26,12 @@ mod cli_tests;
 pub mod cli;
 
 pub mod startup;
+
+#[cfg(test)]
+mod context_tests;
+
+mod bound;
+pub use bound::VerifiedInstallation;
+
+#[cfg(test)]
+pub(crate) mod test_support;

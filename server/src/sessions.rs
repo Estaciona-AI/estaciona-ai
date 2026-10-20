@@ -145,11 +145,12 @@ mod tests {
     use axum::response::IntoResponse;
 
     async fn fixture(pool: PgPool) -> (SharedState, Uuid) {
+        let verified = crate::installation::test_support::provision(&pool).await;
         let user = Uuid::new_v4();
         sqlx::query("INSERT INTO users (id,name,email,password_hash,role) VALUES ($1,'Sessions',$2,'unused','user')")
             .bind(user).bind(format!("{user}@example.invalid")).execute(&pool).await.unwrap();
         let state = crate::state::init_state(
-            pool,
+            verified,
             "session-test-secret".into(),
             "test-pepper".into(),
             SiteConfig {
