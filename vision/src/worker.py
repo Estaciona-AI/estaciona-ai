@@ -53,7 +53,7 @@ def _payload(input_id, spot_id, status, confidence, observed_at):
     )
 
 
-async def run_input(config, item, stop, report):
+async def run_input(config, item, stop, report, *, preview=None):
     """Called inside an exclusively leased worker process; report contains no secrets."""
     credential = os.environ.get(config.credential_env)
     if not credential or len(credential) > 4096 or any(ord(c) < 32 for c in credential):
@@ -64,6 +64,11 @@ async def run_input(config, item, stop, report):
     delivery = LocalDelivery(config.gateway_url, outbox)
     capture = LatestCapture(item.source)
     tasks = []
+    publisher = None
+    if preview is not None:
+        from inspection import PreviewPublisher
+
+        publisher = PreviewPublisher(preview, item.mapping.spots)
 
     async def persist(text):
         # Backpressure retains the current transition; only decoded frames drop.
@@ -92,6 +97,7 @@ async def run_input(config, item, stop, report):
         next_sample, last_sync = 0.0, time.monotonic()
         period = 1.0 / item.fps
         last_observation = None
+        last_processed = None
         while not stop.is_set():
             now = time.monotonic()
             if now < next_sample:
@@ -121,18 +127,26 @@ async def run_input(config, item, stop, report):
             ):
                 pipeline.reset_candidates(now=frame.received_monotonic)
             epoch = frame.epoch
+            processing_started = time.monotonic()
             result = await asyncio.to_thread(
                 pipeline.process,
                 frame.frame,
                 now=frame.received_monotonic,
                 expires_at=frame.received_monotonic + config.max_frame_age,
             )
+            processing_finished = time.monotonic()
             # Never catch up missed sample slots with bursts of stale work.
             next_sample = max(now + period, time.monotonic())
             if result is None:
                 last_observation = None
                 continue
             last_observation = frame.received_monotonic
+            fps = (
+                1.0 / (processing_finished - last_processed)
+                if last_processed is not None and processing_finished > last_processed
+                else 0.0
+            )
+            last_processed = processing_finished
             for observation in result.spots:
                 if observation.changed:
                     await persist(
@@ -156,6 +170,22 @@ async def run_input(config, item, stop, report):
                         _payload(item.input_id, spot_id, status, 1.0, frame.received_at)
                     )
                 last_sync = time.monotonic()
+            if publisher is not None and publisher.wanted():
+                # Optional presentation work is isolated from durable IO and inference.
+                try:
+                    pending = await asyncio.to_thread(outbox.pending_count)
+                    await asyncio.to_thread(
+                        publisher.publish,
+                        frame,
+                        result,
+                        latency_ms=(processing_finished - processing_started) * 1000,
+                        fps=fps,
+                        pending=pending,
+                    )
+                    preview.error.value = 0
+                except Exception:
+                    # Never surface decoder/credential-bearing exception strings.
+                    preview.error.value = 1
             report(Status.ACTIVE, True, sequence)
 
     async def initialize_and_produce():

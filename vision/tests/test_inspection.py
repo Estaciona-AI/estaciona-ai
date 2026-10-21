@@ -78,3 +78,21 @@ def test_bounded_and_poisoned_snapshot_does_not_block_other_inputs():
         assert channel.read() is None
     finally:
         channel.lock.release()
+
+
+def test_expired_viewer_and_old_generation_cannot_republish_after_switch(monkeypatch):
+    clock = [10.0]
+    monkeypatch.setattr(inspection.time, "monotonic", lambda: clock[0])
+    ctx = multiprocessing.get_context("spawn")
+    channel = inspection.PreviewChannel(ctx)
+    broker = inspection.PreviewBroker(("one",), max_age=1)
+    broker.register("one", channel)
+    broker.frame("one")
+    generation = channel.generation.value
+    channel.write({"sequence": 1, "received_monotonic": 8}, generation=generation)
+    state = broker.frame("one")
+    assert state["stale"] and state["age_ms"] == 2000
+    clock[0] = 13
+    assert broker.frame("one")["frame"] is None
+    channel.write({"sequence": 2, "received_monotonic": 13}, generation=generation)
+    assert broker.frame("one")["frame"] is None

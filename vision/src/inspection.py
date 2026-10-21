@@ -24,6 +24,7 @@ class PreviewChannel:
         self.lock = context.Lock()
         self.buffer = context.RawArray("B", MAX_SNAPSHOT)
         self.length = context.RawValue("i", 0)
+        self.error = context.RawValue("i", 0)
         # Parent is the sole writer of demand; worker is sole snapshot writer.
         self.request_until = context.RawValue("d", 0)
         self.generation = context.RawValue("q", 0)
@@ -107,10 +108,12 @@ class PreviewPublisher:
 class PreviewBroker:
     """Supervisor-side read-only diagnostic registry and single viewer lease."""
 
-    def __init__(self, input_ids, max_age=2.0):
+    def __init__(self, input_ids, max_age=2.0, *, profiles=None):
+        input_ids = tuple(input_ids)
         self.lock = threading.Lock()
         self.channels = dict.fromkeys(input_ids)
         self.states = {input_id: {"status": "starting"} for input_id in input_ids}
+        self.profiles = profiles or {}
         self.selected = None
         self.max_age = max_age
 
@@ -128,7 +131,10 @@ class PreviewBroker:
     def status(self):
         with self.lock:
             return {
-                "inputs": [{"id": key, **value} for key, value in self.states.items()]
+                "inputs": [
+                    {"id": key, **self.profiles.get(key, {}), **value}
+                    for key, value in self.states.items()
+                ]
             }
 
     def frame(self, input_id):
@@ -155,8 +161,10 @@ class PreviewBroker:
             )
             return {
                 "input_id": input_id,
+                **self.profiles.get(input_id, {}),
                 **self.states[input_id],
                 "frame": snapshot,
                 "age_ms": None if age is None else round(age * 1000, 1),
                 "stale": age is None or age > self.max_age,
+                "preview_error": channel is not None and bool(channel.error.value),
             }
