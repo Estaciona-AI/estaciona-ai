@@ -12,7 +12,12 @@ import time
 from urllib.parse import urlsplit
 
 from benchmark_profiles import JsonLines, artifact, provenance, results_directory
-from benchmark_resources import gpu_sample, process_sample, summarize_resources
+from benchmark_resources import (
+    gpu_sample,
+    process_sample,
+    summarize_resources,
+    cgroup_sample,
+)
 from configuration import _read
 from metrics import atomic_json
 from runtime import Supervisor
@@ -97,6 +102,7 @@ def capacity_trial(
         item.source.resolve()
     context = multiprocessing.get_context("spawn")
     start, end = context.RawValue("d", math.inf), context.RawValue("d", math.inf)
+    cgroup_before = cgroup_sample()
     initialized = time.monotonic()
     last_sample = 0.0
     complete = False
@@ -150,6 +156,7 @@ def capacity_trial(
                             if slot.process is not None
                         ],
                         "gpu": gpu_sample(),
+                        "cgroup_memory": cgroup_sample(),
                     }
                 )
 
@@ -191,6 +198,16 @@ def capacity_trial(
         "warmup_seconds": warmup,
         "provenance": provenance(),
         "inspector_enabled": False,
+        "cgroup_before": cgroup_before,
+        "cgroup_after": cgroup_sample(),
+        "worker_outcomes": [
+            {
+                "input_id": slot.item.input_id,
+                "starts": slot.starts,
+                "exit_code": slot.last_exit_code,
+            }
+            for slot in supervisor.slots
+        ],
         "backend": "remote_unmeasured" if delivery == "gateway" else "not_connected",
         "scope": "vision_only"
         if delivery == "shadow"

@@ -86,6 +86,7 @@ class _Slot:
     retry_at: float = 0.0
     failures: int = 0
     starts: int = 0
+    last_exit_code: int | None = None
     disabled: bool = False
     last_status: object = None
 
@@ -175,6 +176,7 @@ class Supervisor:
             if process.is_alive():
                 raise RuntimeError("owned vision worker could not be stopped")
         process.join()
+        slot.last_exit_code = process.exitcode
         process.close()
         slot.process = None
         # A killed process can poison an IPC lock. Never reuse its health block.

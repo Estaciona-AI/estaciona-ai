@@ -63,6 +63,8 @@ def summarize_resources(path):
 
     previous = {}
     peak_rss = 0
+    all_phases_peak_rss = 0
+    all_phases_gpu_peak = None
     peak_cpu = None
     gpu_peak = None
     gpu_devices = []
@@ -70,6 +72,21 @@ def summarize_resources(path):
     with Path(path).open() as stream:
         for line in stream:
             row = json.loads(line)
+            every_process = row.get(
+                "processes", row.get("workers", []) + [row.get("supervisor", {})]
+            )
+            all_phases_peak_rss = max(
+                all_phases_peak_rss,
+                sum(item.get("rss_bytes", 0) for item in every_process),
+            )
+            every_gpu = row.get("gpu", {}).get("devices", [])
+            if every_gpu:
+                total_used = sum(item["used_mib"] for item in every_gpu)
+                all_phases_gpu_peak = (
+                    total_used
+                    if all_phases_gpu_peak is None
+                    else max(all_phases_gpu_peak, total_used)
+                )
             if row.get("phase") not in (None, "measuring"):
                 continue
             samples += 1
@@ -109,6 +126,9 @@ def summarize_resources(path):
     return {
         "samples": samples,
         "owned_peak_rss_bytes": peak_rss,
+        "rss_scope": "sum_of_process_rss_may_double_count_shared_pages",
+        "all_phases_peak_rss_bytes": all_phases_peak_rss,
+        "all_phases_gpu_peak_used_mib": all_phases_gpu_peak,
         "owned_peak_cpu_percent": peak_cpu,
         "cpu_percent_units": "100_percent_per_logical_cpu",
         "gpu_peak_used_mib": gpu_peak,
@@ -117,3 +137,24 @@ def summarize_resources(path):
         "sampling": "periodic_not_instantaneous_peak",
         "external_services_measured": False,
     }
+
+
+def cgroup_sample(root="/sys/fs/cgroup"):
+    root = Path(root)
+    try:
+        current = int((root / "memory.current").read_text())
+        peak = int((root / "memory.peak").read_text())
+        limit = (root / "memory.max").read_text().strip()
+        events = dict(
+            line.split() for line in (root / "memory.events").read_text().splitlines()
+        )
+        return {
+            "scope": "current_cgroup_may_include_additional_processes",
+            "current_bytes": current,
+            "peak_bytes": peak,
+            "limit_bytes": None if limit == "max" else int(limit),
+            "oom_events": int(events.get("oom", 0)),
+            "oom_kills": int(events.get("oom_kill", 0)),
+        }
+    except OSError, ValueError:
+        return {"scope": "current_cgroup", "unavailable": True}
