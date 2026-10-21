@@ -62,6 +62,7 @@ class LatestCapture:
         self._thread = None
         self.ended = False
         self.error = None
+        self.metrics = None
 
     def start(self):
         # Resolve before starting a thread, to fail closed on missing credentials.
@@ -101,11 +102,15 @@ class LatestCapture:
             cap = None
             self.slot.clear()
             try:
+                if self.metrics is not None:
+                    self.metrics.increment("capture_attempts")
                 cap = self._open()
                 if not cap.isOpened():
                     self.error = "open_failed"
                 else:
                     epoch += 1
+                    if self.metrics is not None and epoch > 1:
+                        self.metrics.increment("source_reopens")
                     period = 0.0
                     if self.source.kind == "file":
                         fps = cap.get(cv2.CAP_PROP_FPS)
@@ -118,8 +123,16 @@ class LatestCapture:
                     while not self._stop.is_set():
                         if self._stop.wait(max(0.0, deadline - time.monotonic())):
                             break
+                        read_started = time.perf_counter() if self.metrics else 0
                         ok, frame = cap.read()
+                        if self.metrics is not None:
+                            self.metrics.observe(
+                                "decode_wait_ms",
+                                (time.perf_counter() - read_started) * 1000,
+                            )
                         if not ok:
+                            if self.metrics is not None:
+                                self.metrics.increment("capture_read_failures")
                             if self.source.kind == "file" and not self.source.loop:
                                 self.ended = True
                                 return
@@ -137,6 +150,8 @@ class LatestCapture:
                             self.ended = True
                             return
                         self.error = None
+                        if self.metrics is not None:
+                            self.metrics.increment("decoded")
                         backoff = self._retry_min
                         stamp = (
                             datetime.datetime.now(datetime.UTC)

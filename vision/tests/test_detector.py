@@ -125,3 +125,23 @@ def test_export_does_not_overwrite_existing_model_or_sidecars(tmp_path, suffix):
     with pytest.raises(FileExistsError):
         module.export(output)
     assert existing.read_bytes() == b"operator-owned"
+
+
+def test_metadata_records_actual_runtime_and_stage_metrics():
+    from metrics import Metrics
+
+    module = load_detector()
+    model = session([[2, 0.9, 0, 0, 9, 9]])
+    model.get_providers.return_value = ["CPUExecutionProvider"]
+    metrics = Metrics()
+    detector = module.RTDetrDetector(model, metrics=metrics)
+    assert detector.detect(np.zeros((10, 10, 3), np.uint8)) == [(0, 0, 9, 9)]
+    metadata = detector.metadata()
+    assert metadata["providers"] == ["CPUExecutionProvider"]
+    assert metadata["input_size"] == [640, 640]
+    assert metadata["precision"] == "float32"
+    assert set(metrics.snapshot()["stages"]) >= {
+        "detector_preprocess_ms",
+        "inference_ms",
+        "detector_postprocess_ms",
+    }

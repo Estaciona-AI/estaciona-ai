@@ -31,7 +31,7 @@ def _report(health, status, progress, sequence):
         lock.release()
 
 
-def _worker_entry(config, item, health, preview=None):
+def _worker_entry(config, item, health, preview=None, measurement=None):
     os.umask(0o077)
     # Native decoder/runtime messages may contain an authenticated RTSP URL.
     # Child output is private; the supervisor emits only IDs and status codes.
@@ -45,11 +45,29 @@ def _worker_entry(config, item, health, preview=None):
     def report(*args):
         _report(health, *args)
 
+    metrics, metrics_path, publish = None, None, True
+    if measurement is not None:
+        from metrics import Metrics
+
+        directory, start, end, publish = measurement
+        metrics = Metrics(control=start, end=end)
+        metrics_path = directory / f"{item.input_id}.json"
     directory = input_directory(config.state_dir, config.scope, item.input_id)
     try:
         # Lease outlives asyncio.run, including its executor shutdown.
         with FileLease(directory / "worker.lock"):
-            asyncio.run(run_input(config, item, stop, report, preview=preview))
+            asyncio.run(
+                run_input(
+                    config,
+                    item,
+                    stop,
+                    report,
+                    preview=preview,
+                    metrics=metrics,
+                    metrics_path=metrics_path,
+                    publish=publish,
+                )
+            )
         report(Status.STOPPED, True, 0)
     except PermanentInputError, ConfigurationError, LeaseConflict:
         report(Status.INVALID, False, 0)
@@ -67,6 +85,8 @@ class _Slot:
     started: float = 0.0
     retry_at: float = 0.0
     failures: int = 0
+    starts: int = 0
+    last_exit_code: int | None = None
     disabled: bool = False
     last_status: object = None
 
@@ -83,8 +103,10 @@ class _Slot:
 
 
 class Supervisor:
-    def __init__(self, config, *, inspect_port=None):
+    def __init__(self, config, *, inspect_port=None, measurement=None, observer=None):
         self.config = config
+        self.measurement = measurement
+        self.observer = observer
         # Spawn avoids inheriting CUDA sessions and capture threads across fork.
         self.context = multiprocessing.get_context("spawn")
         self.slots = [_Slot(item) for item in config.inputs]
@@ -115,6 +137,10 @@ class Supervisor:
             channel = PreviewChannel(self.context)
             self.inspector.register(slot.item.input_id, channel)
             args = (*args, channel)
+        if self.measurement is not None:
+            if len(args) == 3:
+                args = (*args, None)
+            args = (*args, self.measurement)
         process = self.context.Process(
             target=_worker_entry,
             args=args,
@@ -130,6 +156,7 @@ class Supervisor:
             raise
         slot.process = process
         slot.started = now
+        slot.starts += 1
         slot.last_status = None
         print(
             f"[VISION] input={slot.item.input_id} state=starting pid={slot.process.pid}",
@@ -149,6 +176,7 @@ class Supervisor:
             if process.is_alive():
                 raise RuntimeError("owned vision worker could not be stopped")
         process.join()
+        slot.last_exit_code = process.exitcode
         process.close()
         slot.process = None
         # A killed process can poison an IPC lock. Never reuse its health block.
@@ -260,6 +288,8 @@ class Supervisor:
         while not stop.is_set() and not all(slot.disabled for slot in self.slots):
             self.step()
             self._update_inspector()
+            if self.observer is not None:
+                self.observer(self)
             stop.wait(0.1)
         return (
             1 if any(slot.last_status == Status.INVALID for slot in self.slots) else 0

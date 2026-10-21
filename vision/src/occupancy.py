@@ -66,15 +66,18 @@ class _SpotState:
 
 
 class OccupancyTracker:
-    def __init__(self, spots: dict, frame_shape: tuple):
+    def __init__(self, spots: dict, frame_shape: tuple, *, metrics=None):
         self.spot_masks = build_spots_masks(spots, frame_shape)
         self.frame_shape = frame_shape
         self._states: dict[str, _SpotState] = {}
+        self.metrics = metrics
+        self._candidate_started = {}
 
     def confirmed_statuses(self) -> dict[str, str]:
         return {spot_id: state.confirmed for spot_id, state in self._states.items()}
 
     def reset_candidates(self, *, now: float):
+        self._candidate_started.clear()
         for state in self._states.values():
             state.candidate = state.confirmed
             state.consecutive_frames = 0
@@ -91,6 +94,15 @@ class OccupancyTracker:
                 else TRIGGER_OCCUPIED_THRESHOLD
             )
             raw_status = "occupied" if ratio >= threshold else "free"
+            known = state is not None
+            if self.metrics is not None and known:
+                if raw_status == state.confirmed:
+                    self._candidate_started.pop(spot_id, None)
+                elif (
+                    raw_status != state.candidate
+                    or spot_id not in self._candidate_started
+                ):
+                    self._candidate_started[spot_id] = now
             changed = state is None
             if state is None:
                 state = _SpotState(raw_status, raw_status, 0, now)
@@ -117,6 +129,13 @@ class OccupancyTracker:
                 state.consecutive_frames = 1
                 state.last_change_time = now
 
+            if changed and known and self.metrics is not None:
+                started = self._candidate_started.pop(spot_id, None)
+                if started is not None:
+                    self.metrics.observe(
+                        "confirmation_debounce_ms", max(0, now - started) * 1000
+                    )
+                self.metrics.increment("confirmed_transitions")
             observations.append(
                 SpotObservation(spot_id, state.confirmed, ratio, changed)
             )
