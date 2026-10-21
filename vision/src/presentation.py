@@ -11,6 +11,33 @@ import numpy as np
 from pipeline import FrameResult
 
 
+def draw_annotations(frame, result, spots, *, scale=1.0):
+    """Render this result on a copy, preserving source coordinates and capture ownership."""
+    if scale == 1.0:
+        frame = frame.copy()
+    else:
+        frame = cv2.resize(
+            frame, (round(frame.shape[1] * scale), round(frame.shape[0] * scale))
+        )
+    for observation in result.spots:
+        color = (0, 0, 255) if observation.status == "occupied" else (0, 255, 0)
+        polygon = np.rint(np.array(spots[observation.spot_id]) * scale).astype(np.int32)
+        cv2.polylines(frame, [polygon], isClosed=True, color=color, thickness=2)
+        cv2.putText(
+            frame,
+            f"{observation.spot_id} {observation.ratio:.0%}",
+            polygon[0],
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            color,
+            2,
+        )
+    for box in result.detections:
+        x1, y1, x2, y2 = (round(value * scale) for value in box)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
+    return frame
+
+
 class OpenCVDisplay:
     title = "Estaciona AI - Vision"
 
@@ -23,23 +50,7 @@ class OpenCVDisplay:
         cv2.resizeWindow(self.title, 1280, 720)
 
     def render(self, frame: np.ndarray, result: FrameResult) -> bool:
-        # Presentation must not alter frames owned by capture or processing.
-        frame = frame.copy()
-        for observation in result.spots:
-            color = (0, 0, 255) if observation.status == "occupied" else (0, 255, 0)
-            polygon = np.array(self.spots[observation.spot_id], dtype=np.int32)
-            cv2.polylines(frame, [polygon], isClosed=True, color=color, thickness=2)
-            cv2.putText(
-                frame,
-                f"{observation.spot_id} {observation.ratio:.0%}",
-                polygon[0],
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                color,
-                2,
-            )
-        for x1, y1, x2, y2 in result.detections:
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
+        frame = draw_annotations(frame, result, self.spots)
         current_time = time.monotonic()
         interval = current_time - self._previous_time
         self._previous_time = current_time
