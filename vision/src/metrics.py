@@ -106,6 +106,13 @@ class Metrics:
             return {
                 "schema_version": 1,
                 "pid": os.getpid(),
+                "window_start_monotonic": self.measured_from
+                if math.isfinite(self.measured_from)
+                else None,
+                "window_end_monotonic": min(
+                    time.monotonic(),
+                    self.end.value if self.end is not None else math.inf,
+                ),
                 "measured_seconds": max(
                     0,
                     min(

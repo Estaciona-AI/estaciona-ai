@@ -109,6 +109,8 @@ class LatestCapture:
                     self.error = "open_failed"
                 else:
                     epoch += 1
+                    if self.metrics is not None and epoch > 1:
+                        self.metrics.increment("source_reopens")
                     period = 0.0
                     if self.source.kind == "file":
                         fps = cap.get(cv2.CAP_PROP_FPS)

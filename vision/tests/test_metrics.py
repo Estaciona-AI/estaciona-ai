@@ -84,3 +84,26 @@ def test_shared_measurement_window_excludes_startup_and_shutdown(monkeypatch):
     metrics.increment("processed")
     assert metrics.snapshot()["counters"]["processed"] == 1
     assert metrics.snapshot()["measured_seconds"] == 2
+
+
+def test_confirmation_metrics_measure_observed_candidate_without_changing_debounce():
+    class Detector:
+        boxes = []
+
+        def detect(self, *args, **kwargs):
+            return self.boxes
+
+    frame = np.zeros((10, 10, 3), np.uint8)
+    detector = Detector()
+    metrics = Metrics()
+    pipeline = VisionPipeline(
+        detector, {"A": [[0, 0], [9, 0], [9, 9], [0, 9]]}, frame.shape, metrics=metrics
+    )
+    pipeline.process(frame, now=0)
+    detector.boxes = [(0, 0, 9, 9)]
+    pipeline.process(frame, now=1)
+    pipeline.process(frame, now=1.25)
+    assert pipeline.process(frame, now=1.6).spots[0].status == "occupied"
+    assert metrics.snapshot()["stages"]["confirmation_debounce_ms"][
+        "mean"
+    ] == pytest.approx(600)

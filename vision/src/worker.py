@@ -236,6 +236,11 @@ async def run_input(
                             frame.received_at,
                         )
                     )
+                    if metrics is not None:
+                        metrics.observe(
+                            "confirmation_observation_to_enqueue_ms",
+                            max(0, time.monotonic() - frame.received_monotonic) * 1000,
+                        )
             if (
                 publish
                 and time.monotonic() - last_sync >= 30

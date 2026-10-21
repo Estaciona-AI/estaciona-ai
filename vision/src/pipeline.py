@@ -45,7 +45,7 @@ class VisionPipeline:
     def __init__(self, detector, spots: dict, frame_shape: tuple, *, metrics=None):
         self.detector = detector
         self.metrics = metrics
-        self._occupancy = OccupancyTracker(spots, frame_shape)
+        self._occupancy = OccupancyTracker(spots, frame_shape, metrics=metrics)
 
     def confirmed_statuses(self) -> dict[str, str]:
         return self._occupancy.confirmed_statuses()
