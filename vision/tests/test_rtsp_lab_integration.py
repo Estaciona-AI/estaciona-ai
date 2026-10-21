@@ -6,6 +6,7 @@
 import asyncio
 from dataclasses import replace
 import json
+import multiprocessing
 import os
 from pathlib import Path
 import sqlite3
@@ -21,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools/rtsp-lab"))
 from capture import LatestCapture
 from configuration import Source, load_configuration
 from delivery import LocalOutbox
+from inspection import PreviewBroker, PreviewChannel
 from scenarios import generate
 from services import IMAGE, LabSession, docker
 from storage import input_directory
@@ -112,6 +114,11 @@ def test_rtsp_delivery_ack_loss_and_publisher_recovery(tmp_path, monkeypatch):
         monkeypatch.setattr(worker, "load_detector", lambda *args, **kwargs: detector)
         stop = threading.Event()
         received = []
+        broker = PreviewBroker((item.input_id for item in config.inputs))
+        channel = PreviewChannel(multiprocessing.get_context("spawn"))
+        selected = config.inputs[0].input_id
+        broker.register(selected, channel)
+        broker.frame(selected)
 
         async def scenario():
             database = sqlite3.connect(tmp_path / "gateway-fixture.db")
@@ -161,15 +168,38 @@ def test_rtsp_delivery_ack_loss_and_publisher_recovery(tmp_path, monkeypatch):
                         config,
                         gateway_url=f"ws://127.0.0.1:{listener.sockets[0].getsockname()[1]}/ws/edge",
                     )
+
+                    async def renew_preview():
+                        while not stop.is_set():
+                            broker.frame(selected)
+                            await asyncio.sleep(0.1)
+
                     await asyncio.wait_for(
                         asyncio.gather(
+                            renew_preview(),
                             *(
-                                worker.run_input(cfg, item, stop, lambda *args: None)
+                                worker.run_input(
+                                    cfg,
+                                    item,
+                                    stop,
+                                    lambda *args: None,
+                                    preview=channel
+                                    if item.input_id == selected
+                                    else None,
+                                )
                                 for item in cfg.inputs
-                            )
+                            ),
                         ),
                         20,
                     )
+                    snapshot = channel.read()
+                    assert snapshot is not None
+                    assert snapshot["sequence"] > 0 and snapshot["epoch"] >= 1
+                    assert (snapshot["width"], snapshot["height"]) == (64, 48)
+                    assert {spot["id"] for spot in snapshot["spots"]} == set(
+                        cfg.inputs[0].mapping.spots
+                    )
+                    assert snapshot["jpeg"]
                     payloads = [
                         json.loads(row[0])
                         for row in database.execute("SELECT payload FROM events")
