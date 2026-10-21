@@ -53,8 +53,17 @@ class LatestFrame:
 
 
 class LatestCapture:
-    def __init__(self, source: Source, *, opener=None, retry_min=1.0, retry_max=10.0):
+    def __init__(
+        self,
+        source: Source,
+        *,
+        opener=None,
+        retry_min=1.0,
+        retry_max=10.0,
+        decoder_threads=None,
+    ):
         self.source = source
+        self.decoder_threads = decoder_threads
         self.slot = LatestFrame()
         self._opener = opener or cv2.VideoCapture
         self._retry_min, self._retry_max = retry_min, retry_max
@@ -83,17 +92,23 @@ class LatestCapture:
         return True
 
     def _open(self):
+        params = []
+        if self.decoder_threads is not None:
+            params = [cv2.CAP_PROP_N_THREADS, self.decoder_threads]
         if self.source.kind == "rtsp":
             return self._opener(
                 self._url,
                 cv2.CAP_FFMPEG,
                 [
+                    *params,
                     cv2.CAP_PROP_OPEN_TIMEOUT_MSEC,
                     3000,
                     cv2.CAP_PROP_READ_TIMEOUT_MSEC,
                     3000,
                 ],
             )
+        if params:
+            return self._opener(self._url, cv2.CAP_FFMPEG, params)
         return self._opener(self._url)
 
     def _run(self):
