@@ -97,6 +97,7 @@ def test_capacity_runs_real_spawn_and_common_window_without_delivery(
     monkeypatch.setattr(runtime, "_worker_entry", measured_fixture_worker)
     report = capacity_trial(cfg, tmp_path / "capacity", count=2, seconds=1, warmup=0.1)
     assert report["completed"] and report["scope"] == "vision_only"
+    assert report["installation"]["installation_id"] == cfg.installation_id
     assert report["worker_restarts"] == 0
     assert len(report["inputs"]) == 2
     assert all(item["effective_fps"] > 0 for item in report["inputs"])

@@ -188,6 +188,11 @@ def capacity_trial(
             cfg.inputs, snapshots, restarts=restarts, completed=complete
         ),
         "schema_version": 1,
+        "installation": {
+            "organization_id": config.organization_id,
+            "installation_id": config.installation_id,
+            "environment": config.environment,
+        },
         "kind": "capacity_trial",
         "resources": summarize_resources(output / "resources.jsonl"),
         "reason": reason,

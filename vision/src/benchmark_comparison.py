@@ -264,6 +264,11 @@ def compare(
     succeeded = succeeded and same_frames and artifact(video) == video_artifact
     report = {
         "schema_version": 1,
+        "installation": {
+            "organization_id": config.organization_id,
+            "installation_id": config.installation_id,
+            "environment": config.environment,
+        },
         "kind": "same_frame_comparison",
         "resources": summarize_resources(output / "resources.jsonl"),
         "mode": mode,

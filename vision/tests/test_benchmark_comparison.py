@@ -96,6 +96,7 @@ def test_comparison_processes_match_frames_in_both_modes(tmp_path, monkeypatch, 
         timeout=5,
     )
     assert report["completed"] and report["same_frames_verified"]
+    assert report["installation"]["organization_id"] == cfg.organization_id
     if mode == "simultaneous":
         assert report["measured_overlap_seconds"] > 0
     assert not multiprocessing.active_children()
