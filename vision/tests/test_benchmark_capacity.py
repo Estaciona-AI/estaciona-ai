@@ -164,3 +164,33 @@ def test_delivery_trial_respects_existing_installation_runtime_lease(
         capacity_trial(
             cfg, tmp_path / "delivery", count=1, seconds=1, warmup=0, delivery="gateway"
         )
+
+
+def test_grouped_capacity_records_each_pid_once_and_retains_per_input_metrics(
+    tmp_path, monkeypatch
+):
+    from dataclasses import replace
+    from group_fixtures import measured_fixture_group
+    import process_groups
+    from benchmark_capacity import capacity_trial
+    from configuration import Mapping
+
+    cfg = config(tmp_path)
+    cfg.inputs[0].detector.path.write_bytes(b"fixture")
+    second = replace(
+        cfg.inputs[0],
+        input_id="cam-B",
+        mapping=Mapping(10, 10, {"B": [[0, 0], [9, 0], [9, 9], [0, 9]]}),
+    )
+    cfg = replace(cfg, inputs=(*cfg.inputs, second), inputs_per_process=2)
+    monkeypatch.setattr(process_groups, "group_entry", measured_fixture_group)
+    report = capacity_trial(cfg, tmp_path / "grouped", count=2, seconds=1, warmup=0.1)
+    assert report["completed"] and report["inputs_per_process"] == 2
+    assert len(report["inputs"]) == 2
+    assert all(item["effective_fps"] > 0 for item in report["inputs"])
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "grouped/resources.jsonl").read_text().splitlines()
+    ]
+    assert rows and all(len(row["workers"]) == 1 for row in rows)
+    assert not list((tmp_path / "grouped").rglob("*.db"))

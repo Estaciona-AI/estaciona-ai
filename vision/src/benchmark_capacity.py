@@ -155,9 +155,14 @@ def capacity_trial(
                         "phase": "measuring" if now >= start.value else reason,
                         "supervisor": process_sample(os.getpid()),
                         "workers": [
-                            process_sample(slot.process.pid)
-                            for slot in supervisor.slots
-                            if slot.process is not None
+                            process_sample(pid)
+                            for pid in sorted(
+                                {
+                                    slot.process.pid
+                                    for slot in supervisor.slots
+                                    if slot.process is not None
+                                }
+                            )
                         ],
                         "gpu": gpu_sample(),
                         "cgroup_memory": cgroup_sample(),
@@ -202,6 +207,7 @@ def capacity_trial(
         "reason": reason,
         "delivery": delivery,
         "input_count": count,
+        "inputs_per_process": cfg.inputs_per_process,
         "spot_count": sum(len(item.mapping.spots) for item in cfg.inputs),
         "seconds_requested": seconds,
         "warmup_seconds": warmup,

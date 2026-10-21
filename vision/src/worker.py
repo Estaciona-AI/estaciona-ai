@@ -63,6 +63,7 @@ async def run_input(
     metrics=None,
     metrics_path=None,
     publish=True,
+    capture_threads=None,
 ):
     """Called inside an exclusively leased worker process; report contains no secrets."""
     if not publish and config.environment == "production":
@@ -80,7 +81,11 @@ async def run_input(
         directory = input_directory(config.state_dir, config.scope, item.input_id)
         outbox = LocalOutbox(directory / "outbox.db")
         delivery = LocalDelivery(config.gateway_url, outbox)
-    capture = LatestCapture(item.source)
+    capture = (
+        LatestCapture(item.source)
+        if capture_threads is None
+        else LatestCapture(item.source, decoder_threads=capture_threads)
+    )
     capture.metrics = metrics
     state = {
         "input_id": item.input_id,

@@ -87,3 +87,18 @@ def test_local_file_is_paced_and_non_looping_eof_stops(tmp_path):
         assert item.received_at.endswith("Z")
     finally:
         assert capture.close()
+
+
+def test_grouped_capture_limits_ffmpeg_decoder_threads(monkeypatch):
+    from capture import LatestCapture
+
+    monkeypatch.setenv("TEST_RTSP", "rtsp://localhost/synthetic")
+    calls = []
+    for source in (Source("rtsp", env="TEST_RTSP"), Source("file", path="fixture")):
+        capture = LatestCapture(
+            source, opener=lambda *args: calls.append(args), decoder_threads=1
+        )
+        capture._url = source.resolve()
+        capture._open()
+    assert all(call[1] == cv2.CAP_FFMPEG for call in calls)
+    assert all(call[2][:2] == [cv2.CAP_PROP_N_THREADS, 1] for call in calls)
