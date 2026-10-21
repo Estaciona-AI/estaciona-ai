@@ -179,6 +179,16 @@ jobs:
           cache-dependency-glob: "vision/uv.lock"
       - name: Set up Python
         run: uv python install
+      - name: Prepare pinned RTSP lab image
+        run: |
+          uv run --locked python - <<'PY'
+          import subprocess
+          import sys
+          sys.path.insert(0, "../tools/rtsp-lab")
+          from services import IMAGE
+          subprocess.run(["docker", "info"], check=True, timeout=15, stdout=subprocess.DEVNULL)
+          subprocess.run(["docker", "pull", IMAGE], check=True, timeout=120)
+          PY
       - name: Test actual RTSP publication, delivery and recovery
         env:
           ESTACIONA_RTSP_TEST: "1"

@@ -10,6 +10,7 @@ import multiprocessing
 import os
 from pathlib import Path
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
@@ -24,7 +25,7 @@ from configuration import Source, load_configuration
 from delivery import LocalOutbox
 from inspection import PreviewBroker, PreviewChannel
 from scenarios import generate
-from services import IMAGE, LabSession, docker
+from services import IMAGE, LabSession
 from storage import input_directory
 import worker
 
@@ -47,40 +48,48 @@ def wait_for(predicate, timeout=15):
 def test_rtsp_delivery_ack_loss_and_publisher_recovery(tmp_path, monkeypatch):
     media = tmp_path / "media"
     media.mkdir()
-    docker(
-        "run",
-        "--rm",
-        "--network",
-        "none",
-        "--cap-drop",
-        "ALL",
-        "--user",
-        f"{os.getuid()}:{os.getgid()}",
-        "--mount",
-        f"type=bind,src={media},dst=/output",
-        "--entrypoint",
-        "ffmpeg",
-        IMAGE,
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-f",
-        "lavfi",
-        "-i",
-        "color=black:s=64x48:r=10",
-        "-t",
-        "2",
-        "-c:v",
-        "libx264",
-        "-threads",
-        "1",
-        "-preset",
-        "ultrafast",
-        "-g",
-        "10",
-        "-pix_fmt",
-        "yuv420p",
-        "/output/video.mp4",
+    # This command uses only generated test data, never camera credentials.
+    # Keep stderr under pytest capture so Docker/registry/FFmpeg failures remain
+    # visible in CI rather than being replaced by the private lab error message.
+    subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--cap-drop",
+            "ALL",
+            "--user",
+            f"{os.getuid()}:{os.getgid()}",
+            "--mount",
+            f"type=bind,src={media},dst=/output",
+            "--entrypoint",
+            "ffmpeg",
+            IMAGE,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=black:s=64x48:r=10",
+            "-t",
+            "2",
+            "-c:v",
+            "libx264",
+            "-threads",
+            "1",
+            "-preset",
+            "ultrafast",
+            "-g",
+            "10",
+            "-pix_fmt",
+            "yuv420p",
+            "/output/video.mp4",
+        ],
+        check=True,
+        timeout=60,
     )
     model = tmp_path / "model.onnx"
     model.write_bytes(b"fixture model; inference is mocked")
