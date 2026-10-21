@@ -83,9 +83,11 @@ class PreviewPublisher:
             frame.frame, result, self.spots, scale=scale, compact_labels=True
         )
         ok, jpeg = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 75])
-        if not ok or time.monotonic() >= self.channel.request_until.value:
-            return
-        self.channel.write(
+        if not ok:
+            return False
+        if time.monotonic() >= self.channel.request_until.value:
+            return None
+        return self.channel.write(
             {
                 "sequence": frame.sequence,
                 "epoch": frame.epoch,

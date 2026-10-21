@@ -425,7 +425,10 @@ def test_worker_preview_matches_processed_frame_without_extra_capture(
     assert capture.closed
 
 
-def test_preview_failure_does_not_stop_occupancy_delivery(tmp_path, monkeypatch):
+@pytest.mark.parametrize("failure", ["exception", "encode_false", "buffer_full"])
+def test_preview_failure_does_not_stop_occupancy_delivery(
+    tmp_path, monkeypatch, failure
+):
     import multiprocessing
     from inspection import PreviewChannel
     import cv2
@@ -436,9 +439,14 @@ def test_preview_failure_does_not_stop_occupancy_delivery(tmp_path, monkeypatch)
     model = Mock()
     model.detect.return_value = []
     monkeypatch.setattr(module, "load_detector", lambda *args, **kwargs: model)
-    monkeypatch.setattr(
-        cv2, "imencode", lambda *_: (_ for _ in ()).throw(cv2.error("fixture"))
-    )
+    if failure == "exception":
+        monkeypatch.setattr(
+            cv2, "imencode", lambda *_: (_ for _ in ()).throw(cv2.error("fixture"))
+        )
+    elif failure == "encode_false":
+        monkeypatch.setattr(cv2, "imencode", lambda *_: (False, None))
+    else:
+        monkeypatch.setattr(PreviewChannel, "write", lambda *args, **kwargs: False)
     stop = threading.Event()
     channel = PreviewChannel(multiprocessing.get_context("spawn"))
     channel.request_until.value = time.monotonic() + 2
@@ -453,3 +461,4 @@ def test_preview_failure_does_not_stop_occupancy_delivery(tmp_path, monkeypatch)
         input_directory(cfg.state_dir, cfg.scope, "cam-A") / "outbox.db"
     )
     assert outbox.first()["payload"]["spot_id"] == "A"
+    assert channel.error.value == 1

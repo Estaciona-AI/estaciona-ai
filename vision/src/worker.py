@@ -174,7 +174,7 @@ async def run_input(config, item, stop, report, *, preview=None):
                 # Optional presentation work is isolated from durable IO and inference.
                 try:
                     pending = await asyncio.to_thread(outbox.pending_count)
-                    await asyncio.to_thread(
+                    published = await asyncio.to_thread(
                         publisher.publish,
                         frame,
                         result,
@@ -182,7 +182,8 @@ async def run_input(config, item, stop, report, *, preview=None):
                         fps=fps,
                         pending=pending,
                     )
-                    preview.error.value = 0
+                    if published is not None:
+                        preview.error.value = int(not published)
                 except Exception:
                     # Never surface decoder/credential-bearing exception strings.
                     preview.error.value = 1
