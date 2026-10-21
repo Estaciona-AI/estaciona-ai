@@ -5,6 +5,7 @@
 
 import argparse
 import asyncio
+from contextlib import nullcontext
 from dataclasses import dataclass
 import multiprocessing
 import os
@@ -30,7 +31,7 @@ def _report(health, status, progress, sequence):
         lock.release()
 
 
-def _worker_entry(config, item, health):
+def _worker_entry(config, item, health, preview=None):
     os.umask(0o077)
     # Native decoder/runtime messages may contain an authenticated RTSP URL.
     # Child output is private; the supervisor emits only IDs and status codes.
@@ -48,7 +49,7 @@ def _worker_entry(config, item, health):
     try:
         # Lease outlives asyncio.run, including its executor shutdown.
         with FileLease(directory / "worker.lock"):
-            asyncio.run(run_input(config, item, stop, report))
+            asyncio.run(run_input(config, item, stop, report, preview=preview))
         report(Status.STOPPED, True, 0)
     except PermanentInputError, ConfigurationError, LeaseConflict:
         report(Status.INVALID, False, 0)
@@ -82,17 +83,41 @@ class _Slot:
 
 
 class Supervisor:
-    def __init__(self, config):
+    def __init__(self, config, *, inspect_port=None):
         self.config = config
         # Spawn avoids inheriting CUDA sessions and capture threads across fork.
         self.context = multiprocessing.get_context("spawn")
         self.slots = [_Slot(item) for item in config.inputs]
+        self.inspect_port = inspect_port
+        self.inspector = None
+        if inspect_port is not None:
+            from inspection import PreviewBroker
+
+            self.inspector = PreviewBroker(
+                (item.input_id for item in config.inputs),
+                config.max_frame_age,
+                profiles={
+                    item.input_id: {
+                        "model": item.detector.path.name,
+                        "device": item.detector.device,
+                        "target_fps": item.fps,
+                    }
+                    for item in config.inputs
+                },
+            )
 
     def _start(self, slot, now):
         slot.health = self.context.Array("d", [now, float(Status.STARTING), 0.0])
+        args = (self.config, slot.item, slot.health)
+        if self.inspector is not None:
+            from inspection import PreviewChannel
+
+            channel = PreviewChannel(self.context)
+            self.inspector.register(slot.item.input_id, channel)
+            args = (*args, channel)
         process = self.context.Process(
             target=_worker_entry,
-            args=(self.config, slot.item, slot.health),
+            args=args,
             daemon=True,
         )
         try:
@@ -100,6 +125,8 @@ class Supervisor:
         except BaseException:
             process.close()
             slot.health = None
+            if self.inspector is not None:
+                self.inspector.register(slot.item.input_id, None)
             raise
         slot.process = process
         slot.started = now
@@ -126,6 +153,8 @@ class Supervisor:
         slot.process = None
         # A killed process can poison an IPC lock. Never reuse its health block.
         slot.health = None
+        if self.inspector is not None:
+            self.inspector.register(slot.item.input_id, None)
 
     def _retry(self, slot, now):
         slot.failures += 1
@@ -183,6 +212,19 @@ class Supervisor:
                 self._stop(slot)
                 self._retry(slot, now)
 
+    def _update_inspector(self):
+        if self.inspector is None:
+            return
+        for slot in self.slots:
+            status = (
+                Status(int(slot.last_status)).name.lower()
+                if slot.last_status is not None
+                else "starting"
+            )
+            if slot.process is None and not slot.disabled and slot.failures:
+                status = "backoff"
+            self.inspector.update(slot.item.input_id, status)
+
     def close(self):
         errors = []
         for slot in self.slots:
@@ -201,14 +243,24 @@ class Supervisor:
             / "runtime.lock"
         )
         with FileLease(lease):
+            service = nullcontext()
+            if self.inspector is not None:
+                from inspector_http import InspectorServer
+
+                service = InspectorServer(self.inspector, port=self.inspect_port)
             try:
-                while not stop.is_set() and not all(
-                    slot.disabled for slot in self.slots
-                ):
-                    self.step()
-                    stop.wait(0.1)
+                with service as inspector:
+                    if inspector is not None:
+                        print(f"[VISION] inspector={inspector.origin}", flush=True)
+                    return self._run_loop(stop)
             finally:
                 self.close()
+
+    def _run_loop(self, stop):
+        while not stop.is_set() and not all(slot.disabled for slot in self.slots):
+            self.step()
+            self._update_inspector()
+            stop.wait(0.1)
         return (
             1 if any(slot.last_status == Status.INVALID for slot in self.slots) else 0
         )
@@ -224,7 +276,22 @@ def main(argv=None):
         action="store_true",
         help="Validate local files without loading models or starting workers",
     )
+    parser.add_argument(
+        "--inspect",
+        action="store_true",
+        help="Enable the read-only inspector on 127.0.0.1 only",
+    )
+    parser.add_argument(
+        "--inspect-port",
+        type=int,
+        default=None,
+        help="Local inspector port (default: 8765; 0 chooses a free port)",
+    )
     args = parser.parse_args(argv)
+    if args.inspect_port is not None and not args.inspect:
+        parser.error("--inspect-port requires --inspect")
+    if args.inspect_port is not None and not 0 <= args.inspect_port <= 65535:
+        parser.error("invalid inspector port")
     try:
         config = load_configuration(args.configuration)
         if args.validate:
@@ -250,10 +317,20 @@ def main(argv=None):
         try:
             for signum in previous:
                 signal.signal(signum, lambda *_: stop.set())
-            return Supervisor(config).run(stop)
+            return Supervisor(
+                config,
+                inspect_port=(
+                    args.inspect_port if args.inspect_port is not None else 8765
+                )
+                if args.inspect
+                else None,
+            ).run(stop)
         finally:
             for signum, handler in previous.items():
                 signal.signal(signum, handler)
+    except OSError:
+        print("[VISION] local runtime resource unavailable")
+        return 2
     except ConfigurationError, LeaseConflict:
         print("[VISION] invalid configuration or runtime already owned")
         return 2

@@ -24,9 +24,11 @@ function clear() {
 }
 function render(data) {
   el('status').textContent = labels[data.status] || 'Indisponível';
+  el('model').textContent = data.model ? `${data.model} · ${data.device}` : '';
   const stale = data.stale || data.status !== 'active';
   document.querySelector('.preview').classList.toggle('stale', stale);
   el('diagnostic').textContent = `${labels[data.status] || 'Indisponível'}. ${stale ? 'Sem observação atual confirmada; não interpretar a imagem como estado ao vivo.' : 'Worker processando o input selecionado.'}`;
+  if (data.preview_error) el('diagnostic').textContent = 'Falha no preview; o processamento de ocupação continua independente.';
   const frame = data.frame;
   if (!frame) { clear(); return; }
   el('age').textContent = `${(data.age_ms/1000).toFixed(1)} s`;
