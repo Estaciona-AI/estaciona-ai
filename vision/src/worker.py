@@ -53,17 +53,59 @@ def _payload(input_id, spot_id, status, confidence, observed_at):
     )
 
 
-async def run_input(config, item, stop, report, *, preview=None):
+async def run_input(
+    config,
+    item,
+    stop,
+    report,
+    *,
+    preview=None,
+    metrics=None,
+    metrics_path=None,
+    publish=True,
+):
     """Called inside an exclusively leased worker process; report contains no secrets."""
-    credential = os.environ.get(config.credential_env)
-    if not credential or len(credential) > 4096 or any(ord(c) < 32 for c in credential):
-        raise PermanentInputError("invalid credential environment")
-    headers = {"Authorization": f"Bearer {credential}"}
-    directory = input_directory(config.state_dir, config.scope, item.input_id)
-    outbox = LocalOutbox(directory / "outbox.db")
-    delivery = LocalDelivery(config.gateway_url, outbox)
+    if not publish and config.environment == "production":
+        raise PermanentInputError("shadow is restricted to demo/test installations")
+    headers, outbox, delivery = None, None, None
+    if publish:
+        credential = os.environ.get(config.credential_env)
+        if (
+            not credential
+            or len(credential) > 4096
+            or any(ord(c) < 32 for c in credential)
+        ):
+            raise PermanentInputError("invalid credential environment")
+        headers = {"Authorization": f"Bearer {credential}"}
+        directory = input_directory(config.state_dir, config.scope, item.input_id)
+        outbox = LocalOutbox(directory / "outbox.db")
+        delivery = LocalDelivery(config.gateway_url, outbox)
     capture = LatestCapture(item.source)
+    capture.metrics = metrics
+    state = {
+        "input_id": item.input_id,
+        "delivery": "gateway" if publish else "shadow",
+        "pending": None,
+        "last_sequence": 0,
+        "last_epoch": 0,
+        "model": None,
+    }
     tasks = []
+
+    async def flush_metrics():
+        while not stop.is_set():
+            if outbox is not None:
+                state["pending"] = await asyncio.to_thread(outbox.pending_count)
+            write = asyncio.create_task(
+                asyncio.to_thread(metrics.write, metrics_path, state=dict(state))
+            )
+            try:
+                await asyncio.shield(write)
+            except asyncio.CancelledError:
+                await write
+                raise
+            await asyncio.sleep(1)
+
     publisher = None
     if preview is not None:
         from inspection import PreviewPublisher
@@ -71,10 +113,17 @@ async def run_input(config, item, stop, report, *, preview=None):
         publisher = PreviewPublisher(preview, item.mapping.spots)
 
     async def persist(text):
+        if outbox is None:
+            return
+        enqueue_started = time.perf_counter()
         # Backpressure retains the current transition; only decoded frames drop.
         while not stop.is_set():
             try:
                 await asyncio.to_thread(outbox.enqueue, text)
+                if metrics is not None:
+                    metrics.observe(
+                        "enqueue_ms", (time.perf_counter() - enqueue_started) * 1000
+                    )
                 return
             except BufferError:
                 report(Status.BACKPRESSURE, True, 0)
@@ -84,8 +133,17 @@ async def run_input(config, item, stop, report, *, preview=None):
         ws = None
         try:
             while not stop.is_set():
-                if await asyncio.to_thread(outbox.first) is not None:
+                if (
+                    outbox is not None
+                    and await asyncio.to_thread(outbox.first) is not None
+                ):
+                    delivery_started = time.perf_counter()
                     ws = await delivery.send(ws, None, headers)
+                    if metrics is not None:
+                        metrics.observe(
+                            "delivery_attempt_ms",
+                            (time.perf_counter() - delivery_started) * 1000,
+                        )
                 await asyncio.sleep(0.1)
         finally:
             if ws is not None:
@@ -108,18 +166,24 @@ async def run_input(config, item, stop, report, *, preview=None):
                 if capture.ended:
                     if capture.error is not None:
                         raise PermanentInputError("invalid captured media")
-                    if await asyncio.to_thread(outbox.first) is None:
+                    if outbox is None or await asyncio.to_thread(outbox.first) is None:
                         return
                     report(Status.BACKPRESSURE, True, sequence)
                 else:
                     report(Status.WAITING, False, sequence)
                 await asyncio.sleep(0.05)
                 continue
+            if metrics is not None:
+                metrics.increment("sampled")
+                metrics.increment("skipped", max(0, frame.sequence - sequence - 1))
             sequence = frame.sequence
+            state.update(last_sequence=sequence, last_epoch=frame.epoch)
             if frame.frame.shape != (item.mapping.height, item.mapping.width, 3):
                 raise PermanentInputError("frame does not match calibration dimensions")
             if pipeline is None:
-                pipeline = VisionPipeline(model, item.mapping.spots, frame.frame.shape)
+                pipeline = VisionPipeline(
+                    model, item.mapping.spots, frame.frame.shape, metrics=metrics
+                )
             elif epoch != frame.epoch or (
                 last_observation is not None
                 and frame.received_monotonic - last_observation
@@ -137,9 +201,21 @@ async def run_input(config, item, stop, report, *, preview=None):
             processing_finished = time.monotonic()
             # Never catch up missed sample slots with bursts of stale work.
             next_sample = max(now + period, time.monotonic())
+            if metrics is not None:
+                metrics.observe(
+                    "pipeline_ms", (processing_finished - processing_started) * 1000
+                )
+                metrics.observe(
+                    "frame_age_ms",
+                    max(0, processing_finished - frame.received_monotonic) * 1000,
+                )
             if result is None:
+                if metrics is not None:
+                    metrics.increment("expired")
                 last_observation = None
                 continue
+            if metrics is not None:
+                metrics.increment("processed")
             last_observation = frame.received_monotonic
             fps = (
                 1.0 / (processing_finished - last_processed)
@@ -148,7 +224,7 @@ async def run_input(config, item, stop, report, *, preview=None):
             )
             last_processed = processing_finished
             for observation in result.spots:
-                if observation.changed:
+                if observation.changed and publish:
                     await persist(
                         _payload(
                             item.input_id,
@@ -161,7 +237,8 @@ async def run_input(config, item, stop, report, *, preview=None):
                         )
                     )
             if (
-                time.monotonic() - last_sync >= 30
+                publish
+                and time.monotonic() - last_sync >= 30
                 and await asyncio.to_thread(outbox.first) is None
             ):
                 # A heartbeat represents this actual observation, not wall-clock now.
@@ -173,7 +250,11 @@ async def run_input(config, item, stop, report, *, preview=None):
             if publisher is not None and publisher.wanted():
                 # Optional presentation work is isolated from durable IO and inference.
                 try:
-                    pending = await asyncio.to_thread(outbox.pending_count)
+                    pending = (
+                        await asyncio.to_thread(outbox.pending_count)
+                        if outbox is not None
+                        else None
+                    )
                     published = await asyncio.to_thread(
                         publisher.publish,
                         frame,
@@ -199,10 +280,15 @@ async def run_input(config, item, stop, report, *, preview=None):
             # Give durable events a delivery path even with an invalid model.
             # The supervisor still bounds a stalled worker's lifetime.
             while (
-                not stop.is_set() and await asyncio.to_thread(outbox.first) is not None
+                not stop.is_set()
+                and outbox is not None
+                and await asyncio.to_thread(outbox.first) is not None
             ):
                 await asyncio.sleep(0.1)
             raise
+        if metrics is not None:
+            model.metrics = metrics
+            state["model"] = model.metadata()
         if not stop.is_set():
             capture.start()
             report(Status.WAITING, True, 0)
@@ -213,6 +299,8 @@ async def run_input(config, item, stop, report, *, preview=None):
             asyncio.create_task(initialize_and_produce()),
             asyncio.create_task(pump()),
         ]
+        if metrics is not None and metrics_path is not None:
+            tasks.append(asyncio.create_task(flush_metrics()))
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         for task in done:
             task.result()
@@ -226,3 +314,7 @@ async def run_input(config, item, stop, report, *, preview=None):
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         capture.close()
+        if metrics is not None and metrics_path is not None:
+            if outbox is not None:
+                state["pending"] = await asyncio.to_thread(outbox.pending_count)
+            await asyncio.to_thread(metrics.write, metrics_path, state=dict(state))

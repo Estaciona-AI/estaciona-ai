@@ -64,3 +64,23 @@ def test_pipeline_instrumentation_preserves_results_and_separates_stages():
         "detect_ms",
         "occupancy_ms",
     }
+
+
+def test_shared_measurement_window_excludes_startup_and_shutdown(monkeypatch):
+    from types import SimpleNamespace
+
+    start, end = (
+        SimpleNamespace(value=float("inf")),
+        SimpleNamespace(value=float("inf")),
+    )
+    clock = [1.0]
+    monkeypatch.setattr("metrics.time.monotonic", lambda: clock[0])
+    metrics = Metrics(control=start, end=end)
+    metrics.increment("processed")
+    start.value, end.value = 2, 4
+    clock[0] = 3
+    metrics.increment("processed")
+    clock[0] = 5
+    metrics.increment("processed")
+    assert metrics.snapshot()["counters"]["processed"] == 1
+    assert metrics.snapshot()["measured_seconds"] == 2

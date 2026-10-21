@@ -462,3 +462,52 @@ def test_preview_failure_does_not_stop_occupancy_delivery(
     )
     assert outbox.first()["payload"]["spot_id"] == "A"
     assert channel.error.value == 1
+
+
+def test_shadow_worker_never_creates_outbox_or_requires_credentials(
+    tmp_path, monkeypatch
+):
+    from metrics import Metrics
+    import worker
+
+    monkeypatch.delenv("TEST_EDGE_KEY", raising=False)
+    monkeypatch.setattr(worker, "LatestCapture", SyntheticCapture)
+    monkeypatch.setattr(
+        worker,
+        "LocalOutbox",
+        lambda *args: pytest.fail("shadow created durable delivery"),
+    )
+
+    class Model:
+        def detect(self, *args, **kwargs):
+            return []
+
+        def metadata(self):
+            return {"adapter": "fixture", "providers": ["fixture"]}
+
+    monkeypatch.setattr(worker, "load_detector", lambda *args, **kwargs: Model())
+    stop = threading.Event()
+    metrics = Metrics()
+    path = tmp_path / "metrics.json"
+
+    def report(status, *args):
+        if status == worker.Status.ACTIVE:
+            stop.set()
+
+    cfg = config(tmp_path)
+    asyncio.run(
+        worker.run_input(
+            cfg,
+            cfg.inputs[0],
+            stop,
+            report,
+            publish=False,
+            metrics=metrics,
+            metrics_path=path,
+        )
+    )
+    snapshot = json.loads(path.read_text())
+    assert snapshot["state"]["delivery"] == "shadow"
+    assert snapshot["counters"]["processed"] == 1
+    assert snapshot["state"]["pending"] is None
+    assert not (tmp_path / "state").exists()

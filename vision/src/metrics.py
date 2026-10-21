@@ -10,6 +10,7 @@ import math
 import os
 from pathlib import Path
 import threading
+import tempfile
 import time
 
 BOUNDS = tuple(2 ** (index / 4) for index in range(-40, 121))
@@ -54,23 +55,38 @@ class Distribution:
 
 
 class Metrics:
-    def __init__(self, *, warmup=0):
+    def __init__(self, *, warmup=0, control=None, end=None):
         if not math.isfinite(warmup) or warmup < 0:
             raise ValueError("invalid warmup")
         self.started = time.monotonic()
-        self.measured_from = self.started + warmup
+        self._measured_from = self.started + warmup
+        self.control = control
+        self.end = end
         self.stages = {}
         self.counters = {}
         self.lock = threading.Lock()
 
+    @property
+    def measured_from(self):
+        return self.control.value if self.control is not None else self._measured_from
+
+    @property
+    def recording(self):
+        now = time.monotonic()
+        return (
+            self.measured_from
+            <= now
+            < (self.end.value if self.end is not None else math.inf)
+        )
+
     def observe(self, name, value):
-        if time.monotonic() < self.measured_from:
+        if not self.recording:
             return
         with self.lock:
             self.stages.setdefault(name, Distribution()).add(value)
 
     def increment(self, name, amount=1):
-        if time.monotonic() < self.measured_from:
+        if not self.recording:
             return
         if type(amount) is not int or amount < 0:
             raise ValueError("invalid metric counter")
@@ -90,7 +106,14 @@ class Metrics:
             return {
                 "schema_version": 1,
                 "pid": os.getpid(),
-                "measured_seconds": max(0, time.monotonic() - self.measured_from),
+                "measured_seconds": max(
+                    0,
+                    min(
+                        time.monotonic(),
+                        self.end.value if self.end is not None else math.inf,
+                    )
+                    - self.measured_from,
+                ),
                 "quantiles": "histogram_upper_bounds",
                 "counters": dict(self.counters),
                 "stages": {
@@ -104,11 +127,15 @@ class Metrics:
 
 def atomic_json(path, value):
     path = Path(path)
-    temporary = path.with_suffix(".tmp")
+    temporary = None
     try:
-        with temporary.open("x") as stream:
+        with tempfile.NamedTemporaryFile(
+            mode="w", prefix=".metrics-", suffix=".tmp", dir=path.parent, delete=False
+        ) as stream:
+            temporary = Path(stream.name)
             json.dump(value, stream, allow_nan=False, separators=(",", ":"))
             stream.write("\n")
         os.replace(temporary, path)
     finally:
-        temporary.unlink(missing_ok=True)
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
