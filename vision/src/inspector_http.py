@@ -6,6 +6,7 @@
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 from pathlib import Path
+import socket
 import threading
 import time
 from urllib.parse import parse_qs, urlsplit
@@ -16,6 +17,27 @@ ASSETS = Path(__file__).with_name("inspector_assets")
 class _Server(HTTPServer):
     request_queue_size = 4
     allow_reuse_address = False
+    request_timeout = 2.0
+
+    def finish_request(self, request, client_address):
+        # The idle timeout alone restarts on every received byte. Bound the whole
+        # connection so a slow reader/writer cannot monopolize this serial server.
+        def expire():
+            try:
+                request.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+        timer = threading.Timer(self.request_timeout, expire)
+        timer.daemon = True
+        timer.start()
+        try:
+            super().finish_request(request, client_address)
+        except BrokenPipeError, ConnectionResetError, TimeoutError:
+            pass
+        finally:
+            timer.cancel()
+            timer.join()
 
     def get_request(self):
         connection, address = super().get_request()

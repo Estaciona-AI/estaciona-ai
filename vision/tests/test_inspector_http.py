@@ -86,3 +86,38 @@ def test_request_budget_is_bounded(inspector):
     server, _ = inspector
     codes = [request(server)[0] for _ in range(35)]
     assert 429 in codes
+
+
+def test_slow_headers_cannot_hold_the_serial_server(inspector, monkeypatch):
+    import socket
+    import threading
+    import inspector_http
+
+    monkeypatch.setattr(inspector_http._Server, "request_timeout", 0.15, raising=False)
+    server, _ = inspector
+    stopped = threading.Event()
+    slow = socket.create_connection(("127.0.0.1", server.port), timeout=1)
+    slow.sendall(b"GET / HTTP/1.1\r\nHost: ")
+
+    def drip():
+        while not stopped.wait(0.025):
+            try:
+                slow.sendall(b"a")
+            except OSError:
+                return
+
+    client = threading.Thread(target=drip, daemon=True)
+    client.start()
+    try:
+        connection = http.client.HTTPConnection("127.0.0.1", server.port, timeout=0.5)
+        try:
+            connection.request("GET", "/")
+            response = connection.getresponse()
+            assert response.status == 200
+            response.read()
+        finally:
+            connection.close()
+    finally:
+        stopped.set()
+        slow.close()
+        client.join(1)
