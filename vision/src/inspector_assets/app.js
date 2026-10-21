@@ -6,12 +6,14 @@ const labels = {starting:'Inicializando',waiting:'Aguardando captura',active:'At
 let paused = false;
 let busy = false;
 let displayed = null;
+let viewRevision = 0;
 async function api(path) {
   const response = await fetch(path, {headers:{'X-Inspector-Request':'1'},cache:'no-store',signal:AbortSignal.timeout(2000)});
   if (!response.ok) throw new Error('inspector unavailable');
   return response.json();
 }
 function clear() {
+  viewRevision += 1;
   displayed = null;
   el('image').hidden = true;
   el('image').removeAttribute('src');
@@ -21,8 +23,11 @@ function clear() {
   el('total').textContent = 'aguardando observação';
   el('spots').replaceChildren();
   el('observed').textContent = 'Nenhum frame recebido';
+  el('freshness').textContent = 'Aguardando imagem do input selecionado';
+  document.querySelector('.preview').classList.add('stale');
 }
-async function render(data) {
+async function render(data, revision = viewRevision) {
+  if (paused || revision !== viewRevision || data.input_id !== el('input').value) return;
   el('status').textContent = labels[data.status] || 'Indisponível';
   el('model').textContent = data.model ? `${data.model} · ${data.device}` : '';
   const stale = data.stale || data.status !== 'active';
@@ -41,7 +46,7 @@ async function render(data) {
   const image = new Image();
   image.src = `data:image/jpeg;base64,${frame.jpeg}`;
   await image.decode();
-  if (paused || data.input_id !== el('input').value) return;
+  if (paused || revision !== viewRevision || data.input_id !== el('input').value) return;
   // Commit decoded pixels and their metadata together in one browser task.
   image.id = 'image';
   image.alt = 'Último frame analisado com caixas e polígonos';
@@ -68,10 +73,12 @@ async function poll() {
   if (busy || paused || document.hidden || !el('input').value) return;
   busy = true;
   const selected = el('input').value;
+  const revision = viewRevision;
   try {
     const data = await api(`/api/frame?input=${encodeURIComponent(selected)}`);
-    if (!paused && selected === el('input').value && data.input_id === selected) await render(data);
+    if (!paused && revision === viewRevision && selected === el('input').value && data.input_id === selected) await render(data, revision);
   } catch {
+    if (paused || revision !== viewRevision || selected !== el('input').value) return;
     el('status').textContent = 'Inspetor indisponível';
     el('diagnostic').textContent = 'Não foi possível consultar o runtime local. A imagem anterior não representa uma observação atual.';
     document.querySelector('.preview').classList.add('stale');
@@ -80,6 +87,7 @@ async function poll() {
 }
 el('input').addEventListener('change', () => { clear(); poll(); });
 el('pause').addEventListener('click', () => {
+  viewRevision += 1;
   paused = !paused;
   el('pause').textContent = paused ? 'Retomar preview' : 'Pausar preview';
   if (paused) {
