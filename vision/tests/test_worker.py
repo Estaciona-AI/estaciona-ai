@@ -370,3 +370,95 @@ def test_delivery_drains_while_model_is_starting_or_failed(
             assert event_id in received
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("preview_enabled", [False, True])
+def test_worker_preview_matches_processed_frame_without_extra_capture(
+    tmp_path, monkeypatch, preview_enabled
+):
+    import multiprocessing
+    import cv2
+    from inspection import PreviewChannel
+
+    module = importlib.import_module("worker")
+    monkeypatch.setenv("TEST_EDGE_KEY", "disposable")
+    capture = SyntheticCapture(None)
+    captures = []
+    monkeypatch.setattr(
+        module, "LatestCapture", lambda source: (captures.append(source), capture)[1]
+    )
+    model = Mock()
+    model.detect.return_value = [(0, 0, 9, 9)]
+    monkeypatch.setattr(module, "load_detector", lambda *args, **kwargs: model)
+    stop = threading.Event()
+    channel = (
+        PreviewChannel(multiprocessing.get_context("spawn"))
+        if preview_enabled
+        else None
+    )
+    if channel is not None:
+        channel.request_until.value = time.monotonic() + 2
+    else:
+        monkeypatch.setattr(
+            cv2, "imencode", lambda *_: pytest.fail("headless encoded an image")
+        )
+
+    def report(status, progress, sequence):
+        if int(status) == 2:
+            stop.set()
+
+    async def scenario():
+        cfg = config(tmp_path)
+        await asyncio.wait_for(
+            module.run_input(cfg, cfg.inputs[0], stop, report, preview=channel), 3
+        )
+        if channel is not None:
+            snapshot = channel.read()
+            assert snapshot["sequence"] == 1 and snapshot["epoch"] == 1
+            assert snapshot["spots"][0]["id"] == "A"
+            assert snapshot["spots"][0]["status"] == "occupied"
+            assert snapshot["pending"] >= 0
+            assert "disposable" not in json.dumps(snapshot)
+
+    asyncio.run(scenario())
+    assert len(captures) == 1
+    assert capture.closed
+
+
+@pytest.mark.parametrize("failure", ["exception", "encode_false", "buffer_full"])
+def test_preview_failure_does_not_stop_occupancy_delivery(
+    tmp_path, monkeypatch, failure
+):
+    import multiprocessing
+    from inspection import PreviewChannel
+    import cv2
+
+    module = importlib.import_module("worker")
+    monkeypatch.setenv("TEST_EDGE_KEY", "disposable")
+    monkeypatch.setattr(module, "LatestCapture", SyntheticCapture)
+    model = Mock()
+    model.detect.return_value = []
+    monkeypatch.setattr(module, "load_detector", lambda *args, **kwargs: model)
+    if failure == "exception":
+        monkeypatch.setattr(
+            cv2, "imencode", lambda *_: (_ for _ in ()).throw(cv2.error("fixture"))
+        )
+    elif failure == "encode_false":
+        monkeypatch.setattr(cv2, "imencode", lambda *_: (False, None))
+    else:
+        monkeypatch.setattr(PreviewChannel, "write", lambda *args, **kwargs: False)
+    stop = threading.Event()
+    channel = PreviewChannel(multiprocessing.get_context("spawn"))
+    channel.request_until.value = time.monotonic() + 2
+    cfg = config(tmp_path)
+
+    def report(status, *args):
+        if int(status) == 2:
+            stop.set()
+
+    asyncio.run(module.run_input(cfg, cfg.inputs[0], stop, report, preview=channel))
+    outbox = LocalOutbox(
+        input_directory(cfg.state_dir, cfg.scope, "cam-A") / "outbox.db"
+    )
+    assert outbox.first()["payload"]["spot_id"] == "A"
+    assert channel.error.value == 1

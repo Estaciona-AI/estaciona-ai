@@ -126,3 +126,72 @@ def test_failed_spawn_does_not_leave_an_unstarted_process_owned(tmp_path):
     assert supervisor.slots[0].process is None
     assert process.closed
     supervisor.close()
+
+
+def test_inspector_disabled_by_default_and_explicit_port_is_loopback(
+    profile, monkeypatch
+):
+    module = importlib.import_module("runtime")
+    monkeypatch.setenv("TEST_EDGE_KEY", "disposable")
+    calls = []
+
+    class Supervisor:
+        def __init__(self, config, *, inspect_port=None):
+            calls.append(inspect_port)
+
+        def run(self, stop):
+            return 0
+
+    monkeypatch.setattr(module, "Supervisor", Supervisor)
+    # Reuse parsed profile while avoiding source/environment setup in this CLI test.
+    cfg = config(profile[0].parent)
+    monkeypatch.setattr(module, "load_configuration", lambda _: cfg)
+    monkeypatch.setattr(type(cfg.inputs[0].source), "resolve", lambda _: "fixture")
+    assert module.main([str(profile[0])]) == 0
+    assert calls == [None]
+    assert module.main([str(profile[0]), "--inspect", "--inspect-port", "0"]) == 0
+    assert calls == [None, 0]
+
+
+def inspected_worker(config, item, health, preview):
+    from runtime import _report
+    from worker import Status
+
+    _report(health, Status.ACTIVE, True, 8)
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        _report(health, Status.ACTIVE, True, 8)
+        if preview.request_until.value > time.monotonic():
+            preview.write(
+                {"sequence": 8, "epoch": 1, "received_monotonic": time.monotonic()}
+            )
+        time.sleep(0.02)
+
+
+def test_inspected_spawn_uses_replaceable_channel_and_reaps_worker(
+    tmp_path, monkeypatch
+):
+    module = importlib.import_module("runtime")
+    monkeypatch.setattr(module, "_worker_entry", inspected_worker)
+    supervisor = module.Supervisor(config(tmp_path), inspect_port=0)
+    try:
+        supervisor.step()
+        old = supervisor.inspector.channels["cam-A"]
+        supervisor.inspector.frame("cam-A")
+
+        def ready():
+            supervisor.step()
+            supervisor._update_inspector()
+            return supervisor.inspector.frame("cam-A")["frame"]
+
+        assert wait_for(ready)["sequence"] == 8
+        assert supervisor.inspector.status()["inputs"][0]["status"] == "active"
+        supervisor._stop(supervisor.slots[0])
+        assert supervisor.inspector.frame("cam-A")["frame"] is None
+        assert old.request_until.value == 0
+        supervisor.step()
+        assert supervisor.inspector.channels["cam-A"] is not old
+        assert supervisor.inspector.frame("cam-A")["frame"] is None
+    finally:
+        supervisor.close()
+    assert supervisor.slots[0].process is None

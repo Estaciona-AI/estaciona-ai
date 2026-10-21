@@ -67,6 +67,11 @@ class LocalOutbox:
             "payload": json.loads(row[1]),
         }
 
+    def pending_count(self):
+        """Bounded diagnostic read; never changes delivery/ACK state."""
+        with closing(sqlite3.connect(self.path, timeout=0.05)) as conn:
+            return conn.execute("SELECT COUNT(*) FROM local_outbox").fetchone()[0]
+
     def acknowledge(self, event_id):
         with closing(self.connect()) as conn, conn:
             conn.execute("DELETE FROM local_outbox WHERE event_id=?", (event_id,))

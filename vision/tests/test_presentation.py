@@ -33,3 +33,30 @@ def test_display_draws_on_a_copy_and_preserves_frame(monkeypatch):
     assert tuple(shown[20, 20]) == (255, 0, 0)
     display.close()
     close.assert_called_once()
+
+
+def test_reduced_preview_uses_short_numbered_labels_without_clipping_source(
+    monkeypatch,
+):
+    from presentation import draw_annotations
+
+    labels = []
+    original = cv2.putText
+
+    def text(image, label, *args):
+        labels.append(label)
+        return original(image, label, *args)
+
+    monkeypatch.setattr(cv2, "putText", text)
+    source = np.zeros((100, 200, 3), dtype=np.uint8)
+    spots = {
+        "a-very-long-customer-defined-spot-id": [[10, 10], [90, 10], [90, 90], [10, 90]]
+    }
+    result = FrameResult(
+        (), (SpotObservation(next(iter(spots)), "occupied", 0.5, True),)
+    )
+    image = draw_annotations(source, result, spots, scale=0.5, compact_labels=True)
+    assert labels == ["1"]
+    assert image.shape == (50, 100, 3)
+    assert not source.any()
+    assert image.any()
