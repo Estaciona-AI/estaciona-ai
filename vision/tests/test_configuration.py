@@ -173,3 +173,20 @@ def test_watchdog_must_allow_sampling_interval_and_processing_age(profile):
     profile[1]["stall_timeout"] = 5
     with pytest.raises(ValueError, match="sampling"):
         load(save(profile))
+
+
+def test_process_group_defaults_to_isolated_inputs(profile):
+    assert load(profile[0]).inputs_per_process == 1
+
+
+@pytest.mark.parametrize("size", [1, 2, 3, 4])
+def test_process_group_size_is_explicit(profile, size):
+    profile[1]["inputs_per_process"] = size
+    assert load(save(profile)).inputs_per_process == size
+
+
+@pytest.mark.parametrize("size", [0, 5, True, 2.0, "2", None])
+def test_invalid_process_group_size_is_rejected(profile, size):
+    profile[1]["inputs_per_process"] = size
+    with pytest.raises(ValueError):
+        load(save(profile))

@@ -145,6 +145,7 @@ class RuntimeConfiguration:
     max_frame_age: float
     stall_timeout: float
     startup_timeout: float
+    inputs_per_process: int = 1
 
     @property
     def scope(self):
@@ -201,7 +202,7 @@ def load_configuration(path) -> RuntimeConfiguration:
             "sources",
             "inputs",
         ),
-        ("max_frame_age", "stall_timeout", "startup_timeout"),
+        ("max_frame_age", "stall_timeout", "startup_timeout", "inputs_per_process"),
     )
     if type(data["version"]) is not int or data["version"] != 1:
         raise ConfigurationError("unsupported runtime version")
@@ -298,6 +299,9 @@ def load_configuration(path) -> RuntimeConfiguration:
         raise ConfigurationError("stall timeout must exceed frame age")
     if any(stall <= 1.0 / item.fps + age for item in inputs):
         raise ConfigurationError("stall timeout must allow sampling and processing age")
+    group_size = data.get("inputs_per_process", 1)
+    if type(group_size) is not int or not 1 <= group_size <= 4:
+        raise ConfigurationError("inputs_per_process must be an integer from 1 to 4")
     return RuntimeConfiguration(
         org,
         installation,
@@ -309,4 +313,5 @@ def load_configuration(path) -> RuntimeConfiguration:
         age,
         stall,
         _number(data.get("startup_timeout", 120), 10, 600),
+        group_size,
     )
