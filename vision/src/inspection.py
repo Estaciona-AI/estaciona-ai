@@ -79,7 +79,9 @@ class PreviewPublisher:
         self.next_preview = time.monotonic() + PREVIEW_INTERVAL
         height, width = frame.frame.shape[:2]
         scale = min(1.0, 960 / width, 540 / height)
-        image = draw_annotations(frame.frame, result, self.spots, scale=scale)
+        image = draw_annotations(
+            frame.frame, result, self.spots, scale=scale, compact_labels=True
+        )
         ok, jpeg = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 75])
         if not ok or time.monotonic() >= self.channel.request_until.value:
             return

@@ -11,7 +11,7 @@ import numpy as np
 from pipeline import FrameResult
 
 
-def draw_annotations(frame, result, spots, *, scale=1.0):
+def draw_annotations(frame, result, spots, *, scale=1.0, compact_labels=False):
     """Render this result on a copy, preserving source coordinates and capture ownership."""
     if scale == 1.0:
         frame = frame.copy()
@@ -19,18 +19,20 @@ def draw_annotations(frame, result, spots, *, scale=1.0):
         frame = cv2.resize(
             frame, (round(frame.shape[1] * scale), round(frame.shape[0] * scale))
         )
-    for observation in result.spots:
+    for index, observation in enumerate(result.spots, 1):
         color = (0, 0, 255) if observation.status == "occupied" else (0, 255, 0)
         polygon = np.rint(np.array(spots[observation.spot_id]) * scale).astype(np.int32)
         cv2.polylines(frame, [polygon], isClosed=True, color=color, thickness=2)
         cv2.putText(
             frame,
-            f"{observation.spot_id} {observation.ratio:.0%}",
+            str(index)
+            if compact_labels
+            else f"{observation.spot_id} {observation.ratio:.0%}",
             polygon[0],
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
+            0.45 if compact_labels else 0.6,
             color,
-            2,
+            1 if compact_labels else 2,
         )
     for box in result.detections:
         x1, y1, x2, y2 = (round(value * scale) for value in box)
