@@ -110,6 +110,14 @@ class Supervisor:
         # Spawn avoids inheriting CUDA sessions and capture threads across fork.
         self.context = multiprocessing.get_context("spawn")
         self.slots = [_Slot(item) for item in config.inputs]
+        self.groups = []
+        if config.inputs_per_process > 1:
+            from process_groups import Group
+
+            size = config.inputs_per_process
+            self.groups = [
+                Group(self.slots[i : i + size]) for i in range(0, len(self.slots), size)
+            ]
         self.inspect_port = inspect_port
         self.inspector = None
         if inspect_port is not None:
@@ -163,10 +171,8 @@ class Supervisor:
             flush=True,
         )
 
-    def _stop(self, slot):
-        process = slot.process
-        if process is None:
-            return
+    @staticmethod
+    def _reap(process):
         if process.is_alive():
             process.terminate()
             process.join(1)
@@ -176,8 +182,19 @@ class Supervisor:
             if process.is_alive():
                 raise RuntimeError("owned vision worker could not be stopped")
         process.join()
-        slot.last_exit_code = process.exitcode
+        code = process.exitcode
         process.close()
+        return code
+
+    def _stop(self, slot):
+        if self.groups:
+            from process_groups import stop_group
+
+            return stop_group(self, slot)
+        process = slot.process
+        if process is None:
+            return
+        slot.last_exit_code = self._reap(process)
         slot.process = None
         # A killed process can poison an IPC lock. Never reuse its health block.
         slot.health = None
@@ -191,6 +208,10 @@ class Supervisor:
 
     def step(self):
         now = time.monotonic()
+        if self.groups:
+            from process_groups import step_groups
+
+            return step_groups(self, now)
         for slot in self.slots:
             if slot.disabled:
                 continue
