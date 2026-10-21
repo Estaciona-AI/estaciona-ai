@@ -73,6 +73,13 @@ def provenance():
         "commit": git("rev-parse", "HEAD"),
         "dirty": bool(git("status", "--porcelain")),
         "python": platform.python_version(),
+        "timing_semantics": {
+            "inference_ms": "blocking ONNX Runtime session.run including transfers",
+            "decode_wait_ms": "decoder read including stream waiting",
+            "frame_age_ms": "local decode completion to processing completion; camera clock not measured",
+            "confirmation_debounce_ms": "first observed opposite candidate to confirmed transition",
+            "confirmation_observation_to_enqueue_ms": "confirming frame decode completion to local enqueue; excludes prior debounce",
+        },
         "platform": platform.system(),
         "machine": platform.machine(),
         "parameters": {
@@ -105,3 +112,11 @@ class JsonLines:
 
     def __exit__(self, *_):
         self.stream.close()
+
+
+def results_directory(path):
+    path = Path(path).resolve()
+    if path.is_relative_to(Path(__file__).resolve().parents[2]):
+        raise ValueError("benchmark artifacts must remain outside the source checkout")
+    path.mkdir(mode=0o700)
+    return path
