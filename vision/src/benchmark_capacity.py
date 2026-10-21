@@ -97,7 +97,11 @@ def capacity_trial(
     output = results_directory(output)
     directory = output / "metrics"
     directory.mkdir(mode=0o700)
-    cfg = replace(config, inputs=config.inputs[:count], state_dir=output / "state")
+    cfg = replace(
+        config,
+        inputs=config.inputs[:count],
+        state_dir=config.state_dir if delivery == "gateway" else output / "state",
+    )
     for item in cfg.inputs:
         item.source.resolve()
     context = multiprocessing.get_context("spawn")

@@ -141,3 +141,26 @@ def test_larger_ramp_requires_measured_margin():
     assert not can_advance(report, 25)
     report["resources"]["gpu_peak_used_mib"] = 14000
     assert can_advance(report, 25)
+
+
+def test_delivery_trial_respects_existing_installation_runtime_lease(
+    tmp_path, monkeypatch
+):
+    import runtime
+    from benchmark_capacity import capacity_trial
+    from storage import FileLease, LeaseConflict, input_directory
+
+    cfg = config(tmp_path)
+    cfg.inputs[0].detector.path.write_bytes(b"fixture")
+    monkeypatch.setattr(
+        runtime.Supervisor,
+        "_start",
+        lambda *args: pytest.fail("second publisher started for owned installation"),
+    )
+    lease = (
+        input_directory(cfg.state_dir, cfg.scope, "supervisor").parent / "runtime.lock"
+    )
+    with FileLease(lease), pytest.raises(LeaseConflict):
+        capacity_trial(
+            cfg, tmp_path / "delivery", count=1, seconds=1, warmup=0, delivery="gateway"
+        )
