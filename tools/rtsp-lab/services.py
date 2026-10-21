@@ -168,7 +168,11 @@ class LabSession:
         if checksum(manifest["video"]) != manifest["video_sha256"]:
             raise LabError("source video changed; generate a new scenario")
         run_id = manifest["run_id"]
-        return docker(
+        import datetime
+        import time
+
+        since = datetime.datetime.now(datetime.UTC).isoformat().replace("+00:00", "Z")
+        container_id = docker(
             "run",
             "-d",
             "--name",
@@ -214,12 +218,33 @@ class LabSession:
             self.stream_url(manifest),
         )
 
+        deadline = time.monotonic() + 10
+        while True:
+            publisher = self.owned("publisher", run_id)
+            if publisher is None or not publisher["State"]["Running"]:
+                raise LabError("publisher exited before publishing its RTSP stream")
+            logs = docker("logs", "--since", since, self.name("server", run_id))
+            if "is publishing to path 'showcase'" in logs:
+                return container_id
+            if time.monotonic() >= deadline:
+                raise LabError("publisher RTSP path did not become ready")
+            time.sleep(0.1)
+
     def _stop(self, manifest):
         run_id = manifest["run_id"]
+        state_path = self.directory / "lab-state.json"
+        expected_env = None
+        if state_path.exists() or state_path.is_symlink():
+            if state_path.is_symlink():
+                raise LabError("refusing symlinked lab state")
+            expected_env = f"ESTACIONA_LAB_RTSP={self.stream_url(manifest)}\n"
         self.remove_owned("publisher", run_id)
         self.remove_owned("server", run_id)
-        (self.directory / "lab-state.json").unlink(missing_ok=True)
-        (self.directory / "stream.env").unlink(missing_ok=True)
+        env = self.directory / "stream.env"
+        if expected_env is not None and env.is_file() and not env.is_symlink():
+            if env.read_text() == expected_env:
+                env.unlink()
+        state_path.unlink(missing_ok=True)
 
     def start(self):
         import socket
@@ -228,6 +253,9 @@ class LabSession:
 
         with FileLease(self.directory / "lab-control.lock"):
             manifest = self.manifest()
+            env = self.directory / "stream.env"
+            if env.exists() or env.is_symlink():
+                raise LabError("reserved stream.env already exists; preserving it")
             if (self.directory / "lab-state.json").exists():
                 raise LabError(
                     "lab state already exists; stop it before starting again"
