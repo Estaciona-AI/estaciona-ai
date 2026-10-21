@@ -49,6 +49,7 @@ class RTDetrDetector:
     def metadata(self):
         return {
             "adapter": "rtdetr",
+            "runtime_version": getattr(self, "runtime_version", None),
             "providers": list(self.session.get_providers()),
             "input_size": [INPUT_SIZE, INPUT_SIZE],
             "precision": "float32",
@@ -134,4 +135,6 @@ def load_detector(path, device="cuda", *, runtime=None):
             "CUDA initialization failed; install the cuda extra or select VISION_DEVICE=cpu"
         )
     print(f"[VISION MODEL] RT-DETR HGNetv2-L / ONNX Runtime / {provider}")
-    return RTDetrDetector(session)
+    detector = RTDetrDetector(session)
+    detector.runtime_version = getattr(runtime, "__version__", None)
+    return detector
