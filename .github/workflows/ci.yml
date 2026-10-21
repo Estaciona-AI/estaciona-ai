@@ -151,13 +151,38 @@ jobs:
         run: uv python install
 
       - name: Run Ruff Check
-        run: uv run --locked ruff check
+        run: uv run --locked ruff check . ../tools/rtsp-lab
 
       - name: Run Ruff Format Check
-        run: uv run --locked ruff format --check
+        run: uv run --locked ruff format --check . ../tools/rtsp-lab
 
       - name: Run Pytest
-        run: uv run --locked pytest
+        run: uv run --locked pytest --ignore=tests/test_rtsp_lab_integration.py
+
+  rtsp-lab-ci:
+    name: RTSP lab integration
+    needs: vision-ci
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./vision
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install OpenCV system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1 libglib2.0-0
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "vision/uv.lock"
+      - name: Set up Python
+        run: uv python install
+      - name: Test actual RTSP publication, delivery and recovery
+        env:
+          ESTACIONA_RTSP_TEST: "1"
+        run: uv run --locked pytest -q tests/test_rtsp_lab_integration.py
 
   contracts-ci:
     name: Contract compatibility CI
