@@ -4,6 +4,7 @@
 """Frame processing without capture, presentation or delivery side effects."""
 
 from dataclasses import dataclass
+from contextlib import nullcontext
 import time
 
 import cv2
@@ -41,8 +42,9 @@ class FrameResult:
 
 
 class VisionPipeline:
-    def __init__(self, detector, spots: dict, frame_shape: tuple):
+    def __init__(self, detector, spots: dict, frame_shape: tuple, *, metrics=None):
         self.detector = detector
+        self.metrics = metrics
         self._occupancy = OccupancyTracker(spots, frame_shape)
 
     def confirmed_statuses(self) -> dict[str, str]:
@@ -63,24 +65,27 @@ class VisionPipeline:
             if current > expires_at:
                 self.reset_candidates(now=current)
                 return None
-        inference_frame = preprocess_frame(
-            frame, gamma=GAMMA_CORRECTION, clahe_enabled=CLAHE_ENABLED
-        )
-        detections = []
-        for x1, y1, x2, y2 in self.detector.detect(
-            inference_frame, confidence=CONF_THRESHOLD
-        ):
-            shrink_w = int((x2 - x1) * BOX_SHRINK_FACTOR)
-            shrink_h = int((y2 - y1) * BOX_SHRINK_FACTOR)
-            detections.append(
-                (x1 + shrink_w, y1 + shrink_h, x2 - shrink_w, y2 - shrink_h)
+        with self.metrics.stage("preprocess_ms") if self.metrics else nullcontext():
+            inference_frame = preprocess_frame(
+                frame, gamma=GAMMA_CORRECTION, clahe_enabled=CLAHE_ENABLED
             )
+        with self.metrics.stage("detect_ms") if self.metrics else nullcontext():
+            detections = []
+            for x1, y1, x2, y2 in self.detector.detect(
+                inference_frame, confidence=CONF_THRESHOLD
+            ):
+                shrink_w = int((x2 - x1) * BOX_SHRINK_FACTOR)
+                shrink_h = int((y2 - y1) * BOX_SHRINK_FACTOR)
+                detections.append(
+                    (x1 + shrink_w, y1 + shrink_h, x2 - shrink_w, y2 - shrink_h)
+                )
         if expires_at is not None:
             current = time.monotonic()
             if current > expires_at:
                 self.reset_candidates(now=current)
                 return None
-        observations = self._occupancy.update(
-            detections, now=time.monotonic() if now is None else now
-        )
+        with self.metrics.stage("occupancy_ms") if self.metrics else nullcontext():
+            observations = self._occupancy.update(
+                detections, now=time.monotonic() if now is None else now
+            )
         return FrameResult(tuple(detections), observations)
