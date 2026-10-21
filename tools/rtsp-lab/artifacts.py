@@ -27,7 +27,7 @@ def read_json(path):
         if len(raw) > 2 * 1024 * 1024:
             raise LabError("lab JSON is too large")
         return json.loads(raw, object_pairs_hook=pairs)
-    except (OSError, UnicodeError, json.JSONDecodeError):
+    except OSError, UnicodeError, json.JSONDecodeError:
         raise LabError("cannot read lab JSON") from None
 
 

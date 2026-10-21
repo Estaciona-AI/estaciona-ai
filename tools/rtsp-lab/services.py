@@ -22,7 +22,7 @@ def docker(*args, timeout=60):
             text=True,
             timeout=timeout,
         )
-    except (OSError, subprocess.SubprocessError):
+    except OSError, subprocess.SubprocessError:
         raise LabError(
             "Docker lab operation failed; inspect the owned container logs"
         ) from None
@@ -83,7 +83,7 @@ def probe_video(video):
             "codec": stream["codec_name"],
             "fps": fps,
         }
-    except (KeyError, IndexError, TypeError, ValueError, ZeroDivisionError):
+    except KeyError, IndexError, TypeError, ValueError, ZeroDivisionError:
         raise LabError("unsupported or invalid video metadata") from None
 
 
@@ -274,7 +274,7 @@ class LabSession:
                 previous = read_json(config)
                 try:
                     old_port = int(previous["rtspAddress"].removeprefix("127.0.0.1:"))
-                except (KeyError, TypeError, ValueError):
+                except KeyError, TypeError, ValueError:
                     raise LabError("unexpected media server configuration") from None
                 if previous != server_config(old_port):
                     raise LabError("unexpected media server configuration")

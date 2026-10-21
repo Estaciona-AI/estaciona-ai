@@ -59,7 +59,7 @@ def main(argv=None):
             else:
                 session.restart_publisher()
         return 0
-    except (LabError, LeaseConflict, OSError, ValueError):
+    except LabError, LeaseConflict, OSError, ValueError:
         print(
             "Lab operation failed; check inputs, ownership and Docker logs",
             file=sys.stderr,

@@ -46,7 +46,7 @@ def generate(
             and not gateway.fragment
             and gateway.port != 0
         )
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         local = False
     if not local:
         raise LabError("lab gateway must be explicitly local, without URL credentials")
