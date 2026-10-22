@@ -52,4 +52,31 @@ def detect_tiled(frame, predict, confidence, size, overlap):
         0.0,
         0.45,
     )
-    return [candidates[int(i)][1] for i in np.asarray(indices).reshape(-1)]
+    kept = sorted(
+        (candidates[int(i)] for i in np.asarray(indices).reshape(-1)),
+        key=lambda item: -item[0],
+    )
+    # IoU misses a fragment of a car detected as a second, smaller vehicle:
+    # drop a box when most of its own area lies inside a stronger, larger one.
+    boxes = []
+    for _, box in kept:
+        area = _area(box)
+        if not any(
+            _intersection(box, other) >= COVERED_FRACTION * area and area < _area(other)
+            for other in boxes
+        ):
+            boxes.append(box)
+    return boxes
+
+
+COVERED_FRACTION = 0.5
+
+
+def _area(box):
+    return (box[2] - box[0]) * (box[3] - box[1])
+
+
+def _intersection(a, b):
+    w = min(a[2], b[2]) - max(a[0], b[0])
+    h = min(a[3], b[3]) - max(a[1], b[1])
+    return max(w, 0) * max(h, 0)

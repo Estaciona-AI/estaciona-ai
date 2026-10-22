@@ -203,3 +203,18 @@ def test_bad_tiling_parameters_fail_before_model_execution(size, overlap):
         load_detector().RTDetrDetector(
             session([]), tile_size=size, tile_overlap=overlap
         )
+
+
+def test_tiled_detection_suppresses_partial_duplicate_without_removing_neighbor():
+    model = session(
+        [
+            [2, 0.86, 100, 145, 191, 211],
+            [2, 0.49, 138, 134, 196, 170],
+            [2, 0.91, 81, 190, 172, 261],
+        ]
+    )
+    detector = load_detector().RTDetrDetector(model, tile_size=512)
+    assert set(detector.detect(np.zeros((512, 512, 3), np.uint8), confidence=0.3)) == {
+        (100, 145, 191, 211),
+        (81, 190, 172, 261),
+    }
