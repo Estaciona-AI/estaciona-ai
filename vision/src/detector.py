@@ -19,6 +19,16 @@ INPUT_SIZE = 640
 VEHICLE_CLASSES = frozenset((2, 7))  # Dense COCO-80 indices: car and truck.
 
 
+def _image_tensor(frame):
+    image = cv2.resize(frame, (INPUT_SIZE, INPUT_SIZE), interpolation=cv2.INTER_CUBIC)
+    tensor = np.empty((1, 3, INPUT_SIZE, INPUT_SIZE), dtype=np.float32)
+    # Copy BGR directly into contiguous RGB planes. Keep division (not a
+    # reciprocal multiply) to preserve the original FP32 rounding exactly.
+    tensor[0] = image[:, :, ::-1].transpose(2, 0, 1)
+    np.divide(tensor, np.float32(255), out=tensor)
+    return tensor
+
+
 class Detector(Protocol):
     def detect(
         self, frame: np.ndarray, confidence: float = 0.1
@@ -86,12 +96,8 @@ class RTDetrDetector:
             if self.metrics
             else nullcontext()
         ):
-            image = cv2.resize(
-                frame, (INPUT_SIZE, INPUT_SIZE), interpolation=cv2.INTER_CUBIC
-            )
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
             feed = {
-                "image": np.ascontiguousarray(image.transpose(2, 0, 1)[None]),
+                "image": _image_tensor(frame),
                 "im_shape": np.array([[INPUT_SIZE, INPUT_SIZE]], dtype=np.float32),
                 "scale_factor": np.array(
                     [[INPUT_SIZE / height, INPUT_SIZE / width]], dtype=np.float32
