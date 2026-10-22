@@ -503,3 +503,13 @@ def test_invalid_accelerator_combinations_fail_before_session(tmp_path, options)
         load_detector().load_detector(path, runtime=runtime, **options)
     runtime.InferenceSession.assert_not_called()
 
+
+def test_export_rejects_unknown_variant_before_any_download(tmp_path):
+    path = Path(__file__).resolve().parents[1] / "tools/export_rtdetr.py"
+    spec = importlib.util.spec_from_file_location("official_exporter", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert set(module.VARIANTS) == {"l", "r18"}
+    with pytest.raises(ValueError, match="variant"):
+        module.export(tmp_path / "model.onnx", "x")
+    assert not any(tmp_path.iterdir())
