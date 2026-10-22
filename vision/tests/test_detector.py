@@ -8,6 +8,7 @@ from unittest.mock import Mock
 
 import numpy as np
 import pytest
+import cv2
 
 
 def load_detector():
@@ -35,6 +36,62 @@ def session(rows):
         np.array([len(rows)], dtype=np.int32),
     ]
     return value
+
+
+@pytest.mark.parametrize("shape", [(512, 512, 3), (108, 192, 3), (7, 11, 3)])
+@pytest.mark.parametrize("strided", [False, True])
+def test_image_tensor_is_bitwise_equal_to_official_preprocessing(shape, strided):
+    frame = np.random.default_rng(42).integers(0, 256, shape, dtype=np.uint8)
+    if strided:
+        frame = frame[::2, ::-1]
+    original = frame.copy()
+    resized = cv2.resize(frame, (640, 640), interpolation=cv2.INTER_CUBIC)
+    expected = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+    expected = np.ascontiguousarray(expected.transpose(2, 0, 1)[None])
+
+    actual = load_detector()._image_tensor(frame)
+
+    assert actual.shape == (1, 3, 640, 640)
+    assert actual.dtype == np.float32
+    assert actual.flags.c_contiguous
+    assert np.array_equal(actual, expected)
+    assert np.array_equal(frame, original)
+    assert not np.shares_memory(actual, frame)
+
+
+def test_vehicle_candidates_preserve_order_clipping_and_score_boundaries():
+    rows = np.array(
+        [
+            [7, 1.0, -2.5, 2.9, 120, 90],
+            [2, 0.5, 8.9, 3.9, 20.1, 15.9],
+            [7, 0.499, 1, 2, 3, 4],
+            [2, 1.001, 1, 2, 3, 4],
+            [2.1, 0.9, 1, 2, 3, 4],
+            [0, 0.9, 1, 2, 3, 4],
+            [2, np.nan, 1, 2, 3, 4],
+            [np.nan, 0.9, 1, 2, 3, 4],
+            [2, 0.9, 1, 2, np.inf, 4],
+            [2, 0.9, 20, 20, 10, 40],
+            [2, 0.9, -4, -4, -1, -1],
+            [2, 0.9, 3.1, 2, 3.9, 4],
+        ],
+        np.float32,
+    )
+    before = rows.copy()
+    result = load_detector()._vehicle_candidates(rows, 100, 80, 0.5)
+    assert result == [(1.0, (0, 2, 100, 80)), (0.5, (8, 3, 20, 15))]
+    np.testing.assert_array_equal(rows, before)
+
+
+@pytest.mark.parametrize("shape", [(0, 6), (1, 0, 6)])
+def test_vehicle_candidates_allow_empty_official_outputs(shape):
+    assert load_detector()._vehicle_candidates(np.empty(shape), 100, 80, 0.3) == []
+
+
+@pytest.mark.parametrize("shape", [(6,), (1, 300, 84), (2, 300, 6)])
+def test_vehicle_candidates_reject_nonofficial_output_shapes(shape):
+    with pytest.raises(ValueError, match="output"):
+        load_detector()._vehicle_candidates(np.zeros(shape), 100, 80, 0.3)
 
 
 def test_official_preprocessing_preserves_rgb_and_original_coordinate_scaling():
