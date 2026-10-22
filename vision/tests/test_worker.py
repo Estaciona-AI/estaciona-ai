@@ -8,6 +8,7 @@ import importlib
 import json
 import threading
 import time
+from types import SimpleNamespace
 from unittest.mock import Mock
 from uuid import uuid4
 
@@ -25,6 +26,105 @@ from configuration import (
 )
 from delivery import LocalOutbox
 from storage import input_directory
+
+
+def test_heartbeat_snapshot_is_atomically_visible_with_observation_timestamp(
+    tmp_path, monkeypatch
+):
+    import worker
+    from metrics import Metrics
+
+    monkeypatch.setenv("TEST_EDGE_KEY", "disposable")
+    clock = SimpleNamespace(now=0.0)
+    monkeypatch.setattr(
+        worker,
+        "time",
+        SimpleNamespace(monotonic=lambda: clock.now, perf_counter=time.perf_counter),
+    )
+    timestamp = "2026-10-22T10:00:00.123456Z"
+    visible_counts = []
+    statuses = {f"A-{index:02}": "free" for index in range(20)}
+
+    class Capture(SyntheticCapture):
+        def latest(self, *, after, max_age):
+            assert after == 0
+            return CapturedFrame(
+                1, 1, np.zeros((10, 10, 3), dtype=np.uint8), 0.0, timestamp
+            )
+
+    class ObservedOutbox(LocalOutbox):
+        def enqueue_many(self, payloads):
+            ids = super().enqueue_many(payloads)
+            visible_counts.append(LocalOutbox(self.path).pending_count())
+            return ids
+
+    class Pipeline:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def process(self, *args, **kwargs):
+            clock.now = 31.0
+            return SimpleNamespace(spots=())
+
+        def confirmed_statuses(self):
+            return statuses
+
+    monkeypatch.setattr(worker, "LatestCapture", Capture)
+    monkeypatch.setattr(worker, "LocalOutbox", ObservedOutbox)
+    monkeypatch.setattr(worker, "VisionPipeline", Pipeline)
+    model = Mock()
+    model.metadata.return_value = {"adapter": "fixture"}
+    monkeypatch.setattr(worker, "load_detector", lambda *args, **kwargs: model)
+
+    async def offline(*args, **kwargs):
+        raise OSError("offline")
+
+    monkeypatch.setattr(worker.LocalDelivery, "connect", offline)
+    cfg = config(tmp_path)
+    cfg = replace(
+        cfg,
+        inputs=(
+            replace(
+                cfg.inputs[0],
+                mapping=Mapping(
+                    10,
+                    10,
+                    {spot_id: [[0, 0], [9, 0], [9, 9]] for spot_id in statuses},
+                ),
+            ),
+        ),
+    )
+    stop = threading.Event()
+
+    def report(status, *args):
+        if status == worker.Status.ACTIVE:
+            stop.set()
+
+    metrics_path = tmp_path / "metrics.json"
+    asyncio.run(
+        worker.run_input(
+            cfg,
+            cfg.inputs[0],
+            stop,
+            report,
+            metrics=Metrics(),
+            metrics_path=metrics_path,
+        )
+    )
+    assert visible_counts == [20]
+    outbox = LocalOutbox(
+        input_directory(cfg.state_dir, cfg.scope, "cam-A") / "outbox.db"
+    )
+    for spot_id in statuses:
+        event = outbox.first()
+        assert event["payload"]["spot_id"] == spot_id
+        assert event["payload"]["timestamp"] == timestamp
+        assert event["payload"]["camera_id"] == "cam-A"
+        assert event["payload"]["status"] == statuses[spot_id]
+        outbox.acknowledge(event["event_id"])
+    measured = json.loads(metrics_path.read_text())
+    assert measured["stages"]["enqueue_batch_ms"]["count"] == 1
+    assert measured["counters"]["heartbeat_events_enqueued"] == 20
 
 
 def config(tmp_path, gateway="ws://127.0.0.1:8001/ws/edge"):
