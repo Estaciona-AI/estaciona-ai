@@ -190,3 +190,35 @@ def test_invalid_process_group_size_is_rejected(profile, size):
     profile[1]["inputs_per_process"] = size
     with pytest.raises(ValueError):
         load(save(profile))
+
+
+def test_detector_calibration_is_explicit_and_per_profile(profile):
+    profile[1]["detectors"]["main"].update(
+        confidence=0.45, gamma=1.0, tile_size=512, tile_overlap=0.25
+    )
+    detector = load(save(profile)).inputs[0].detector
+    assert (
+        detector.confidence,
+        detector.gamma,
+        detector.tile_size,
+        detector.tile_overlap,
+    ) == (0.45, 1.0, 512, 0.25)
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("confidence", True),
+        ("confidence", float("nan")),
+        ("confidence", 1.1),
+        ("gamma", 0),
+        ("tile_size", 512.5),
+        ("tile_size", True),
+        ("tile_size", 128),
+        ("tile_overlap", 0.9),
+    ],
+)
+def test_invalid_detector_calibration_rejected(profile, key, value):
+    profile[1]["detectors"]["main"][key] = value
+    with pytest.raises(ValueError):
+        load(save(profile))
