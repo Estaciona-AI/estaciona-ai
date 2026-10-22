@@ -29,6 +29,28 @@ def _image_tensor(frame):
     return tensor
 
 
+def _vehicle_candidates(rows, width, height, confidence):
+    # Paddle DETRPostProcess already returns original-image coordinates.
+    rows = np.asarray(rows)
+    if rows.ndim == 3 and rows.shape[0] == 1:
+        rows = rows[0]
+    if rows.ndim != 2 or rows.shape[1] != 6:
+        raise ValueError("Unexpected official RT-DETR output; expected [N,6]")
+    labels, scores = rows[:, 0], rows[:, 1]
+    selected = rows[
+        np.isfinite(rows).all(axis=1)
+        & np.isin(labels, tuple(VEHICLE_CLASSES))
+        & (scores >= confidence)
+        & (scores <= 1)
+    ]
+    boxes = np.clip(selected[:, 2:], 0, [width, height, width, height]).astype(int)
+    valid = (boxes[:, 2] > boxes[:, 0]) & (boxes[:, 3] > boxes[:, 1])
+    return [
+        (float(score), tuple(box))
+        for score, box in zip(selected[valid, 1], boxes[valid].tolist(), strict=True)
+    ]
+
+
 class Detector(Protocol):
     def detect(
         self, frame: np.ndarray, confidence: float = 0.1
@@ -110,24 +132,7 @@ class RTDetrDetector:
             if self.metrics
             else nullcontext()
         ):
-            # Paddle DETRPostProcess returns original-image coordinates, dense COCO
-            # labels, and scores. Do not rescale the returned boxes a second time.
-            rows = np.asarray(outputs[0])
-            if rows.ndim == 3 and rows.shape[0] == 1:
-                rows = rows[0]
-            if rows.ndim != 2 or rows.shape[1] != 6:
-                raise ValueError("Unexpected official RT-DETR output; expected [N,6]")
-            boxes = []
-            for label, score, x1, y1, x2, y2 in rows:
-                if not np.isfinite([label, score, x1, y1, x2, y2]).all():
-                    continue
-                if label not in VEHICLE_CLASSES or not confidence <= score <= 1:
-                    continue
-                x1, x2 = np.clip([x1, x2], 0, width).astype(int)
-                y1, y2 = np.clip([y1, y2], 0, height).astype(int)
-                if x2 > x1 and y2 > y1:
-                    boxes.append((float(score), (int(x1), int(y1), int(x2), int(y2))))
-            return boxes
+            return _vehicle_candidates(outputs[0], width, height, confidence)
 
 
 def load_detector(path, device="cuda", *, runtime=None, tile_size=0, tile_overlap=0.25):

@@ -59,6 +59,41 @@ def test_image_tensor_is_bitwise_equal_to_official_preprocessing(shape, strided)
     assert not np.shares_memory(actual, frame)
 
 
+def test_vehicle_candidates_preserve_order_clipping_and_score_boundaries():
+    rows = np.array(
+        [
+            [7, 1.0, -2.5, 2.9, 120, 90],
+            [2, 0.5, 8.9, 3.9, 20.1, 15.9],
+            [7, 0.499, 1, 2, 3, 4],
+            [2, 1.001, 1, 2, 3, 4],
+            [2.1, 0.9, 1, 2, 3, 4],
+            [0, 0.9, 1, 2, 3, 4],
+            [2, np.nan, 1, 2, 3, 4],
+            [np.nan, 0.9, 1, 2, 3, 4],
+            [2, 0.9, 1, 2, np.inf, 4],
+            [2, 0.9, 20, 20, 10, 40],
+            [2, 0.9, -4, -4, -1, -1],
+            [2, 0.9, 3.1, 2, 3.9, 4],
+        ],
+        np.float32,
+    )
+    before = rows.copy()
+    result = load_detector()._vehicle_candidates(rows, 100, 80, 0.5)
+    assert result == [(1.0, (0, 2, 100, 80)), (0.5, (8, 3, 20, 15))]
+    np.testing.assert_array_equal(rows, before)
+
+
+@pytest.mark.parametrize("shape", [(0, 6), (1, 0, 6)])
+def test_vehicle_candidates_allow_empty_official_outputs(shape):
+    assert load_detector()._vehicle_candidates(np.empty(shape), 100, 80, 0.3) == []
+
+
+@pytest.mark.parametrize("shape", [(6,), (1, 300, 84), (2, 300, 6)])
+def test_vehicle_candidates_reject_nonofficial_output_shapes(shape):
+    with pytest.raises(ValueError, match="output"):
+        load_detector()._vehicle_candidates(np.zeros(shape), 100, 80, 0.3)
+
+
 def test_official_preprocessing_preserves_rgb_and_original_coordinate_scaling():
     model = session([[2, 0.9, -10, 20, 1000, 400]])
     detector = load_detector().RTDetrDetector(model)
