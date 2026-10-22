@@ -117,18 +117,22 @@ async def run_input(
 
         publisher = PreviewPublisher(preview, item.mapping.spots)
 
-    async def persist(text):
+    async def persist(text, *, heartbeat=False):
         if outbox is None:
             return
         enqueue_started = time.perf_counter()
         # Backpressure retains the current transition; only decoded frames drop.
         while not stop.is_set():
             try:
-                await asyncio.to_thread(outbox.enqueue, text)
+                enqueue = outbox.enqueue_many if heartbeat else outbox.enqueue
+                await asyncio.to_thread(enqueue, text)
                 if metrics is not None:
                     metrics.observe(
-                        "enqueue_ms", (time.perf_counter() - enqueue_started) * 1000
+                        "enqueue_batch_ms" if heartbeat else "enqueue_ms",
+                        (time.perf_counter() - enqueue_started) * 1000,
                     )
+                    if heartbeat:
+                        metrics.increment("heartbeat_events_enqueued", len(text))
                 return
             except BufferError:
                 report(Status.BACKPRESSURE, True, 0)
@@ -257,10 +261,13 @@ async def run_input(
                 and await asyncio.to_thread(outbox.first) is None
             ):
                 # A heartbeat represents this actual observation, not wall-clock now.
-                for spot_id, status in pipeline.confirmed_statuses().items():
-                    await persist(
+                await persist(
+                    [
                         _payload(item.input_id, spot_id, status, 1.0, frame.received_at)
-                    )
+                        for spot_id, status in pipeline.confirmed_statuses().items()
+                    ],
+                    heartbeat=True,
+                )
                 last_sync = time.monotonic()
             if publisher is not None and publisher.wanted():
                 # Optional presentation work is isolated from durable IO and inference.
