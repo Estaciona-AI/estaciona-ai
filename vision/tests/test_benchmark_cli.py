@@ -12,6 +12,7 @@ from test_worker import config
     [
         ["capacity", "--counts", "1", "--seconds", "nan"],
         ["capacity", "--counts", "2,1"],
+        ["corpus", "--video", "missing", "--input-id", "cam-A", "--frames", "0"],
         [
             "compare",
             "--profiles",
@@ -50,3 +51,30 @@ def test_invalid_limits_cannot_start_experiments(tmp_path, monkeypatch, argument
         == 2
     )
     assert not (tmp_path / "results").exists()
+
+
+def test_evaluation_does_not_load_runtime_or_start_inference(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(
+        benchmark,
+        "load_configuration",
+        lambda _: pytest.fail("runtime configuration loaded"),
+    )
+    monkeypatch.setattr(
+        benchmark, "evaluate", lambda *args: seen.append(args) or {"completed": True}
+    )
+    assert (
+        benchmark.main(
+            [
+                "evaluate",
+                "--corpus",
+                "reference.json",
+                "--comparison",
+                "comparison",
+                "--output",
+                str(tmp_path / "out"),
+            ]
+        )
+        == 0
+    )
+    assert len(seen) == 1

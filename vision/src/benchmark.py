@@ -11,6 +11,8 @@ import threading
 
 from benchmark_capacity import capacity_trial, can_advance
 from benchmark_comparison import compare
+from benchmark_corpus import build_corpus
+from benchmark_evaluation import evaluate
 from benchmark_profiles import load_profiles, results_directory
 from configuration import ConfigurationError, load_configuration
 from metrics import atomic_json
@@ -21,7 +23,7 @@ def main(argv=None):
         description="Explicit local vision benchmarks; no automatic model downloads"
     )
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("compare", "capacity"):
+    for name in ("compare", "capacity", "corpus"):
         command = commands.add_parser(name)
         command.add_argument("configuration", type=Path)
         command.add_argument(
@@ -40,6 +42,16 @@ def main(argv=None):
     comparison.add_argument("--frames", type=int, default=30)
     comparison.add_argument("--warmup-frames", type=int, default=3)
     comparison.add_argument("--stride", type=int, default=12)
+    corpus = commands.choices["corpus"]
+    corpus.add_argument("--video", type=Path, required=True)
+    corpus.add_argument("--input-id", required=True)
+    corpus.add_argument("--frames", type=int, default=24)
+    corpus.add_argument("--stride", type=int, default=12)
+    corpus.add_argument("--warmup-frames", type=int, default=3)
+    evaluation = commands.add_parser("evaluate")
+    evaluation.add_argument("--corpus", type=Path, required=True)
+    evaluation.add_argument("--comparison", type=Path, required=True)
+    evaluation.add_argument("--output", type=Path, required=True)
     capacity = commands.choices["capacity"]
     capacity.add_argument("--counts", default="1,5,10,20")
     capacity.add_argument("--seconds", type=float, default=60)
@@ -53,7 +65,21 @@ def main(argv=None):
     try:
         for signum in previous:
             signal.signal(signum, lambda *_: stop.set())
+        if args.command == "evaluate":
+            report = evaluate(args.corpus, args.comparison, args.output)
+            return 0 if report["completed"] else 1
         cfg = load_configuration(args.configuration)
+        if args.command == "corpus":
+            build_corpus(
+                cfg,
+                args.video,
+                args.output,
+                input_id=args.input_id,
+                frames=args.frames,
+                stride=args.stride,
+                warmup=args.warmup_frames,
+            )
+            return 0
         if args.command == "compare":
             if (
                 not 1 <= args.frames <= 1000
