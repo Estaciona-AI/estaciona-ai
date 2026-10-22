@@ -3,6 +3,7 @@
 
 import asyncio
 import datetime
+from dataclasses import replace
 import importlib
 import json
 import threading
@@ -84,7 +85,8 @@ def test_worker_replays_same_event_after_ack_loss(tmp_path, monkeypatch, lose_ac
     monkeypatch.setattr(module, "LatestCapture", lambda _: capture)
     model = Mock()
     model.detect.return_value = [(0, 0, 9, 9)]
-    monkeypatch.setattr(module, "load_detector", lambda *args, **kwargs: model)
+    loader = Mock(return_value=model)
+    monkeypatch.setattr(module, "load_detector", loader)
     received = []
     stop = threading.Event()
 
@@ -113,6 +115,10 @@ def test_worker_replays_same_event_after_ack_loss(tmp_path, monkeypatch, lose_ac
         async with websockets.serve(server, "127.0.0.1", 0) as listener:
             port = listener.sockets[0].getsockname()[1]
             cfg = config(tmp_path, f"ws://127.0.0.1:{port}/ws/edge")
+            calibrated = replace(
+                cfg.inputs[0].detector, confidence=0.3, gamma=1.0, tile_size=512
+            )
+            cfg = replace(cfg, inputs=(replace(cfg.inputs[0], detector=calibrated),))
             reports = []
             await asyncio.wait_for(
                 module.run_input(
@@ -127,6 +133,12 @@ def test_worker_replays_same_event_after_ack_loss(tmp_path, monkeypatch, lose_ac
             assert reports
 
     asyncio.run(scenario())
+    assert loader.call_args.kwargs == {
+        "device": "cpu",
+        "tile_size": 512,
+        "tile_overlap": 0.25,
+    }
+    assert model.detect.call_args.kwargs["confidence"] == 0.3
     assert capture.closed
     assert len(received) == (2 if lose_ack else 1)
     if lose_ack:
