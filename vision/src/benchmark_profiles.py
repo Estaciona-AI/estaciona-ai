@@ -3,15 +3,22 @@
 
 """Explicit benchmark profiles and bounded artifacts; never resolves secret values."""
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import hashlib
 import json
 from pathlib import Path
 import platform
 import subprocess
 
-from configuration import ConfigurationError, _fields, _id, _path, _read
-from pipeline import BOX_SHRINK_FACTOR, CLAHE_ENABLED, CONF_THRESHOLD, GAMMA_CORRECTION
+from configuration import (
+    ConfigurationError,
+    DetectorProfile,
+    _fields,
+    _id,
+    _read,
+    parse_detector_profile,
+)
+from pipeline import BOX_SHRINK_FACTOR, CLAHE_ENABLED
 
 
 @dataclass(frozen=True)
@@ -19,6 +26,10 @@ class BenchmarkProfile:
     profile_id: str
     path: Path
     device: str
+    confidence: float = DetectorProfile.confidence
+    gamma: float = DetectorProfile.gamma
+    tile_size: int = DetectorProfile.tile_size
+    tile_overlap: float = DetectorProfile.tile_overlap
 
 
 def load_profiles(path):
@@ -32,14 +43,17 @@ def load_profiles(path):
     profiles = []
     for key, value in values.items():
         _id(key)
-        _fields(value, ("adapter", "path", "device"))
-        if value["adapter"] != "rtdetr" or value["device"] not in ("cpu", "cuda"):
-            raise ConfigurationError("unsupported benchmark detector")
-        model = _path(path.parent, value["path"])
-        if model.suffix.lower() != ".onnx":
-            raise ConfigurationError("expected local ONNX artifact")
-        profiles.append(BenchmarkProfile(key, model, value["device"]))
+        detector = parse_detector_profile(value, path.parent)
+        profiles.append(BenchmarkProfile(key, **asdict(detector)))
     return tuple(profiles)
+
+
+def detector_parameters(profile):
+    """Public, non-secret calibration used for this profile/input."""
+    return {
+        name: getattr(profile, name)
+        for name in ("confidence", "gamma", "tile_size", "tile_overlap")
+    }
 
 
 def artifact(path):
@@ -83,9 +97,7 @@ def provenance():
         "platform": platform.system(),
         "machine": platform.machine(),
         "parameters": {
-            "confidence": CONF_THRESHOLD,
             "box_shrink": BOX_SHRINK_FACTOR,
-            "gamma": GAMMA_CORRECTION,
             "clahe": CLAHE_ENABLED,
         },
     }

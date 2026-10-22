@@ -19,6 +19,7 @@ from benchmark_profiles import (
     JsonLines,
     artifact,
     digest_json,
+    detector_parameters,
     provenance,
     results_directory,
 )
@@ -32,7 +33,12 @@ def comparison_pass(
     profile, mapping, frames, output, *, model=None, warmup=3, fps=30, barrier=None
 ):
     model_artifact = artifact(profile.path)
-    model = model or load_detector(profile.path, device=profile.device)
+    model = model or load_detector(
+        profile.path,
+        device=profile.device,
+        tile_size=profile.tile_size,
+        tile_overlap=profile.tile_overlap,
+    )
     if barrier is not None:
         barrier.wait(timeout=120)
     start = SimpleNamespace(value=math.inf)
@@ -40,7 +46,12 @@ def comparison_pass(
     metrics = Metrics(control=start, end=end)
     model.metrics = metrics
     pipeline = VisionPipeline(
-        model, mapping.spots, (mapping.height, mapping.width, 3), metrics=metrics
+        model,
+        mapping.spots,
+        (mapping.height, mapping.width, 3),
+        metrics=metrics,
+        confidence=profile.confidence,
+        gamma=profile.gamma,
     )
     processed = 0
     with JsonLines(output / f"{profile.profile_id}.frames.jsonl") as rows:
@@ -77,12 +88,13 @@ def comparison_pass(
     atomic_json(
         output / f"{profile.profile_id}.json",
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "profile_id": profile.profile_id,
             "delivery": "shadow",
             "frames": processed,
             "artifact": model_artifact,
             "device_requested": profile.device,
+            "parameters": detector_parameters(profile),
             "model": model.metadata(),
             "metrics": metrics.snapshot(),
             "process": process_sample(os.getpid()),
@@ -263,7 +275,7 @@ def compare(
         succeeded = False
     succeeded = succeeded and same_frames and artifact(video) == video_artifact
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "installation": {
             "organization_id": config.organization_id,
             "installation_id": config.installation_id,
@@ -277,6 +289,9 @@ def compare(
         "same_frames_verified": bool(reference) and same_frames,
         "measured_overlap_seconds": overlap if mode == "simultaneous" else None,
         "profiles": [profile.profile_id for profile in profiles],
+        "profile_parameters": {
+            profile.profile_id: detector_parameters(profile) for profile in profiles
+        },
         "video": video_artifact,
         "scope": {
             "organization_id": config.organization_id,

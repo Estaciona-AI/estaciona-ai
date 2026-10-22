@@ -11,7 +11,13 @@ import threading
 import time
 from urllib.parse import urlsplit
 
-from benchmark_profiles import JsonLines, artifact, provenance, results_directory
+from benchmark_profiles import (
+    JsonLines,
+    artifact,
+    detector_parameters,
+    provenance,
+    results_directory,
+)
 from benchmark_resources import (
     gpu_sample,
     process_sample,
@@ -196,7 +202,7 @@ def capacity_trial(
         **capacity_summary(
             cfg.inputs, snapshots, restarts=restarts, completed=complete
         ),
-        "schema_version": 1,
+        "schema_version": 2,
         "installation": {
             "organization_id": config.organization_id,
             "installation_id": config.installation_id,
@@ -231,6 +237,7 @@ def capacity_trial(
             {
                 "input_id": item.input_id,
                 "device_requested": item.detector.device,
+                "parameters": detector_parameters(item.detector),
                 "artifact": model_artifacts[item.detector.path],
                 "model": snapshots.get(item.input_id, {}).get("state", {}).get("model"),
             }
