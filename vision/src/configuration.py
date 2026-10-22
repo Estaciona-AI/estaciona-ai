@@ -121,6 +121,31 @@ class DetectorProfile:
     tile_overlap: float = 0.25
 
 
+def parse_detector_profile(value, base):
+    """One validation path for runtime and benchmark detector profiles."""
+    _fields(
+        value,
+        ("adapter", "path", "device"),
+        ("confidence", "gamma", "tile_size", "tile_overlap"),
+    )
+    if value["adapter"] != "rtdetr" or value["device"] not in ("cpu", "cuda"):
+        raise ConfigurationError("unsupported detector profile")
+    model = _path(base, value["path"])
+    if model.suffix.lower() != ".onnx":
+        raise ConfigurationError("model must be ONNX")
+    tile_size = value.get("tile_size", 0)
+    if type(tile_size) is not int or (tile_size != 0 and not 256 <= tile_size <= 2048):
+        raise ConfigurationError("invalid detector tile size")
+    return DetectorProfile(
+        model,
+        value["device"],
+        _number(value.get("confidence", 0.1), 0.01, 1),
+        _number(value.get("gamma", 1.4), 0.1, 4),
+        tile_size,
+        _number(value.get("tile_overlap", 0.25), 0.1, 0.5),
+    )
+
+
 @dataclass(frozen=True)
 class Mapping:
     width: int
@@ -264,29 +289,7 @@ def load_configuration(path) -> RuntimeConfiguration:
             sources[key] = Source("rtsp", env=_env(value["env"]))
     for key, value in data["detectors"].items():
         _id(key)
-        _fields(
-            value,
-            ("adapter", "path", "device"),
-            ("confidence", "gamma", "tile_size", "tile_overlap"),
-        )
-        if value["adapter"] != "rtdetr" or value["device"] not in ("cpu", "cuda"):
-            raise ConfigurationError("unsupported detector profile")
-        model = _path(base, value["path"])
-        if model.suffix.lower() != ".onnx":
-            raise ConfigurationError("model must be ONNX")
-        tile_size = value.get("tile_size", 0)
-        if type(tile_size) is not int or (
-            tile_size != 0 and not 256 <= tile_size <= 2048
-        ):
-            raise ConfigurationError("invalid detector tile size")
-        detectors[key] = DetectorProfile(
-            model,
-            value["device"],
-            _number(value.get("confidence", 0.1), 0.01, 1),
-            _number(value.get("gamma", 1.4), 0.1, 4),
-            tile_size,
-            _number(value.get("tile_overlap", 0.25), 0.1, 0.5),
-        )
+        detectors[key] = parse_detector_profile(value, base)
     if not isinstance(data["inputs"], list) or not 1 <= len(data["inputs"]) <= 64:
         raise ConfigurationError("expected 1 to 64 inputs")
     inputs, ids, destinations = [], set(), set()
