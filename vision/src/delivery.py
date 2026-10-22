@@ -30,28 +30,42 @@ class LocalOutbox:
         return conn
 
     def enqueue(self, payload_text):
-        payload = json.loads(payload_text)
-        if not isinstance(payload, dict):
-            raise ValueError("Local delivery requires an object payload")
-        payload_text = json.dumps(payload, separators=(",", ":"))
-        size = len(payload_text.encode("utf-8"))
-        if size > 512 * 1024:
-            raise BufferError("Local delivery payload exceeds 512 KiB")
-        event_id = str(uuid4())
+        return self.enqueue_many((payload_text,))[0]
+
+    def enqueue_many(self, payload_texts):
+        """Commit a bounded, ordered batch, with an independent UUID per event."""
+        rows, batch_bytes = [], 0
+        for text in payload_texts:
+            payload = json.loads(text)
+            if not isinstance(payload, dict):
+                raise ValueError("Local delivery requires an object payload")
+            text = json.dumps(payload, separators=(",", ":"))
+            size = len(text.encode("utf-8"))
+            if size > 512 * 1024:
+                raise BufferError("Local delivery payload exceeds 512 KiB")
+            batch_bytes += size
+            if len(rows) >= self.max_events or batch_bytes > self.max_bytes:
+                raise BufferError("Batch exceeds vision outbox capacity")
+            rows.append((str(uuid4()), text, size))
+        if not rows:
+            return []
         with closing(self.connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             count, total = conn.execute(
                 "SELECT COUNT(*),COALESCE(SUM(bytes),0) FROM local_outbox"
             ).fetchone()
-            if count >= self.max_events or total + size > self.max_bytes:
+            if (
+                count + len(rows) > self.max_events
+                or total + batch_bytes > self.max_bytes
+            ):
                 raise BufferError(
                     "Vision outbox full; restore delivery before continuing"
                 )
-            conn.execute(
+            conn.executemany(
                 "INSERT INTO local_outbox(event_id,payload,bytes) VALUES (?,?,?)",
-                (event_id, payload_text, size),
+                rows,
             )
-        return event_id
+        return [row[0] for row in rows]
 
     def first(self):
         with closing(self.connect()) as conn:
