@@ -382,3 +382,14 @@ def test_unsupported_backlog_does_not_block_compatible_events(tmp_path):
     asyncio.run(sync(db, metrics, cloud, cloud.closed.is_set))
     assert [frame["event_id"] for frame in cloud.frames] == [supported]
     assert [row[1] for row in gateway.pending_deliveries(db)] == pending
+
+
+def test_pending_pages_use_id_cursor(tmp_path):
+    db, metrics = setup(tmp_path)
+    ids = [enqueue(db, metrics, payload()) for _ in range(70)]
+    first = gateway.pending_deliveries(db, after_id=0, limit=64)
+    assert [row[1] for row in first] == ids[:64]
+    # Removing a row cannot shift a keyset page and skip another event.
+    gateway.finish_event(db, ids[0], "applied", None)
+    second = gateway.pending_deliveries(db, after_id=first[-1][0], limit=64)
+    assert [row[1] for row in second] == ids[64:]

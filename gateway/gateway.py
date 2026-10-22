@@ -110,10 +110,12 @@ def get_unsynced_events(db_path):
         ).fetchall()
 
 
-def pending_deliveries(db_path):
+def pending_deliveries(db_path, *, after_id=0, limit=None):
     with closing(sqlite3.connect(db_path)) as conn:
         return conn.execute(
-            "SELECT id, event_uuid, message_text FROM fallback_events WHERE synced = 0 ORDER BY id"
+            "SELECT id, event_uuid, message_text FROM fallback_events "
+            "WHERE synced = 0 AND id > ? ORDER BY id LIMIT ?",
+            (after_id, -1 if limit is None else limit),
         ).fetchall()
 
 
