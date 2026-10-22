@@ -275,3 +275,85 @@ def test_tiled_detection_suppresses_partial_duplicate_without_removing_neighbor(
         (100, 145, 191, 211),
         (81, 190, 172, 261),
     }
+
+
+SPOTS_1080P = {
+    "near-origin": [[10, 10], [60, 10], [60, 60], [10, 60]],
+    "far-corner": [[1800, 1000], [1900, 1000], [1900, 1070], [1800, 1070]],
+}
+
+
+def test_spot_windows_keep_only_tiles_that_intersect_polygons():
+    from tiling import spot_windows, windows
+
+    every = windows(1920, 1080, 512, 0.25)
+    selected = spot_windows(1920, 1080, 512, 0.25, SPOTS_1080P.values())
+    assert set(selected) < set(every)
+    covered = np.zeros((1080, 1920), np.bool_)
+    for x, y, w, h in selected:
+        covered[y : y + h, x : x + w] = True
+    for points in SPOTS_1080P.values():
+        mask = np.zeros((1080, 1920), np.uint8)
+        cv2.fillPoly(mask, [np.array(points, np.int32)], 1)
+        assert covered[mask.astype(bool)].all()
+    unused = set(every) - set(selected)
+    assert (0, 0, 512, 512) in selected and (704, 284, 512, 512) in unused
+
+
+def test_spot_windows_reject_mapping_without_spots():
+    from tiling import spot_windows
+
+    with pytest.raises(ValueError, match="spot"):
+        spot_windows(1920, 1080, 512, 0.25, [])
+
+
+def test_spot_scoped_detector_skips_tiles_and_rejects_other_frame_sizes():
+    model = session([])
+    detector = load_detector().RTDetrDetector(
+        model, tile_size=512, tile_regions=((768, 512), [(0, 0, 512, 512)])
+    )
+    assert detector.detect(np.zeros((512, 768, 3), np.uint8)) == []
+    assert model.run.call_count == 1
+    with pytest.raises(ValueError, match="regions"):
+        detector.detect(np.zeros((512, 512, 3), np.uint8))
+    assert model.run.call_count == 1
+    assert detector.metadata()["tile_count"] == 1
+
+
+def test_load_detector_derives_spot_tiles_from_mapping(tmp_path):
+    module = load_detector()
+    path = tmp_path / "model.onnx"
+    path.write_bytes(b"fixture")
+    runtime = Mock()
+    runtime.get_available_providers.return_value = ["CPUExecutionProvider"]
+    runtime.InferenceSession.return_value = session([])
+    mapping = SimpleNamespace(width=1920, height=1080, spots=SPOTS_1080P)
+    detector = module.load_detector(
+        path,
+        device="cpu",
+        runtime=runtime,
+        tile_size=512,
+        tile_scope="spots",
+        mapping=mapping,
+    )
+    metadata = detector.metadata()
+    assert metadata["tile_scope"] == "spots"
+    assert 0 < metadata["tile_count"] < 15
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"tile_scope": "spots"},
+        {"tile_scope": "spots", "tile_size": 512},
+        {"tile_scope": "everything", "tile_size": 512},
+    ],
+)
+def test_spot_tile_scope_requires_tiling_and_mapping(tmp_path, options):
+    path = tmp_path / "model.onnx"
+    path.write_bytes(b"fixture")
+    runtime = Mock()
+    runtime.get_available_providers.return_value = ["CPUExecutionProvider"]
+    runtime.InferenceSession.return_value = session([])
+    with pytest.raises(ValueError, match="tile"):
+        load_detector().load_detector(path, device="cpu", runtime=runtime, **options)

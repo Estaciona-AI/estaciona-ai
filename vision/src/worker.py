@@ -300,6 +300,8 @@ async def run_input(
                 device=item.detector.device,
                 tile_size=item.detector.tile_size,
                 tile_overlap=item.detector.tile_overlap,
+                tile_scope=item.detector.tile_scope,
+                mapping=item.mapping,
             )
         except Exception:
             report(Status.FAILED, False, 0)

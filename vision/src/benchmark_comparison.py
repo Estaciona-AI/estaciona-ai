@@ -38,6 +38,8 @@ def comparison_pass(
         device=profile.device,
         tile_size=profile.tile_size,
         tile_overlap=profile.tile_overlap,
+        tile_scope=profile.tile_scope,
+        mapping=mapping,
     )
     if barrier is not None:
         barrier.wait(timeout=120)

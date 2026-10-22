@@ -13,7 +13,7 @@ from typing import Protocol
 import cv2
 import numpy as np
 
-from tiling import detect_tiled, windows
+from tiling import detect_tiled, spot_windows, windows
 
 INPUT_SIZE = 640
 VEHICLE_CLASSES = frozenset((2, 7))  # Dense COCO-80 indices: car and truck.
@@ -60,13 +60,27 @@ class Detector(Protocol):
 
 
 class RTDetrDetector:
-    def __init__(self, session, *, metrics=None, tile_size=0, tile_overlap=0.25):
+    def __init__(
+        self,
+        session,
+        *,
+        metrics=None,
+        tile_size=0,
+        tile_overlap=0.25,
+        tile_regions=None,
+        tile_scope="frame",
+    ):
         if type(tile_size) is not int or tile_size < 0:
             raise ValueError("invalid tile size")
         if tile_size:
             windows(tile_size, tile_size, tile_size, tile_overlap)
+        elif tile_regions is not None:
+            raise ValueError("tile regions require a tile size")
         self.tile_size = tile_size
         self.tile_overlap = tile_overlap
+        # ((width, height), windows) fixed by the input mapping, or None.
+        self.tile_regions = tile_regions
+        self.tile_scope = tile_scope
         self.session = session
         self.metrics = metrics
         self.inputs = {item.name: item for item in session.get_inputs()}
@@ -91,6 +105,8 @@ class RTDetrDetector:
             "adapter": "rtdetr",
             "tile_size": self.tile_size,
             "tile_overlap": self.tile_overlap,
+            "tile_scope": self.tile_scope if self.tile_size else None,
+            "tile_count": len(self.tile_regions[1]) if self.tile_regions else None,
             "runtime_version": getattr(self, "runtime_version", None),
             "providers": list(self.session.get_providers()),
             "input_size": [INPUT_SIZE, INPUT_SIZE],
@@ -106,9 +122,13 @@ class RTDetrDetector:
         if height == 0 or width == 0 or not 0 <= confidence <= 1:
             raise ValueError("Invalid frame size or confidence")
         if self.tile_size:
-            return detect_tiled(
-                frame, self._candidates, confidence, self.tile_size, self.tile_overlap
-            )
+            if self.tile_regions is None:
+                regions = windows(width, height, self.tile_size, self.tile_overlap)
+            elif self.tile_regions[0] != (width, height):
+                raise ValueError("frame does not match the configured tile regions")
+            else:
+                regions = self.tile_regions[1]
+            return detect_tiled(frame, self._candidates, confidence, regions)
         return [box for _, box in self._candidates(frame, confidence)]
 
     def _candidates(self, frame, confidence):
@@ -135,8 +155,21 @@ class RTDetrDetector:
             return _vehicle_candidates(outputs[0], width, height, confidence)
 
 
-def load_detector(path, device="cuda", *, runtime=None, tile_size=0, tile_overlap=0.25):
+def load_detector(
+    path,
+    device="cuda",
+    *,
+    runtime=None,
+    tile_size=0,
+    tile_overlap=0.25,
+    tile_scope="frame",
+    mapping=None,
+):
     path = Path(path)
+    if tile_scope not in ("frame", "spots") or (
+        tile_scope == "spots" and (not tile_size or mapping is None)
+    ):
+        raise ValueError("spot tile scope requires a tile size and an input mapping")
     if path.suffix.lower() != ".onnx":
         raise ValueError(
             "Only the official ONNX export is supported; regenerate legacy models"
@@ -164,6 +197,19 @@ def load_detector(path, device="cuda", *, runtime=None, tile_size=0, tile_overla
             "CUDA initialization failed; install the cuda extra or select VISION_DEVICE=cpu"
         )
     print(f"[VISION MODEL] RT-DETR HGNetv2-L / ONNX Runtime / {provider}")
-    detector = RTDetrDetector(session, tile_size=tile_size, tile_overlap=tile_overlap)
+    regions = None
+    if tile_scope == "spots":
+        size = (mapping.width, mapping.height)
+        regions = (
+            size,
+            spot_windows(*size, tile_size, tile_overlap, mapping.spots.values()),
+        )
+    detector = RTDetrDetector(
+        session,
+        tile_size=tile_size,
+        tile_overlap=tile_overlap,
+        tile_regions=regions,
+        tile_scope=tile_scope,
+    )
     detector.runtime_version = getattr(runtime, "__version__", None)
     return detector

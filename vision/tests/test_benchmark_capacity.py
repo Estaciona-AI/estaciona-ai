@@ -111,12 +111,14 @@ def test_capacity_runs_real_spawn_and_common_window_without_delivery(
         "gamma": 1.0,
         "tile_size": 512,
         "tile_overlap": 0.25,
+        "tile_scope": "frame",
     }
     assert report["models"][1]["parameters"] == {
         "confidence": 0.1,
         "gamma": 1.4,
         "tile_size": 0,
         "tile_overlap": 0.25,
+        "tile_scope": "frame",
     }
     assert "confidence" not in report["provenance"]["parameters"]
     assert len(report["inputs"]) == 2

@@ -119,6 +119,7 @@ class DetectorProfile:
     gamma: float = 1.4
     tile_size: int = 0
     tile_overlap: float = 0.25
+    tile_scope: str = "frame"
 
 
 def parse_detector_profile(value, base):
@@ -126,7 +127,7 @@ def parse_detector_profile(value, base):
     _fields(
         value,
         ("adapter", "path", "device"),
-        ("confidence", "gamma", "tile_size", "tile_overlap"),
+        ("confidence", "gamma", "tile_size", "tile_overlap", "tile_scope"),
     )
     if value["adapter"] != "rtdetr" or value["device"] not in ("cpu", "cuda"):
         raise ConfigurationError("unsupported detector profile")
@@ -136,6 +137,11 @@ def parse_detector_profile(value, base):
     tile_size = value.get("tile_size", 0)
     if type(tile_size) is not int or (tile_size != 0 and not 256 <= tile_size <= 2048):
         raise ConfigurationError("invalid detector tile size")
+    tile_scope = value.get("tile_scope", "frame")
+    if tile_scope not in ("frame", "spots") or (
+        tile_scope == "spots" and not tile_size
+    ):
+        raise ConfigurationError("invalid detector tile scope")
     return DetectorProfile(
         model,
         value["device"],
@@ -143,6 +149,7 @@ def parse_detector_profile(value, base):
         _number(value.get("gamma", 1.4), 0.1, 4),
         tile_size,
         _number(value.get("tile_overlap", 0.25), 0.1, 0.5),
+        tile_scope,
     )
 
 

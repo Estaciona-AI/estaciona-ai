@@ -27,10 +27,25 @@ def windows(width, height, size, overlap):
     return [(int(x), int(y), w, h) for y in ys for x in xs]
 
 
-def detect_tiled(frame, predict, confidence, size, overlap):
+def spot_windows(width, height, size, overlap, polygons):
+    """Windows that see at least one configured spot; the rest never matter."""
+    mask = np.zeros((height, width), np.uint8)
+    for points in polygons:
+        cv2.fillPoly(mask, [np.asarray(points, np.int32)], 1)
+    selected = [
+        (x, y, w, h)
+        for x, y, w, h in windows(width, height, size, overlap)
+        if mask[y : y + h, x : x + w].any()
+    ]
+    if not selected:
+        raise ValueError("no tile intersects a configured spot")
+    return selected
+
+
+def detect_tiled(frame, predict, confidence, regions):
     height, width = frame.shape[:2]
     candidates = []
-    for left, top, w, h in windows(width, height, size, overlap):
+    for left, top, w, h in regions:
         for score, (x1, y1, x2, y2) in predict(
             frame[top : top + h, left : left + w], confidence
         ):
