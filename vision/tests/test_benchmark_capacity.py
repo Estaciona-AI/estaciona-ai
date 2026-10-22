@@ -93,12 +93,32 @@ def test_capacity_runs_real_spawn_and_common_window_without_delivery(
         input_id="cam-B",
         mapping=Mapping(10, 10, {"B": [[0, 0], [9, 0], [9, 9], [0, 9]]}),
     )
-    cfg = replace(cfg, inputs=(*cfg.inputs, second))
+    first = replace(
+        cfg.inputs[0],
+        detector=replace(
+            cfg.inputs[0].detector, confidence=0.3, gamma=1.0, tile_size=512
+        ),
+    )
+    cfg = replace(cfg, inputs=(first, second))
     monkeypatch.setattr(runtime, "_worker_entry", measured_fixture_worker)
     report = capacity_trial(cfg, tmp_path / "capacity", count=2, seconds=1, warmup=0.1)
     assert report["completed"] and report["scope"] == "vision_only"
+    assert report["schema_version"] == 2
     assert report["installation"]["installation_id"] == cfg.installation_id
     assert report["worker_restarts"] == 0
+    assert report["models"][0]["parameters"] == {
+        "confidence": 0.3,
+        "gamma": 1.0,
+        "tile_size": 512,
+        "tile_overlap": 0.25,
+    }
+    assert report["models"][1]["parameters"] == {
+        "confidence": 0.1,
+        "gamma": 1.4,
+        "tile_size": 0,
+        "tile_overlap": 0.25,
+    }
+    assert "confidence" not in report["provenance"]["parameters"]
     assert len(report["inputs"]) == 2
     assert all(item["effective_fps"] > 0 for item in report["inputs"])
     assert not list((tmp_path / "capacity").rglob("*.db"))
