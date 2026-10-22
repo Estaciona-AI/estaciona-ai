@@ -94,3 +94,14 @@ def test_expired_inference_breaks_pending_confirmation(monkeypatch):
     monkeypatch.setattr("pipeline.time.monotonic", lambda: 5)
     assert pipeline.process(frame, now=2, expires_at=3) is None
     assert not pipeline.process(frame, now=20).spots[0].changed
+
+
+def test_pipeline_applies_explicit_confidence_and_gamma_without_changing_geometry():
+    frame = np.full((100, 100, 3), 80, np.uint8)
+    model = Mock()
+    model.detect.return_value = [(10, 20, 50, 80)]
+    pipeline = VisionPipeline(model, {}, frame.shape, confidence=0.45, gamma=1.0)
+    result = pipeline.process(frame, now=0.0)
+    np.testing.assert_array_equal(model.detect.call_args.args[0], frame)
+    assert model.detect.call_args.kwargs["confidence"] == 0.45
+    assert result.detections == ((16, 29, 44, 71),)

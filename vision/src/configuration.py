@@ -115,6 +115,10 @@ class Source:
 class DetectorProfile:
     path: Path
     device: str
+    confidence: float = 0.1
+    gamma: float = 1.4
+    tile_size: int = 0
+    tile_overlap: float = 0.25
 
 
 @dataclass(frozen=True)
@@ -260,13 +264,29 @@ def load_configuration(path) -> RuntimeConfiguration:
             sources[key] = Source("rtsp", env=_env(value["env"]))
     for key, value in data["detectors"].items():
         _id(key)
-        _fields(value, ("adapter", "path", "device"))
+        _fields(
+            value,
+            ("adapter", "path", "device"),
+            ("confidence", "gamma", "tile_size", "tile_overlap"),
+        )
         if value["adapter"] != "rtdetr" or value["device"] not in ("cpu", "cuda"):
             raise ConfigurationError("unsupported detector profile")
         model = _path(base, value["path"])
         if model.suffix.lower() != ".onnx":
             raise ConfigurationError("model must be ONNX")
-        detectors[key] = DetectorProfile(model, value["device"])
+        tile_size = value.get("tile_size", 0)
+        if type(tile_size) is not int or (
+            tile_size != 0 and not 256 <= tile_size <= 2048
+        ):
+            raise ConfigurationError("invalid detector tile size")
+        detectors[key] = DetectorProfile(
+            model,
+            value["device"],
+            _number(value.get("confidence", 0.1), 0.01, 1),
+            _number(value.get("gamma", 1.4), 0.1, 4),
+            tile_size,
+            _number(value.get("tile_overlap", 0.25), 0.1, 0.5),
+        )
     if not isinstance(data["inputs"], list) or not 1 <= len(data["inputs"]) <= 64:
         raise ConfigurationError("expected 1 to 64 inputs")
     inputs, ids, destinations = [], set(), set()

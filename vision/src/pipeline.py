@@ -42,7 +42,18 @@ class FrameResult:
 
 
 class VisionPipeline:
-    def __init__(self, detector, spots: dict, frame_shape: tuple, *, metrics=None):
+    def __init__(
+        self,
+        detector,
+        spots: dict,
+        frame_shape: tuple,
+        *,
+        metrics=None,
+        confidence=CONF_THRESHOLD,
+        gamma=GAMMA_CORRECTION,
+    ):
+        self.confidence = confidence
+        self.gamma = gamma
         self.detector = detector
         self.metrics = metrics
         self._occupancy = OccupancyTracker(spots, frame_shape, metrics=metrics)
@@ -67,12 +78,12 @@ class VisionPipeline:
                 return None
         with self.metrics.stage("preprocess_ms") if self.metrics else nullcontext():
             inference_frame = preprocess_frame(
-                frame, gamma=GAMMA_CORRECTION, clahe_enabled=CLAHE_ENABLED
+                frame, gamma=self.gamma, clahe_enabled=CLAHE_ENABLED
             )
         with self.metrics.stage("detect_ms") if self.metrics else nullcontext():
             detections = []
             for x1, y1, x2, y2 in self.detector.detect(
-                inference_frame, confidence=CONF_THRESHOLD
+                inference_frame, confidence=self.confidence
             ):
                 shrink_w = int((x2 - x1) * BOX_SHRINK_FACTOR)
                 shrink_h = int((y2 - y1) * BOX_SHRINK_FACTOR)

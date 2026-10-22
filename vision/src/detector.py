@@ -13,6 +13,8 @@ from typing import Protocol
 import cv2
 import numpy as np
 
+from tiling import detect_tiled, windows
+
 INPUT_SIZE = 640
 VEHICLE_CLASSES = frozenset((2, 7))  # Dense COCO-80 indices: car and truck.
 
@@ -26,7 +28,13 @@ class Detector(Protocol):
 
 
 class RTDetrDetector:
-    def __init__(self, session, *, metrics=None):
+    def __init__(self, session, *, metrics=None, tile_size=0, tile_overlap=0.25):
+        if type(tile_size) is not int or tile_size < 0:
+            raise ValueError("invalid tile size")
+        if tile_size:
+            windows(tile_size, tile_size, tile_size, tile_overlap)
+        self.tile_size = tile_size
+        self.tile_overlap = tile_overlap
         self.session = session
         self.metrics = metrics
         self.inputs = {item.name: item for item in session.get_inputs()}
@@ -49,6 +57,8 @@ class RTDetrDetector:
     def metadata(self):
         return {
             "adapter": "rtdetr",
+            "tile_size": self.tile_size,
+            "tile_overlap": self.tile_overlap,
             "runtime_version": getattr(self, "runtime_version", None),
             "providers": list(self.session.get_providers()),
             "input_size": [INPUT_SIZE, INPUT_SIZE],
@@ -63,6 +73,14 @@ class RTDetrDetector:
         height, width = frame.shape[:2]
         if height == 0 or width == 0 or not 0 <= confidence <= 1:
             raise ValueError("Invalid frame size or confidence")
+        if self.tile_size:
+            return detect_tiled(
+                frame, self._candidates, confidence, self.tile_size, self.tile_overlap
+            )
+        return [box for _, box in self._candidates(frame, confidence)]
+
+    def _candidates(self, frame, confidence):
+        height, width = frame.shape[:2]
         with (
             self.metrics.stage("detector_preprocess_ms")
             if self.metrics
@@ -102,11 +120,11 @@ class RTDetrDetector:
                 x1, x2 = np.clip([x1, x2], 0, width).astype(int)
                 y1, y2 = np.clip([y1, y2], 0, height).astype(int)
                 if x2 > x1 and y2 > y1:
-                    boxes.append((int(x1), int(y1), int(x2), int(y2)))
+                    boxes.append((float(score), (int(x1), int(y1), int(x2), int(y2))))
             return boxes
 
 
-def load_detector(path, device="cuda", *, runtime=None):
+def load_detector(path, device="cuda", *, runtime=None, tile_size=0, tile_overlap=0.25):
     path = Path(path)
     if path.suffix.lower() != ".onnx":
         raise ValueError(
@@ -135,6 +153,6 @@ def load_detector(path, device="cuda", *, runtime=None):
             "CUDA initialization failed; install the cuda extra or select VISION_DEVICE=cpu"
         )
     print(f"[VISION MODEL] RT-DETR HGNetv2-L / ONNX Runtime / {provider}")
-    detector = RTDetrDetector(session)
+    detector = RTDetrDetector(session, tile_size=tile_size, tile_overlap=tile_overlap)
     detector.runtime_version = getattr(runtime, "__version__", None)
     return detector

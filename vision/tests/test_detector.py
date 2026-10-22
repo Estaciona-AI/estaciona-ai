@@ -20,6 +20,7 @@ def load_detector():
 
 def session(rows):
     value = Mock()
+    value.get_providers.return_value = ["CPUExecutionProvider"]
     value.get_inputs.return_value = [
         SimpleNamespace(name="image", shape=[1, 3, 640, 640], type="tensor(float)"),
         SimpleNamespace(name="im_shape", shape=[1, 2], type="tensor(float)"),
@@ -144,4 +145,76 @@ def test_metadata_records_actual_runtime_and_stage_metrics():
         "detector_preprocess_ms",
         "inference_ms",
         "detector_postprocess_ms",
+    }
+
+
+def test_tiled_detection_remaps_deduplicates_and_preserves_outer_border():
+    model = session([])
+    # Two 512px crops over a 768px frame: the same car appears twice.
+    model.run.side_effect = [
+        [
+            np.array(
+                [
+                    [2, 0.8, 300, 20, 400, 120],
+                    [2, 0.9, 0, 20, 60, 120],
+                    [2, 0.99, 480, 20, 512, 120],
+                ],
+                np.float32,
+            )
+        ],
+        [np.array([[2, 0.9, 44, 20, 144, 120]], np.float32)],
+    ]
+    detector = load_detector().RTDetrDetector(model, tile_size=512)
+    boxes = detector.detect(np.zeros((512, 768, 3), np.uint8), confidence=0.5)
+    assert set(boxes) == {(300, 20, 400, 120), (0, 20, 60, 120)}
+    assert model.run.call_count == 2
+    assert detector.metadata()["tile_size"] == 512
+
+
+def test_tiled_detection_rejects_excessive_work_before_inference():
+    model = session([])
+    detector = load_detector().RTDetrDetector(model, tile_size=256)
+    with pytest.raises(ValueError, match="tile"):
+        detector.detect(np.zeros((2048, 4096, 3), np.uint8))
+    model.run.assert_not_called()
+
+
+def test_tile_grid_covers_frame_without_gaps():
+    from tiling import windows
+
+    width, height = 1920, 1080
+    covered = np.zeros((height, width), np.bool_)
+    tiles = windows(width, height, 512, 0.25)
+    assert len(tiles) == 15
+    for x, y, w, h in tiles:
+        assert 0 <= x < x + w <= width
+        assert 0 <= y < y + h <= height
+        covered[y : y + h, x : x + w] = True
+    assert covered.all()
+    assert windows(100, 80, 512, 0.25) == [(0, 0, 100, 80)]
+
+
+@pytest.mark.parametrize(
+    "size,overlap",
+    [(True, 0.25), (128, 0.25), (512, float("nan")), (512, True), (512, 0.9)],
+)
+def test_bad_tiling_parameters_fail_before_model_execution(size, overlap):
+    with pytest.raises(ValueError, match="tile"):
+        load_detector().RTDetrDetector(
+            session([]), tile_size=size, tile_overlap=overlap
+        )
+
+
+def test_tiled_detection_suppresses_partial_duplicate_without_removing_neighbor():
+    model = session(
+        [
+            [2, 0.86, 100, 145, 191, 211],
+            [2, 0.49, 138, 134, 196, 170],
+            [2, 0.91, 81, 190, 172, 261],
+        ]
+    )
+    detector = load_detector().RTDetrDetector(model, tile_size=512)
+    assert set(detector.detect(np.zeros((512, 512, 3), np.uint8), confidence=0.3)) == {
+        (100, 145, 191, 211),
+        (81, 190, 172, 261),
     }

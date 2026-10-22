@@ -187,7 +187,12 @@ async def run_input(
                 raise PermanentInputError("frame does not match calibration dimensions")
             if pipeline is None:
                 pipeline = VisionPipeline(
-                    model, item.mapping.spots, frame.frame.shape, metrics=metrics
+                    model,
+                    item.mapping.spots,
+                    frame.frame.shape,
+                    metrics=metrics,
+                    confidence=item.detector.confidence,
+                    gamma=item.detector.gamma,
                 )
             elif epoch != frame.epoch or (
                 last_observation is not None
@@ -283,7 +288,11 @@ async def run_input(
     async def initialize_and_produce():
         try:
             model = await asyncio.to_thread(
-                load_detector, item.detector.path, device=item.detector.device
+                load_detector,
+                item.detector.path,
+                device=item.detector.device,
+                tile_size=item.detector.tile_size,
+                tile_overlap=item.detector.tile_overlap,
             )
         except Exception:
             report(Status.FAILED, False, 0)
@@ -298,7 +307,11 @@ async def run_input(
             raise
         if metrics is not None:
             model.metrics = metrics
-            state["model"] = model.metadata()
+            state["model"] = {
+                **model.metadata(),
+                "confidence": item.detector.confidence,
+                "gamma": item.detector.gamma,
+            }
         if not stop.is_set():
             capture.start()
             report(Status.WAITING, True, 0)
