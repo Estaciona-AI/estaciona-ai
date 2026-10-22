@@ -31,6 +31,10 @@ dependencies = [
 cuda = [
     { name = "onnxruntime-gpu", extra = ["cuda", "cudnn"] },
 ]
+tensorrt = [
+    { name = "onnxruntime-gpu", extra = ["cuda", "cudnn"] },
+    { name = "tensorrt-cu13-libs" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -43,11 +47,13 @@ requires-dist = [
     { name = "numpy", specifier = ">=2.4.6" },
     { name = "onnxruntime-gpu", specifier = "==1.31.0" },
     { name = "onnxruntime-gpu", extras = ["cuda", "cudnn"], marker = "extra == 'cuda'", specifier = "==1.31.0" },
+    { name = "onnxruntime-gpu", extras = ["cuda", "cudnn"], marker = "extra == 'tensorrt'", specifier = "==1.31.0" },
     { name = "opencv-python", specifier = ">=4.13.0.92" },
     { name = "python-dotenv", specifier = ">=1.0.1" },
+    { name = "tensorrt-cu13-libs", marker = "extra == 'tensorrt'", specifier = "==10.16.1.11", index = "https://pypi.nvidia.com/" },
     { name = "websockets", specifier = ">=16.0" },
 ]
-provides-extras = ["cuda"]
+provides-extras = ["cuda", "tensorrt"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -317,6 +323,16 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/74/0d/f2cd247ad32633a5c36e97141a2c21b11c6279f7957bc2ff360b1e08fddd/ruff-0.15.16-py3-none-win32.whl", hash = "sha256:580378f7bd4aa25f72e74aa54948a9622f142b1e509521dd10902e886681cc1e", size = 10735541, upload-time = "2026-06-04T16:32:30.145Z" },
     { url = "https://files.pythonhosted.org/packages/8b/9e/02e845ef151b1dee585e55c4739f8e1734ae1d9f1221dff65761c162208b/ruff-0.15.16-py3-none-win_amd64.whl", hash = "sha256:408256017284eddf98fff77b29aa4fb30f586042d535b2d9befc6512f400aaec", size = 11843403, upload-time = "2026-06-04T16:32:39.76Z" },
     { url = "https://files.pythonhosted.org/packages/15/19/016553f86f207450aebebc2b2b5088d086b901cc8186c02ac4284db3bd88/ruff-0.15.16-py3-none-win_arm64.whl", hash = "sha256:8cd61783afb39638a7133ef0d2dfb1e91277593962f81b5a8423eb0b888a6121", size = 11134555, upload-time = "2026-06-04T16:33:00.136Z" },
+]
+
+[[package]]
+name = "tensorrt-cu13-libs"
+version = "10.16.1.11"
+source = { registry = "https://pypi.nvidia.com/" }
+wheels = [
+    { url = "https://pypi.nvidia.com/tensorrt-cu13-libs/tensorrt_cu13_libs-10.16.1.11-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:91142c8ab3c58bed213cf1a563a6eb4e4f0ac529d05b5f909073acece0e3b712" },
+    { url = "https://pypi.nvidia.com/tensorrt-cu13-libs/tensorrt_cu13_libs-10.16.1.11-py3-none-manylinux_2_35_aarch64.whl", hash = "sha256:26f58281c79591b68c3ba1cf061ea11fac747feba0622954dbc892c2998d0153" },
+    { url = "https://pypi.nvidia.com/tensorrt-cu13-libs/tensorrt_cu13_libs-10.16.1.11-py3-none-win_amd64.whl", hash = "sha256:96262c3e8c64a45abd29aa3482d99480fac6845bd420b6de125699bb1ae365ff" },
 ]
 
 [[package]]
