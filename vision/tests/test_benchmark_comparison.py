@@ -105,6 +105,8 @@ def test_comparison_processes_match_frames_in_both_modes(tmp_path, monkeypatch, 
         "tile_size": 0,
         "tile_overlap": 0.25,
         "tile_scope": "frame",
+        "provider": "default",
+        "precision": "fp32",
     }
     assert report["profile_parameters"]["second"] == {
         "confidence": 0.3,
@@ -112,6 +114,8 @@ def test_comparison_processes_match_frames_in_both_modes(tmp_path, monkeypatch, 
         "tile_size": 512,
         "tile_overlap": 0.25,
         "tile_scope": "frame",
+        "provider": "default",
+        "precision": "fp32",
     }
     for name in ["first", "second"]:
         details = json.loads((tmp_path / mode / f"{name}.json").read_text())
@@ -155,6 +159,9 @@ def test_comparison_applies_and_reports_the_requested_calibration(
         "tile_overlap": 0.25,
         "tile_scope": "frame",
         "mapping": mapping,
+        "provider": "default",
+        "precision": "fp32",
+        "engine_cache": None,
     }
     np.testing.assert_array_equal(model.detect.call_args.args[0], frame)
     assert model.detect.call_args.kwargs == {"confidence": 0.3}
@@ -165,4 +172,6 @@ def test_comparison_applies_and_reports_the_requested_calibration(
         "tile_size": 512,
         "tile_overlap": 0.25,
         "tile_scope": "frame",
+        "provider": "default",
+        "precision": "fp32",
     }

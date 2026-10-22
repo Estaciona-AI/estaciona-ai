@@ -120,6 +120,9 @@ class DetectorProfile:
     tile_size: int = 0
     tile_overlap: float = 0.25
     tile_scope: str = "frame"
+    provider: str = "default"
+    precision: str = "fp32"
+    engine_cache: Path | None = None
 
 
 def parse_detector_profile(value, base):
@@ -127,7 +130,16 @@ def parse_detector_profile(value, base):
     _fields(
         value,
         ("adapter", "path", "device"),
-        ("confidence", "gamma", "tile_size", "tile_overlap", "tile_scope"),
+        (
+            "confidence",
+            "gamma",
+            "tile_size",
+            "tile_overlap",
+            "tile_scope",
+            "provider",
+            "precision",
+            "engine_cache",
+        ),
     )
     if value["adapter"] != "rtdetr" or value["device"] not in ("cpu", "cuda"):
         raise ConfigurationError("unsupported detector profile")
@@ -142,6 +154,21 @@ def parse_detector_profile(value, base):
         tile_scope == "spots" and not tile_size
     ):
         raise ConfigurationError("invalid detector tile scope")
+    provider = value.get("provider", "default")
+    precision = value.get("precision", "fp32")
+    if (
+        provider not in ("default", "tensorrt")
+        or precision not in ("fp32", "fp16")
+        or (provider == "tensorrt") != ("engine_cache" in value)
+        or (provider == "tensorrt" and value["device"] != "cuda")
+        or (precision == "fp16" and provider != "tensorrt")
+    ):
+        raise ConfigurationError("invalid detector provider, precision or cache")
+    engine_cache = None
+    if provider == "tensorrt":
+        engine_cache = _path(base, value["engine_cache"], file=False)
+        if not engine_cache.is_dir():
+            raise ConfigurationError("TensorRT engine cache directory is missing")
     return DetectorProfile(
         model,
         value["device"],
@@ -150,6 +177,9 @@ def parse_detector_profile(value, base):
         tile_size,
         _number(value.get("tile_overlap", 0.25), 0.1, 0.5),
         tile_scope,
+        provider,
+        precision,
+        engine_cache,
     )
 
 

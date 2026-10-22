@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Guilherme Pedroza
 # SPDX-License-Identifier: Apache-2.0
 
-"""Inference for the official Paddle RT-DETR HGNetv2-L ONNX export.
+"""Inference for official Paddle RT-DETR ONNX exports (HGNetv2-L, R18).
 
-No model download or deserialization of PyTorch/TensorRT artifacts occurs here.
+No model download or deserialization of PyTorch artifacts occurs here. TensorRT
+engines are built locally by ONNX Runtime from the ONNX model and cached.
 """
 
 from pathlib import Path
@@ -16,12 +17,15 @@ import numpy as np
 from tiling import detect_tiled, spot_windows, windows
 
 INPUT_SIZE = 640
+MAX_BATCH = 64  # Equals the tiling window limit.
 VEHICLE_CLASSES = frozenset((2, 7))  # Dense COCO-80 indices: car and truck.
 
 
-def _image_tensor(frame):
+def _image_tensor(frame, out=None):
     image = cv2.resize(frame, (INPUT_SIZE, INPUT_SIZE), interpolation=cv2.INTER_CUBIC)
-    tensor = np.empty((1, 3, INPUT_SIZE, INPUT_SIZE), dtype=np.float32)
+    tensor = (
+        np.empty((1, 3, INPUT_SIZE, INPUT_SIZE), np.float32) if out is None else out
+    )
     # Copy BGR directly into contiguous RGB planes. Keep division (not a
     # reciprocal multiply) to preserve the original FP32 rounding exactly.
     tensor[0] = image[:, :, ::-1].transpose(2, 0, 1)
@@ -69,7 +73,11 @@ class RTDetrDetector:
         tile_overlap=0.25,
         tile_regions=None,
         tile_scope="frame",
+        batch=1,
+        precision="float32",
     ):
+        if type(batch) is not int or not 1 <= batch <= MAX_BATCH:
+            raise ValueError("invalid inference batch")
         if type(tile_size) is not int or tile_size < 0:
             raise ValueError("invalid tile size")
         if tile_size:
@@ -81,6 +89,8 @@ class RTDetrDetector:
         # ((width, height), windows) fixed by the input mapping, or None.
         self.tile_regions = tile_regions
         self.tile_scope = tile_scope
+        self.batch = batch
+        self.precision = precision
         self.session = session
         self.metrics = metrics
         self.inputs = {item.name: item for item in session.get_inputs()}
@@ -110,8 +120,8 @@ class RTDetrDetector:
             "runtime_version": getattr(self, "runtime_version", None),
             "providers": list(self.session.get_providers()),
             "input_size": [INPUT_SIZE, INPUT_SIZE],
-            "precision": "float32",
-            "batch": 1,
+            "precision": self.precision,
+            "batch": self.batch,
             "vehicle_classes": sorted(VEHICLE_CLASSES),
         }
 
@@ -129,20 +139,33 @@ class RTDetrDetector:
             else:
                 regions = self.tile_regions[1]
             return detect_tiled(frame, self._candidates, confidence, regions)
-        return [box for _, box in self._candidates(frame, confidence)]
+        return [box for _, box in self._candidates([frame], confidence)[0]]
 
-    def _candidates(self, frame, confidence):
-        height, width = frame.shape[:2]
+    def _candidates(self, frames, confidence):
+        found = []
+        for start in range(0, len(frames), self.batch):
+            found.extend(self._run(frames[start : start + self.batch], confidence))
+        return found
+
+    def _run(self, frames, confidence):
         with (
             self.metrics.stage("detector_preprocess_ms")
             if self.metrics
             else nullcontext()
         ):
+            count = len(frames)
+            image = np.empty((count, 3, INPUT_SIZE, INPUT_SIZE), np.float32)
+            for index, frame in enumerate(frames):
+                _image_tensor(frame, out=image[index : index + 1])
             feed = {
-                "image": _image_tensor(frame),
-                "im_shape": np.array([[INPUT_SIZE, INPUT_SIZE]], dtype=np.float32),
+                "image": image,
+                "im_shape": np.full((count, 2), INPUT_SIZE, np.float32),
                 "scale_factor": np.array(
-                    [[INPUT_SIZE / height, INPUT_SIZE / width]], dtype=np.float32
+                    [
+                        [INPUT_SIZE / f.shape[0], INPUT_SIZE / f.shape[1]]
+                        for f in frames
+                    ],
+                    np.float32,
                 ),
             }
         with self.metrics.stage("inference_ms") if self.metrics else nullcontext():
@@ -152,7 +175,24 @@ class RTDetrDetector:
             if self.metrics
             else nullcontext()
         ):
-            return _vehicle_candidates(outputs[0], width, height, confidence)
+            if count == 1:
+                parts = [outputs[0]]
+            else:
+                # bbox_num holds the row count of each image in the batch.
+                rows = np.asarray(outputs[0])
+                counts = np.asarray(outputs[1]).reshape(-1)
+                if (
+                    rows.ndim != 2
+                    or len(counts) != count
+                    or (counts < 0).any()
+                    or counts.sum() != len(rows)
+                ):
+                    raise ValueError("Unexpected official RT-DETR batch output")
+                parts = np.split(rows, np.cumsum(counts)[:-1])
+            return [
+                _vehicle_candidates(rows, f.shape[1], f.shape[0], confidence)
+                for rows, f in zip(parts, frames, strict=True)
+            ]
 
 
 def load_detector(
@@ -164,8 +204,21 @@ def load_detector(
     tile_overlap=0.25,
     tile_scope="frame",
     mapping=None,
+    provider="default",
+    precision="fp32",
+    engine_cache=None,
 ):
     path = Path(path)
+    if provider not in ("default", "tensorrt") or precision not in ("fp32", "fp16"):
+        raise ValueError("unsupported detector provider or precision")
+    if provider == "tensorrt" and (
+        device != "cuda" or engine_cache is None or not Path(engine_cache).is_dir()
+    ):
+        raise ValueError(
+            "TensorRT requires CUDA and an existing engine cache directory"
+        )
+    if precision == "fp16" and provider != "tensorrt":
+        raise ValueError("FP16 inference requires the TensorRT provider")
     if tile_scope not in ("frame", "spots") or (
         tile_scope == "spots" and (not tile_size or mapping is None)
     ):
@@ -184,19 +237,6 @@ def load_detector(
         import onnxruntime as runtime
     if device == "cuda" and hasattr(runtime, "preload_dlls"):
         runtime.preload_dlls(directory="")
-    provider = "CUDAExecutionProvider" if device == "cuda" else "CPUExecutionProvider"
-    if provider not in runtime.get_available_providers():
-        raise RuntimeError(f"Requested {provider} is unavailable")
-    options = runtime.SessionOptions()
-    options.intra_op_num_threads = 1
-    session = runtime.InferenceSession(
-        str(path), sess_options=options, providers=[provider]
-    )
-    if provider not in session.get_providers():
-        raise RuntimeError(
-            "CUDA initialization failed; install the cuda extra or select VISION_DEVICE=cpu"
-        )
-    print(f"[VISION MODEL] RT-DETR HGNetv2-L / ONNX Runtime / {provider}")
     regions = None
     if tile_scope == "spots":
         size = (mapping.width, mapping.height)
@@ -204,12 +244,64 @@ def load_detector(
             size,
             spot_windows(*size, tile_size, tile_overlap, mapping.spots.values()),
         )
+    elif tile_size and mapping is not None:
+        size = (mapping.width, mapping.height)
+        regions = (size, windows(*size, tile_size, tile_overlap))
+    # Batching only pays off with TensorRT; on the CUDA provider it measured
+    # slower than one crop per call, so other providers keep batch 1.
+    batch = len(regions[1]) if provider == "tensorrt" and regions else 1
+    selected = "CUDAExecutionProvider" if device == "cuda" else "CPUExecutionProvider"
+    providers = [selected]
+    if provider == "tensorrt":
+        try:
+            # Preloads NVIDIA's libraries from the optional tensorrt extra.
+            import tensorrt_libs  # noqa: F401
+        except ImportError:
+            pass
+        selected = "TensorrtExecutionProvider"
+
+        def shapes(n):
+            return f"image:{n}x3x{INPUT_SIZE}x{INPUT_SIZE},im_shape:{n}x2,scale_factor:{n}x2"
+
+        providers = [
+            (
+                selected,
+                {
+                    "trt_fp16_enable": precision == "fp16",
+                    "trt_engine_cache_enable": True,
+                    "trt_engine_cache_path": str(engine_cache),
+                    "trt_profile_min_shapes": shapes(1),
+                    "trt_profile_opt_shapes": shapes(batch),
+                    "trt_profile_max_shapes": shapes(batch),
+                },
+            ),
+            "CUDAExecutionProvider",
+        ]
+    if selected not in runtime.get_available_providers():
+        raise RuntimeError(f"Requested {selected} is unavailable")
+    options = runtime.SessionOptions()
+    options.intra_op_num_threads = 1
+    session = runtime.InferenceSession(
+        str(path), sess_options=options, providers=providers
+    )
+    # ONNX Runtime silently falls back to the next provider when one fails.
+    if session.get_providers()[0] != selected:
+        if provider == "tensorrt":
+            raise RuntimeError(
+                "TensorRT initialization failed; install the tensorrt extra"
+            )
+        raise RuntimeError(
+            "CUDA initialization failed; install the cuda extra or select VISION_DEVICE=cpu"
+        )
+    print(f"[VISION MODEL] RT-DETR / ONNX Runtime / {selected} / {precision}")
     detector = RTDetrDetector(
         session,
         tile_size=tile_size,
         tile_overlap=tile_overlap,
         tile_regions=regions,
         tile_scope=tile_scope,
+        batch=batch,
+        precision="float16" if precision == "fp16" else "float32",
     )
     detector.runtime_version = getattr(runtime, "__version__", None)
     return detector

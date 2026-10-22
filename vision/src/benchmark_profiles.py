@@ -31,6 +31,9 @@ class BenchmarkProfile:
     tile_size: int = DetectorProfile.tile_size
     tile_overlap: float = DetectorProfile.tile_overlap
     tile_scope: str = DetectorProfile.tile_scope
+    provider: str = DetectorProfile.provider
+    precision: str = DetectorProfile.precision
+    engine_cache: Path | None = DetectorProfile.engine_cache
 
 
 def load_profiles(path):
@@ -53,7 +56,15 @@ def detector_parameters(profile):
     """Public, non-secret calibration used for this profile/input."""
     return {
         name: getattr(profile, name)
-        for name in ("confidence", "gamma", "tile_size", "tile_overlap", "tile_scope")
+        for name in (
+            "confidence",
+            "gamma",
+            "tile_size",
+            "tile_overlap",
+            "tile_scope",
+            "provider",
+            "precision",
+        )
     }
 
 

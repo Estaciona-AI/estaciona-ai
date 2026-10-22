@@ -45,10 +45,11 @@ def spot_windows(width, height, size, overlap, polygons):
 def detect_tiled(frame, predict, confidence, regions):
     height, width = frame.shape[:2]
     candidates = []
-    for left, top, w, h in regions:
-        for score, (x1, y1, x2, y2) in predict(
-            frame[top : top + h, left : left + w], confidence
-        ):
+    crops = [frame[top : top + h, left : left + w] for left, top, w, h in regions]
+    for (left, top, w, h), found in zip(
+        regions, predict(crops, confidence), strict=True
+    ):
+        for score, (x1, y1, x2, y2) in found:
             # A neighboring crop supplies complete objects cut by an internal
             # edge. Physical image borders remain eligible for partial cars.
             if (

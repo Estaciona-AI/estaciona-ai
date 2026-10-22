@@ -301,6 +301,9 @@ async def run_input(
                 tile_size=item.detector.tile_size,
                 tile_overlap=item.detector.tile_overlap,
                 tile_scope=item.detector.tile_scope,
+                provider=item.detector.provider,
+                precision=item.detector.precision,
+                engine_cache=item.detector.engine_cache,
                 mapping=item.mapping,
             )
         except Exception:

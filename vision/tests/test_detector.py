@@ -357,3 +357,149 @@ def test_spot_tile_scope_requires_tiling_and_mapping(tmp_path, options):
     runtime.InferenceSession.return_value = session([])
     with pytest.raises(ValueError, match="tile"):
         load_detector().load_detector(path, device="cpu", runtime=runtime, **options)
+
+
+def batched_session(per_image):
+    model = session([])
+    rows = [row for image in per_image for row in image]
+    model.run.return_value = [
+        np.asarray(rows, np.float32).reshape(-1, 6),
+        np.array([len(image) for image in per_image], np.int32),
+    ]
+    return model
+
+
+def test_batched_tiles_run_once_and_split_rows_by_image():
+    model = batched_session(
+        [[[2, 0.9, 100, 100, 200, 200]], [[2, 0.8, 100, 100, 200, 200]]]
+    )
+    detector = load_detector().RTDetrDetector(
+        model,
+        tile_size=512,
+        tile_regions=((1024, 512), [(0, 0, 512, 512), (512, 0, 512, 512)]),
+        batch=2,
+    )
+    boxes = detector.detect(np.zeros((512, 1024, 3), np.uint8), confidence=0.5)
+    assert set(boxes) == {(100, 100, 200, 200), (612, 100, 712, 200)}
+    assert model.run.call_count == 1
+    feed = model.run.call_args.args[1]
+    assert feed["image"].shape == (2, 3, 640, 640)
+    assert feed["scale_factor"].shape == (2, 2)
+    assert detector.metadata()["batch"] == 2
+
+
+def test_batched_output_with_inconsistent_counts_is_rejected():
+    model = session([[2, 0.9, 1, 1, 9, 9]])
+    model.run.return_value[1] = np.array([1, 1], np.int32)
+    detector = load_detector().RTDetrDetector(
+        model,
+        tile_size=512,
+        tile_regions=((1024, 512), [(0, 0, 512, 512), (512, 0, 512, 512)]),
+        batch=2,
+    )
+    with pytest.raises(ValueError, match="batch"):
+        detector.detect(np.zeros((512, 1024, 3), np.uint8))
+
+
+@pytest.mark.parametrize("batch", [0, 65, True, 2.0])
+def test_invalid_batch_is_rejected(batch):
+    with pytest.raises(ValueError, match="batch"):
+        load_detector().RTDetrDetector(session([]), batch=batch)
+
+
+def tensorrt_runtime(active):
+    runtime = Mock()
+    runtime.get_available_providers.return_value = [
+        "TensorrtExecutionProvider",
+        "CUDAExecutionProvider",
+        "CPUExecutionProvider",
+    ]
+    model = session([])
+    model.get_providers.return_value = active
+    runtime.InferenceSession.return_value = model
+    return runtime
+
+
+def test_tensorrt_profile_builds_fp16_engine_batched_to_spot_tiles(tmp_path):
+    path = tmp_path / "model.onnx"
+    path.write_bytes(b"fixture")
+    cache = tmp_path / "engines"
+    cache.mkdir()
+    runtime = tensorrt_runtime(["TensorrtExecutionProvider", "CUDAExecutionProvider"])
+    detector = load_detector().load_detector(
+        path,
+        device="cuda",
+        runtime=runtime,
+        provider="tensorrt",
+        precision="fp16",
+        engine_cache=cache,
+        tile_size=512,
+        tile_scope="spots",
+        mapping=SimpleNamespace(width=1920, height=1080, spots=SPOTS_1080P),
+    )
+    metadata = detector.metadata()
+    count = metadata["tile_count"]
+    name, options = runtime.InferenceSession.call_args.kwargs["providers"][0]
+    assert name == "TensorrtExecutionProvider"
+    assert options["trt_fp16_enable"] is True
+    assert options["trt_engine_cache_enable"] is True
+    assert options["trt_engine_cache_path"] == str(cache)
+    shapes = f"image:{count}x3x640x640,im_shape:{count}x2,scale_factor:{count}x2"
+    assert options["trt_profile_opt_shapes"] == shapes
+    assert options["trt_profile_max_shapes"] == shapes
+    assert (metadata["precision"], metadata["batch"]) == ("float16", count)
+    assert metadata["providers"][0] == "TensorrtExecutionProvider"
+
+
+def test_tensorrt_without_tiles_uses_single_image_engine(tmp_path):
+    path = tmp_path / "model.onnx"
+    path.write_bytes(b"fixture")
+    runtime = tensorrt_runtime(["TensorrtExecutionProvider", "CUDAExecutionProvider"])
+    detector = load_detector().load_detector(
+        path, device="cuda", runtime=runtime, provider="tensorrt", engine_cache=tmp_path
+    )
+    _, options = runtime.InferenceSession.call_args.kwargs["providers"][0]
+    assert options["trt_fp16_enable"] is False
+    assert options["trt_profile_max_shapes"].startswith("image:1x3x640x640")
+    assert (detector.metadata()["precision"], detector.metadata()["batch"]) == (
+        "float32",
+        1,
+    )
+
+
+def test_silent_tensorrt_fallback_is_rejected(tmp_path):
+    path = tmp_path / "model.onnx"
+    path.write_bytes(b"fixture")
+    runtime = tensorrt_runtime(["CUDAExecutionProvider", "CPUExecutionProvider"])
+    with pytest.raises(RuntimeError, match="TensorRT"):
+        load_detector().load_detector(
+            path,
+            device="cuda",
+            runtime=runtime,
+            provider="tensorrt",
+            engine_cache=tmp_path,
+        )
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"provider": "tensorrt", "device": "cpu"},
+        {"provider": "tensorrt", "engine_cache": None},
+        {"provider": "tensorrt", "engine_cache": "missing"},
+        {"precision": "fp16"},
+        {"provider": "openvino"},
+        {"precision": "int8", "provider": "tensorrt"},
+    ],
+)
+def test_invalid_accelerator_combinations_fail_before_session(tmp_path, options):
+    path = tmp_path / "model.onnx"
+    path.write_bytes(b"fixture")
+    options = {"device": "cuda", "engine_cache": tmp_path, **options}
+    if options["engine_cache"] == "missing":
+        options["engine_cache"] = tmp_path / "missing"
+    runtime = tensorrt_runtime(["TensorrtExecutionProvider"])
+    with pytest.raises(ValueError):
+        load_detector().load_detector(path, runtime=runtime, **options)
+    runtime.InferenceSession.assert_not_called()
+
