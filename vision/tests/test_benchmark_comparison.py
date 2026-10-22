@@ -81,7 +81,9 @@ def test_comparison_processes_match_frames_in_both_modes(tmp_path, monkeypatch, 
     video.write_bytes(b"fixture")
     profiles = [
         BenchmarkProfile("first", model, "cpu"),
-        BenchmarkProfile("second", model, "cpu"),
+        BenchmarkProfile(
+            "second", model, "cpu", confidence=0.3, gamma=1.0, tile_size=512
+        ),
     ]
     monkeypatch.setattr(benchmark, "_comparison_entry", comparison_fixture_worker)
     report = compare(
@@ -96,7 +98,67 @@ def test_comparison_processes_match_frames_in_both_modes(tmp_path, monkeypatch, 
         timeout=5,
     )
     assert report["completed"] and report["same_frames_verified"]
+    assert report["schema_version"] == 2
+    assert report["profile_parameters"]["first"] == {
+        "confidence": 0.1,
+        "gamma": 1.4,
+        "tile_size": 0,
+        "tile_overlap": 0.25,
+    }
+    assert report["profile_parameters"]["second"] == {
+        "confidence": 0.3,
+        "gamma": 1.0,
+        "tile_size": 512,
+        "tile_overlap": 0.25,
+    }
+    for name in ["first", "second"]:
+        details = json.loads((tmp_path / mode / f"{name}.json").read_text())
+        assert details["parameters"] == report["profile_parameters"][name]
+        assert details["schema_version"] == 2
     assert report["installation"]["organization_id"] == cfg.organization_id
     if mode == "simultaneous":
         assert report["measured_overlap_seconds"] > 0
     assert not multiprocessing.active_children()
+
+
+def test_comparison_applies_and_reports_the_requested_calibration(
+    tmp_path, monkeypatch
+):
+    from unittest.mock import Mock
+    import benchmark_comparison as benchmark
+
+    profile = BenchmarkProfile(
+        "calibrated",
+        tmp_path / "model.onnx",
+        "cpu",
+        confidence=0.3,
+        gamma=1.0,
+        tile_size=512,
+        tile_overlap=0.25,
+    )
+    profile.path.write_bytes(b"fixture")
+    model = Mock()
+    model.detect.return_value = []
+    model.metadata.return_value = {"adapter": "fixture"}
+    loader = Mock(return_value=model)
+    monkeypatch.setattr(benchmark, "load_detector", loader)
+    output = tmp_path / "results"
+    output.mkdir()
+    frame = np.full((10, 10, 3), 80, np.uint8)
+    comparison_pass(
+        profile, config(tmp_path).inputs[0].mapping, [(0, frame)], output, warmup=0
+    )
+    assert loader.call_args.kwargs == {
+        "device": "cpu",
+        "tile_size": 512,
+        "tile_overlap": 0.25,
+    }
+    np.testing.assert_array_equal(model.detect.call_args.args[0], frame)
+    assert model.detect.call_args.kwargs == {"confidence": 0.3}
+    report = json.loads((output / "calibrated.json").read_text())
+    assert report["parameters"] == {
+        "confidence": 0.3,
+        "gamma": 1.0,
+        "tile_size": 512,
+        "tile_overlap": 0.25,
+    }
