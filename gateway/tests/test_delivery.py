@@ -175,7 +175,14 @@ def test_ack_confirms_only_one_of_two_events_for_the_same_spot(tmp_path):
             cloud.ack(frame)
 
     cloud = Cloud(send)
-    asyncio.run(sync(db, metrics, cloud, lambda: len(cloud.frames) == 2))
+    asyncio.run(
+        sync(
+            db,
+            metrics,
+            cloud,
+            lambda: len(cloud.frames) == 2 and len(gateway.pending_deliveries(db)) == 1,
+        )
+    )
     assert [row[1] for row in gateway.pending_deliveries(db)] == [second]
     with sqlite3.connect(metrics) as conn:
         assert dict(conn.execute("SELECT event_uuid, cloud_ack FROM metrics")) == {
@@ -382,3 +389,189 @@ def test_unsupported_backlog_does_not_block_compatible_events(tmp_path):
     asyncio.run(sync(db, metrics, cloud, cloud.closed.is_set))
     assert [frame["event_id"] for frame in cloud.frames] == [supported]
     assert [row[1] for row in gateway.pending_deliveries(db)] == pending
+
+
+def test_window_sends_eight_then_refills_only_after_matching_ack(tmp_path):
+    db, metrics = setup(tmp_path)
+    ids = [enqueue(db, metrics, payload()) for _ in range(10)]
+
+    async def run():
+        cloud = Cloud()
+        with patch("gateway.websockets.connect", AsyncMock(return_value=cloud)):
+            task = asyncio.create_task(
+                gateway.sync_loop(
+                    db, metrics, "ws://test", "test", asyncio.Event(), max_in_flight=8
+                )
+            )
+            try:
+                await until(lambda: len(cloud.frames) == 8)
+                assert [f["event_id"] for f in cloud.frames] == ids[:8]
+                cloud.ack(cloud.frames[3], event_id=str(uuid4()))
+                await asyncio.sleep(0.01)
+                assert len(cloud.frames) == 8
+                cloud.ack(cloud.frames[3], outcome="rejected", reason="denied")
+                await until(lambda: len(cloud.frames) == 9)
+                assert [r[1] for r in gateway.pending_deliveries(db)] == [
+                    i for i in ids if i != ids[3]
+                ]
+                cloud.ack(cloud.frames[3], duplicate=True)
+                await asyncio.sleep(0.01)
+                assert len(cloud.frames) == 9
+                cloud.ack(cloud.frames[0])
+                await until(lambda: len(cloud.frames) == 10)
+                assert [f["event_id"] for f in cloud.frames] == ids
+            finally:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+        # Cancellation keeps every unconfirmed UUID, including frames already sent.
+        assert [r[1] for r in gateway.pending_deliveries(db)] == [
+            i for i in ids if i not in (ids[0], ids[3])
+        ]
+        replay = Cloud(on_send=lambda c, f: c.ack(f, duplicate=True))
+        await sync(db, metrics, replay, lambda: not gateway.pending_deliveries(db))
+        assert [f["event_id"] for f in replay.frames] == [
+            i for i in ids if i not in (ids[0], ids[3])
+        ]
+
+    asyncio.run(run())
+
+
+def test_window_one_preserves_sequential_delivery(tmp_path):
+    db, metrics = setup(tmp_path)
+    ids = [enqueue(db, metrics, payload()) for _ in range(2)]
+
+    async def run():
+        cloud = Cloud()
+        with patch("gateway.websockets.connect", AsyncMock(return_value=cloud)):
+            task = asyncio.create_task(
+                gateway.sync_loop(
+                    db, metrics, "ws://test", "test", asyncio.Event(), max_in_flight=1
+                )
+            )
+            try:
+                await until(lambda: len(cloud.frames) == 1)
+                await asyncio.sleep(0.01)
+                assert len(cloud.frames) == 1
+                cloud.ack(cloud.frames[0])
+                await until(lambda: len(cloud.frames) == 2)
+                assert [f["event_id"] for f in cloud.frames] == ids
+            finally:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("value", [0, 9, -1, True, 1.5, "8"])
+def test_invalid_window_is_rejected_before_connect(tmp_path, value):
+    db, metrics = setup(tmp_path)
+    with patch("gateway.websockets.connect", AsyncMock()) as connect:
+        with pytest.raises(ValueError, match="EDGE_MAX_IN_FLIGHT"):
+            asyncio.run(
+                gateway.sync_loop(
+                    db,
+                    metrics,
+                    "ws://test",
+                    "test",
+                    asyncio.Event(),
+                    max_in_flight=value,
+                )
+            )
+        connect.assert_not_called()
+
+
+def test_pending_pages_use_id_cursor(tmp_path):
+    db, metrics = setup(tmp_path)
+    ids = [enqueue(db, metrics, payload()) for _ in range(70)]
+    first = gateway.pending_deliveries(db, after_id=0, limit=64)
+    assert [row[1] for row in first] == ids[:64]
+    # Removing a row cannot shift a keyset page and skip another event.
+    gateway.finish_event(db, ids[0], "applied", None)
+    second = gateway.pending_deliveries(db, after_id=first[-1][0], limit=64)
+    assert [row[1] for row in second] == ids[64:]
+
+
+def test_oldest_deadline_survives_later_ack_and_invalid_traffic(tmp_path):
+    db, metrics = setup(tmp_path)
+    ids = [enqueue(db, metrics, payload()) for _ in range(3)]
+
+    async def run():
+        cloud = Cloud()
+        with (
+            patch("gateway.websockets.connect", AsyncMock(return_value=cloud)),
+            patch("gateway.ACK_TIMEOUT_SECONDS", 0.08),
+        ):
+            task = asyncio.create_task(
+                gateway.sync_loop(db, metrics, "ws://test", "test", asyncio.Event())
+            )
+            try:
+                await until(lambda: len(cloud.frames) == 3)
+                await asyncio.sleep(0.05)
+                cloud.ack(cloud.frames[2])
+                cloud.responses.put_nowait("not-json")
+                await asyncio.wait_for(cloud.closed.wait(), 0.06)
+                assert [row[1] for row in gateway.pending_deliveries(db)] == ids[:2]
+            finally:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+
+    asyncio.run(run())
+
+
+def test_window_ack_loss_reconnects_without_reapplying_confirmed_rows(tmp_path):
+    db, metrics = setup(tmp_path)
+    ids = [enqueue(db, metrics, payload()) for _ in range(8)]
+
+    async def run():
+        first = Cloud(
+            on_send=lambda c, f: c.ack(f) if f["event_id"] != ids[0] else None
+        )
+        second = Cloud(on_send=lambda c, f: c.ack(f, duplicate=True))
+        with (
+            patch("gateway.websockets.connect", AsyncMock(side_effect=[first, second])),
+            patch("gateway.ACK_TIMEOUT_SECONDS", 0.1),
+            patch("gateway.RETRY_DELAY_SECONDS", 0),
+        ):
+            task = asyncio.create_task(
+                gateway.sync_loop(db, metrics, "ws://test", "test", asyncio.Event())
+            )
+            try:
+                await until(lambda: not gateway.pending_deliveries(db))
+                assert [f["event_id"] for f in first.frames] == ids
+                assert [f["event_id"] for f in second.frames] == ids[:1]
+            finally:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+
+    asyncio.run(run())
+
+
+def test_supported_backlog_crosses_pages_without_duplicates(tmp_path):
+    db, metrics = setup(tmp_path)
+    ids = [enqueue(db, metrics, payload()) for _ in range(137)]
+    cloud = Cloud(on_send=lambda c, f: c.ack(f))
+    original = gateway.pending_deliveries
+    with patch("gateway.pending_deliveries", wraps=original) as pending:
+        asyncio.run(sync(db, metrics, cloud, lambda: not original(db)))
+    assert [f["event_id"] for f in cloud.frames] == ids
+    assert all(call.kwargs["limit"] == 64 for call in pending.call_args_list)
+
+
+@pytest.mark.parametrize("value", ["0", "9", "garbage", "1.5", ""])
+def test_main_rejects_invalid_window_before_starting_tasks(
+    tmp_path, monkeypatch, value
+):
+    monkeypatch.setenv("EDGE_API_KEY", "disposable-test-key")
+    monkeypatch.setenv("EDGE_MAX_IN_FLIGHT", value)
+    with (
+        patch("gateway.init_db"),
+        patch("gateway.init_metrics_db"),
+        patch("asyncio.create_task") as start,
+    ):
+        with pytest.raises(ValueError, match="EDGE_MAX_IN_FLIGHT"):
+            asyncio.run(gateway.main())
+        start.assert_not_called()

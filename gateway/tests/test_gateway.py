@@ -6,6 +6,8 @@ import os
 import json
 import asyncio
 from unittest.mock import AsyncMock, patch
+
+import pytest
 from gateway import (
     init_db,
     init_metrics_db,
@@ -329,7 +331,9 @@ def test_send_without_cloud_ack_preserves_pending_event(tmp_path):
     asyncio.run(run())
 
 
-def test_main_startup(monkeypatch):
+@pytest.mark.parametrize("window", ["1", "8"])
+def test_main_startup(monkeypatch, window):
+    monkeypatch.setenv("EDGE_MAX_IN_FLIGHT", window)
     monkeypatch.setenv("EDGE_API_KEY", "secret_key")
 
     async def run():
@@ -355,6 +359,7 @@ def test_main_startup(monkeypatch):
             assert mock_init_metrics.called
             assert mock_serve.called
             assert mock_sync_loop.called
+            assert mock_sync_loop.call_args.kwargs["max_in_flight"] == int(window)
 
     asyncio.run(run())
 
