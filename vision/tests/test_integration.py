@@ -173,7 +173,7 @@ def test_main_emits_initial_transition_and_heartbeat_in_microsecond_order(monkey
     detector.detect.return_value = []
     monkeypatch.setattr(client, "load_detector", lambda *args, **kwargs: detector)
     monkeypatch.setattr(
-        occupancy, "compute_occupancy", Mock(side_effect=[0.0, 0.5, 0.5, 0.5, 0.5])
+        occupancy, "spot_occupancy", Mock(side_effect=[0.0, 0.5, 0.5, 0.5, 0.5])
     )
     socket = AsyncMock()
     monkeypatch.setattr(client, "connect_ws", AsyncMock(return_value=socket))

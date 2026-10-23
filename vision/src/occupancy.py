@@ -49,6 +49,34 @@ def compute_occupancy(
     return overlap_area / spot_area
 
 
+def vehicles_mask(
+    detections: list[tuple[int, int, int, int]], frame_shape: tuple
+) -> np.ndarray:
+    height, width = frame_shape[:2]
+    mask = np.zeros((height, width), dtype=np.uint8)
+    for x1, y1, x2, y2 in detections:
+        cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)
+    return mask
+
+
+def spot_occupancy(
+    window: tuple[int, int, int, int],
+    spot_mask: np.ndarray,
+    spot_area: float,
+    vehicles: np.ndarray,
+) -> float:
+    """Same ratio as compute_occupancy, counted only inside the spot's window.
+
+    `window` is the bounding rectangle of the spot, `spot_mask` its cropped
+    mask and `vehicles` the frame-sized mask shared by every spot.
+    """
+    if spot_area == 0:
+        return 0.0
+    x, y, w, h = window
+    overlap = cv2.bitwise_and(spot_mask, vehicles[y : y + h, x : x + w])
+    return float(cv2.countNonZero(overlap)) / spot_area
+
+
 @dataclass(frozen=True)
 class SpotObservation:
     spot_id: str
@@ -68,6 +96,10 @@ class _SpotState:
 class OccupancyTracker:
     def __init__(self, spots: dict, frame_shape: tuple, *, metrics=None):
         self.spot_masks = build_spots_masks(spots, frame_shape)
+        self._windows = {}
+        for spot_id, (mask, _) in self.spot_masks.items():
+            x, y, w, h = cv2.boundingRect(mask)
+            self._windows[spot_id] = ((x, y, w, h), mask[y : y + h, x : x + w].copy())
         self.frame_shape = frame_shape
         self._states: dict[str, _SpotState] = {}
         self.metrics = metrics
@@ -85,8 +117,10 @@ class OccupancyTracker:
 
     def update(self, detections, *, now: float) -> tuple[SpotObservation, ...]:
         observations = []
-        for spot_id, (mask, area) in self.spot_masks.items():
-            ratio = compute_occupancy(mask, area, detections, self.frame_shape)
+        vehicles = vehicles_mask(detections, self.frame_shape)
+        for spot_id, (_, area) in self.spot_masks.items():
+            window, window_mask = self._windows[spot_id]
+            ratio = spot_occupancy(window, window_mask, area, vehicles)
             state = self._states.get(spot_id)
             threshold = (
                 STAY_OCCUPIED_THRESHOLD
