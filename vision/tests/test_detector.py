@@ -447,6 +447,8 @@ def test_tensorrt_profile_builds_fp16_engine_batched_to_spot_tiles(tmp_path):
     shapes = f"image:{count}x3x640x640,im_shape:{count}x2,scale_factor:{count}x2"
     assert options["trt_profile_opt_shapes"] == shapes
     assert options["trt_profile_max_shapes"] == shapes
+    # The cache name ignores profile shapes; layouts must not overwrite each other.
+    assert options["trt_engine_cache_prefix"] == f"rtdetr_b{count}"
     assert (metadata["precision"], metadata["batch"]) == ("float16", count)
     assert metadata["providers"][0] == "TensorrtExecutionProvider"
 

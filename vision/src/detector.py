@@ -288,6 +288,9 @@ def load_detector(
                     "trt_fp16_enable": precision == "fp16",
                     "trt_engine_cache_enable": True,
                     "trt_engine_cache_path": str(engine_cache),
+                    # Cache names ignore profile shapes: inputs with different
+                    # tile counts would overwrite and rebuild each other.
+                    "trt_engine_cache_prefix": f"rtdetr_b{batch}",
                     "trt_profile_min_shapes": shapes(1),
                     "trt_profile_opt_shapes": shapes(batch),
                     "trt_profile_max_shapes": shapes(batch),
