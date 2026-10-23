@@ -233,10 +233,16 @@ def test_worker_replays_same_event_after_ack_loss(tmp_path, monkeypatch, lose_ac
             assert reports
 
     asyncio.run(scenario())
-    assert loader.call_args.kwargs == {
+    kwargs = dict(loader.call_args.kwargs)
+    assert set(kwargs.pop("mapping").spots) == {"A"}
+    assert kwargs == {
         "device": "cpu",
         "tile_size": 512,
         "tile_overlap": 0.25,
+        "tile_scope": "frame",
+        "provider": "default",
+        "precision": "fp32",
+        "engine_cache": None,
     }
     assert model.detect.call_args.kwargs["confidence"] == 0.3
     assert capture.closed

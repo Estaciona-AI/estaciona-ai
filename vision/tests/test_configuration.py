@@ -216,9 +216,43 @@ def test_detector_calibration_is_explicit_and_per_profile(profile):
         ("tile_size", True),
         ("tile_size", 128),
         ("tile_overlap", 0.9),
+        ("tile_scope", "everything"),
+        ("tile_scope", "spots"),
+        ("provider", "openvino"),
+        ("provider", "tensorrt"),
+        ("precision", "fp16"),
+        ("precision", "int8"),
+        ("engine_cache", "missing-engines"),
     ],
 )
 def test_invalid_detector_calibration_rejected(profile, key, value):
     profile[1]["detectors"]["main"][key] = value
+    with pytest.raises(ValueError):
+        load(save(profile))
+
+
+def test_spot_tile_scope_is_explicit_and_requires_tiling(profile):
+    assert load(save(profile)).inputs[0].detector.tile_scope == "frame"
+    profile[1]["detectors"]["main"].update(tile_size=512, tile_scope="spots")
+    assert load(save(profile)).inputs[0].detector.tile_scope == "spots"
+
+
+def test_tensorrt_profile_requires_cuda_and_engine_cache(profile):
+    path, data = profile
+    base = path.parent
+    detector = load(save(profile)).inputs[0].detector
+    assert (detector.provider, detector.precision, detector.engine_cache) == (
+        "default",
+        "fp32",
+        None,
+    )
+    (base / "engines").mkdir()
+    data["detectors"]["main"].update(
+        device="cuda", provider="tensorrt", precision="fp16", engine_cache="engines"
+    )
+    detector = load(save(profile)).inputs[0].detector
+    assert (detector.provider, detector.precision) == ("tensorrt", "fp16")
+    assert detector.engine_cache == (base / "engines").resolve()
+    data["detectors"]["main"]["device"] = "cpu"
     with pytest.raises(ValueError):
         load(save(profile))

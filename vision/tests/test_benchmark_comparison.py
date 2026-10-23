@@ -104,12 +104,18 @@ def test_comparison_processes_match_frames_in_both_modes(tmp_path, monkeypatch, 
         "gamma": 1.4,
         "tile_size": 0,
         "tile_overlap": 0.25,
+        "tile_scope": "frame",
+        "provider": "default",
+        "precision": "fp32",
     }
     assert report["profile_parameters"]["second"] == {
         "confidence": 0.3,
         "gamma": 1.0,
         "tile_size": 512,
         "tile_overlap": 0.25,
+        "tile_scope": "frame",
+        "provider": "default",
+        "precision": "fp32",
     }
     for name in ["first", "second"]:
         details = json.loads((tmp_path / mode / f"{name}.json").read_text())
@@ -145,13 +151,17 @@ def test_comparison_applies_and_reports_the_requested_calibration(
     output = tmp_path / "results"
     output.mkdir()
     frame = np.full((10, 10, 3), 80, np.uint8)
-    comparison_pass(
-        profile, config(tmp_path).inputs[0].mapping, [(0, frame)], output, warmup=0
-    )
+    mapping = config(tmp_path).inputs[0].mapping
+    comparison_pass(profile, mapping, [(0, frame)], output, warmup=0)
     assert loader.call_args.kwargs == {
         "device": "cpu",
         "tile_size": 512,
         "tile_overlap": 0.25,
+        "tile_scope": "frame",
+        "mapping": mapping,
+        "provider": "default",
+        "precision": "fp32",
+        "engine_cache": None,
     }
     np.testing.assert_array_equal(model.detect.call_args.args[0], frame)
     assert model.detect.call_args.kwargs == {"confidence": 0.3}
@@ -161,4 +171,7 @@ def test_comparison_applies_and_reports_the_requested_calibration(
         "gamma": 1.0,
         "tile_size": 512,
         "tile_overlap": 0.25,
+        "tile_scope": "frame",
+        "provider": "default",
+        "precision": "fp32",
     }
