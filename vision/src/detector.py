@@ -28,10 +28,14 @@ def _image_tensor(frame, out=None):
     tensor = (
         np.empty((1, 3, INPUT_SIZE, INPUT_SIZE), np.float32) if out is None else out
     )
-    # Copy BGR directly into contiguous RGB planes. Keep division (not a
-    # reciprocal multiply) to preserve the original FP32 rounding exactly.
-    tensor[0] = image[:, :, ::-1].transpose(2, 0, 1)
-    np.divide(tensor, np.float32(255), out=tensor)
+    # Convert BGR to contiguous RGB planes and normalize in one pass. Keep
+    # division (not a reciprocal multiply) to preserve the FP32 rounding.
+    np.divide(
+        image[:, :, ::-1].transpose(2, 0, 1),
+        np.float32(255),
+        out=tensor[0],
+        dtype=np.float32,
+    )
     return tensor
 
 

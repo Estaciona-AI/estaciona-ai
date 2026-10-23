@@ -14,7 +14,7 @@ def tracker():
 
 
 def observe(subject, monkeypatch, ratio, now):
-    monkeypatch.setattr(occupancy, "compute_occupancy", lambda *args: ratio)
+    monkeypatch.setattr(occupancy, "spot_occupancy", lambda *args: ratio)
     return subject.update([], now=now)[0]
 
 
@@ -86,3 +86,36 @@ def test_real_masks_and_tracker_instances_are_independent():
     snapshot["A"] = "free"
     assert first.confirmed_statuses() == {"A": "occupied"}
     assert np.count_nonzero(first.spot_masks["A"][0]) == 100
+
+
+def test_windowed_ratio_matches_full_frame_computation():
+    rng = np.random.default_rng(7)
+    height, width = 120, 200
+    spots = {}
+    for index in range(12):
+        x, y = int(rng.integers(0, width - 30)), int(rng.integers(0, height - 40))
+        spots[f"S{index}"] = [
+            (x, y),
+            (x + 25, y + 3),
+            (x + 28, y + 35),
+            (x - 2, y + 30),
+        ]
+    spots["offscreen_edge"] = [(width - 5, 0), (width + 20, 0), (width + 20, 20)]
+    subject = occupancy.OccupancyTracker(spots, (height, width, 3))
+    for frame in range(20):
+        detections = [
+            (
+                int(rng.integers(-20, width)),
+                int(rng.integers(-20, height)),
+                int(rng.integers(0, width + 20)),
+                int(rng.integers(0, height + 20)),
+            )
+            for _ in range(int(rng.integers(0, 8)))
+        ]
+        observed = subject.update(detections, now=float(frame))
+        for observation in observed:
+            mask, area = subject.spot_masks[observation.spot_id]
+            expected = occupancy.compute_occupancy(
+                mask, area, detections, (height, width, 3)
+            )
+            assert observation.ratio == expected
