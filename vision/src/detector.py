@@ -7,6 +7,8 @@ No model download or deserialization of PyTorch artifacts occurs here. TensorRT
 engines are built locally by ONNX Runtime from the ONNX model and cached.
 """
 
+import ctypes
+import importlib.util
 from pathlib import Path
 from contextlib import nullcontext
 from typing import Protocol
@@ -53,6 +55,26 @@ def _vehicle_candidates(rows, width, height, confidence):
         (float(score), tuple(box))
         for score, box in zip(selected[valid, 1], boxes[valid].tolist(), strict=True)
     ]
+
+
+TENSORRT_RUNTIME = (
+    "libnvinfer.so.10",
+    "libnvinfer_plugin.so.10",
+    "libnvonnxparser.so.10",
+)
+
+
+def _load_tensorrt_runtime():
+    # Importing tensorrt_libs loads the builder resources of every GPU
+    # architecture (~2.3 GB more RSS per process). libnvinfer opens only the
+    # one it needs, and only when an engine is not cached yet.
+    spec = importlib.util.find_spec("tensorrt_libs")
+    if spec is None or not spec.submodule_search_locations:
+        return
+    directory = Path(spec.submodule_search_locations[0])
+    for name in TENSORRT_RUNTIME:
+        if (directory / name).is_file():
+            ctypes.CDLL(str(directory / name), mode=ctypes.RTLD_GLOBAL)
 
 
 class Detector(Protocol):
@@ -253,11 +275,7 @@ def load_detector(
     selected = "CUDAExecutionProvider" if device == "cuda" else "CPUExecutionProvider"
     providers = [selected]
     if provider == "tensorrt":
-        try:
-            # Preloads NVIDIA's libraries from the optional tensorrt extra.
-            import tensorrt_libs  # noqa: F401
-        except ImportError:
-            pass
+        _load_tensorrt_runtime()
         selected = "TensorrtExecutionProvider"
 
         def shapes(n):

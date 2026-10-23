@@ -513,3 +513,30 @@ def test_export_rejects_unknown_variant_before_any_download(tmp_path):
     with pytest.raises(ValueError, match="variant"):
         module.export(tmp_path / "model.onnx", "x")
     assert not any(tmp_path.iterdir())
+
+
+def test_tensorrt_preload_skips_builder_resources(tmp_path, monkeypatch):
+    module = load_detector()
+    package = tmp_path / "tensorrt_libs"
+    package.mkdir()
+    names = [
+        "libnvinfer.so.10",
+        "libnvinfer_plugin.so.10",
+        "libnvonnxparser.so.10",
+        "libnvinfer_builder_resource_sm86.so.10.16.1",
+        "libnvinfer_builder_resource_win_sm86.so.10.16.1",
+    ]
+    for name in names:
+        (package / name).write_bytes(b"")
+    spec = SimpleNamespace(submodule_search_locations=[str(package)])
+    monkeypatch.setattr(module.importlib.util, "find_spec", lambda name: spec)
+    loaded = []
+    monkeypatch.setattr(module.ctypes, "CDLL", lambda path, mode: loaded.append(path))
+    module._load_tensorrt_runtime()
+    assert [Path(path).name for path in loaded] == names[:3]
+
+
+def test_tensorrt_preload_without_extra_is_a_no_op(monkeypatch):
+    module = load_detector()
+    monkeypatch.setattr(module.importlib.util, "find_spec", lambda name: None)
+    module._load_tensorrt_runtime()
