@@ -46,8 +46,6 @@ else:
         predict_rates,
     )
 
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-
 load_dotenv(os.path.join(os.path.dirname(__file__), "../../.env"))
 
 
@@ -61,14 +59,15 @@ def evaluate_forecast(actual, predicted, inference_time_ms):
             return {**unavailable, "reason": "invalid_evaluation_window"}
         if not np.isfinite(actual).all() or not np.isfinite(predicted).all():
             return {**unavailable, "reason": "non_finite_values"}
-        mae = float(mean_absolute_error(actual, predicted))
-        rmse = float(np.sqrt(mean_squared_error(actual, predicted)))
+        error = predicted - actual
+        mae = float(np.mean(np.abs(error)))
+        rmse = float(np.sqrt(np.mean(error**2)))
         if not np.isfinite([mae, rmse]).all():
             return {**unavailable, "reason": "non_finite_values"}
         metrics = {"mae": mae, "rmse": rmse, **timing}
         if np.ptp(actual) == 0:
             return {"status": "partial", "reason": "constant_target", **metrics}
-        r2 = float(r2_score(actual, predicted, force_finite=False))
+        r2 = float(1 - np.sum(error**2) / np.sum((actual - actual.mean()) ** 2))
         if not np.isfinite(r2):
             return {**unavailable, "reason": "non_finite_values"}
         return {"status": "available", "r2_score": r2, **metrics}
