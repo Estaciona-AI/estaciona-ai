@@ -1,0 +1,29 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: ci
+  # A zero limit disables version updates; security updates remain eligible.
+  # Security updates also require enabling them in the GitHub repository settings.
+  - package-ecosystem: cargo
+    directory: /server
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 0
+    commit-message:
+      prefix: fix
+  - package-ecosystem: uv
+    directories:
+      - /gateway
+      - /vision
+      - /vision/export
+      - /shared
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 0
+    commit-message:
+      prefix: fix
