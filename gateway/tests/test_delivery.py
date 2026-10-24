@@ -530,9 +530,22 @@ def test_window_ack_loss_reconnects_without_reapplying_confirmed_rows(tmp_path):
             on_send=lambda c, f: c.ack(f) if f["event_id"] != ids[0] else None
         )
         second = Cloud(on_send=lambda c, f: c.ack(f, duplicate=True))
+        receive_ack = gateway.receive_ack
+        timeout_injected = False
+
+        async def lose_only_unconfirmed_ack(connection, in_flight):
+            nonlocal timeout_injected
+            if connection is first and set(in_flight) == {ids[0]}:
+                # Trigger the lost ACK only after the other seven ACKs committed.
+                # A 100 ms wall-clock budget races with SQLite fsync on CI.
+                assert [row[1] for row in gateway.pending_deliveries(db)] == ids[:1]
+                timeout_injected = True
+                raise TimeoutError("Simulated loss of the last outstanding ACK")
+            return await receive_ack(connection, in_flight)
+
         with (
             patch("gateway.websockets.connect", AsyncMock(side_effect=[first, second])),
-            patch("gateway.ACK_TIMEOUT_SECONDS", 0.1),
+            patch("gateway.receive_ack", side_effect=lose_only_unconfirmed_ack),
             patch("gateway.RETRY_DELAY_SECONDS", 0),
         ):
             task = asyncio.create_task(
@@ -540,6 +553,7 @@ def test_window_ack_loss_reconnects_without_reapplying_confirmed_rows(tmp_path):
             )
             try:
                 await until(lambda: not gateway.pending_deliveries(db))
+                assert timeout_injected
                 assert [f["event_id"] for f in first.frames] == ids
                 assert [f["event_id"] for f in second.frames] == ids[:1]
             finally:
