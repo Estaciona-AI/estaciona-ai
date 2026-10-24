@@ -10,6 +10,7 @@ use crate::site_config::SiteConfig;
 
 #[derive(Debug)]
 pub enum ReconcileError {
+    InstallationMismatch,
     Database(sqlx::Error),
     InvalidMap(String),
     ActiveReservations(Vec<String>),
@@ -18,6 +19,9 @@ pub enum ReconcileError {
 impl std::fmt::Display for ReconcileError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::InstallationMismatch => {
+                f.write_str("Deployment package does not match the verified installation")
+            }
             Self::Database(_) => f.write_str("Map reconciliation database failure"),
             Self::InvalidMap(reason) => write!(f, "Invalid installation map: {reason}"),
             Self::ActiveReservations(spots) => write!(

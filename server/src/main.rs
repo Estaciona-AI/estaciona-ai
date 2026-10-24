@@ -14,6 +14,7 @@ mod edge_cli;
 mod edge_delivery;
 mod edge_operations;
 mod edge_state;
+pub mod installation;
 mod lpr;
 mod pathfinding;
 #[cfg(test)]
@@ -25,6 +26,7 @@ mod reservation_store;
 #[cfg(test)]
 mod reservation_tests;
 mod reservations;
+mod runtime_config;
 mod security;
 mod sessions;
 mod site_config;
@@ -72,6 +74,13 @@ async fn main() {
         }
         return;
     }
+    let installation_request = match installation::cli::parse(&args) {
+        Ok(request) => request,
+        Err(usage) => {
+            eprintln!("{usage}");
+            std::process::exit(2);
+        }
+    };
     let admin_request = match admin_cli::parse(&args) {
         Ok(request) => request,
         Err(usage) => {
@@ -79,21 +88,90 @@ async fn main() {
             std::process::exit(2);
         }
     };
+    // File-only validation does not capture environment settings or load dotenv.
+    let installation_request = match installation_request {
+        Some(command @ installation::cli::Command::Validate { .. }) => {
+            std::process::exit(installation::cli::run(command).await);
+        }
+        request => request,
+    };
     dotenvy::from_path("../.env").ok();
-    let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL missing in .env");
-
-    let pool = PgPoolOptions::new()
+    if let Some(command) = installation_request {
+        std::process::exit(installation::cli::run(command).await);
+    }
+    let administrative =
+        admin_request.is_some() || args.get(1).is_some_and(|arg| arg.starts_with("--edge-"));
+    let (identity, database, runtime) = if administrative {
+        let site_data_dir = match std::env::var("SITE_DATA_DIR") {
+            Ok(value) if !value.is_empty() => value,
+            _ => {
+                eprintln!("SITE_DATA_DIR is required: directory containing installation.json");
+                std::process::exit(2);
+            }
+        };
+        let descriptor = match installation::InstallationDescriptor::load(
+            &std::path::Path::new(&site_data_dir).join("installation.json"),
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(2);
+            }
+        };
+        let database = match std::env::var("DATABASE_URL")
+            .ok()
+            .and_then(|value| value.parse::<sqlx::postgres::PgConnectOptions>().ok())
+        {
+            Some(value) => value,
+            None => {
+                eprintln!("DATABASE_URL is required and must be valid");
+                std::process::exit(1);
+            }
+        };
+        (descriptor.identity(), database, None)
+    } else {
+        let config = match runtime_config::RuntimeConfig::from_env() {
+            Ok(config) => config,
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(2);
+            }
+        };
+        let package = match installation::InstallationPackage::load(&config.site_data_dir) {
+            Ok(package) => package,
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(2);
+            }
+        };
+        (
+            package.identity(),
+            config.database.clone(),
+            Some((config, package)),
+        )
+    };
+    let pool = match PgPoolOptions::new()
         .max_connections(5)
-        .connect(&db_url)
+        .acquire_timeout(std::time::Duration::from_secs(5))
+        .connect_with(database)
         .await
-        .expect("Failed to connect to database");
+    {
+        Ok(pool) => pool,
+        Err(_) => {
+            eprintln!("Installation database connection failed");
+            std::process::exit(1);
+        }
+    };
+    let verified = match installation::startup::prepare(pool.clone(), identity).await {
+        Ok(verified) => verified,
+        Err(error) => {
+            eprintln!("{error}");
+            pool.close().await;
+            std::process::exit(1);
+        }
+    };
 
-    sqlx::migrate!()
-        .run(&pool)
-        .await
-        .expect("Failed to run database migrations");
-
-    match edge_cli::dispatch(&pool, &args).await {
+    match edge_cli::dispatch(verified.pool(), &args).await {
         Ok(true) => return,
         Ok(false) => {}
         Err(error) => {
@@ -102,7 +180,7 @@ async fn main() {
         }
     }
     if let Some(request) = admin_request {
-        if let Err(error) = admin_cli::create(&pool, request).await {
+        if let Err(error) = admin_cli::create(verified.pool(), request).await {
             tracing::error!(%error, "Administrator provisioning failed");
             std::process::exit(1);
         }
@@ -110,28 +188,24 @@ async fn main() {
         return;
     }
 
-    let plate_pepper =
-        std::env::var("PLATE_SECRET_PEPPER").expect("PLATE_SECRET_PEPPER missing in .env");
-    let jwt_secret = std::env::var("JWT_SECRET").expect("JWT_SECRET missing in .env");
-    let site_data_dir = std::env::var("SITE_DATA_DIR")
-        .expect("SITE_DATA_DIR required: directory containing config.json and spots_3d.json");
-    let site = site_config::SiteConfig::load(site_data_dir)
-        .expect("Failed to load installation maps from SITE_DATA_DIR");
-    let lpr_setting = std::env::var("LPR_ENABLED");
-    let lpr_mode = match &lpr_setting {
-        Ok(value) => lpr::LprMode::parse(Some(value)),
-        Err(std::env::VarError::NotPresent) => lpr::LprMode::parse(None),
-        Err(_) => Err("LPR_ENABLED must be UTF-8"),
-    }
-    .expect("Invalid optional LPR configuration");
-    let ws_origins = std::env::var("WS_ALLOWED_ORIGINS")
-        .expect("WS_ALLOWED_ORIGINS missing: configure exact HTTP(S) frontend origins");
-    let ws_origin_policy = ws_origin::WsOriginPolicy::parse(&ws_origins).expect(
-        "WS_ALLOWED_ORIGINS must be a comma-separated list of exact canonical HTTP(S) origins",
-    );
-    let parking_state: SharedState = init_state(pool, jwt_secret, plate_pepper, site, lpr_mode)
-        .await
-        .expect("Failed to reconcile installation map");
+    let (config, package) =
+        runtime.expect("administrative commands return before runtime initialization");
+    let ws_origin_policy = config.ws_origins;
+    let lpr_mode = config.lpr_mode;
+    let parking_state: SharedState = init_state(
+        verified,
+        config.jwt_secret,
+        config.plate_pepper,
+        package,
+        lpr_mode,
+    )
+    .await
+    .expect("Failed to reconcile installation map");
+
+    tracing::info!(organization_id = %parking_state.installation.identity().organization_id(),
+        installation_id = %parking_state.installation.identity().installation_id(),
+        environment = ?parking_state.installation.identity().environment(),
+        "Installation runtime ready");
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -196,7 +270,7 @@ async fn main() {
     let listener = TcpListener::bind("0.0.0.0:8000").await.unwrap();
     tracing::info!("Server listening on {}", listener.local_addr().unwrap());
 
-    ws_tickets::spawn_cleanup(parking_state.pool.clone());
+    ws_tickets::spawn_cleanup(parking_state.installation.pool().clone());
     let state_for_bg_task = parking_state;
 
     tokio::spawn(async move {
@@ -208,7 +282,7 @@ async fn main() {
             let expired_ids = sqlx::query_scalar::<_, uuid::Uuid>(
                 "SELECT id FROM reservations WHERE status = 'active' AND expires_at < NOW()",
             )
-            .fetch_all(&state_for_bg_task.pool)
+            .fetch_all(state_for_bg_task.installation.pool())
             .await;
             let ids = match expired_ids {
                 Ok(ids) => ids,
@@ -220,7 +294,7 @@ async fn main() {
 
             for id in ids {
                 let transition = reservation_store::finish(
-                    &state_for_bg_task.pool,
+                    state_for_bg_task.installation.pool(),
                     id,
                     reservation_store::FinishReason::Expired,
                 )
@@ -232,7 +306,8 @@ async fn main() {
                         };
                         if let Ok(json) = serde_json::to_string(&expired_msg)
                             && let Some(user_id) = record.user_id
-                            && let Some(user_tx) = state_for_bg_task.user_sessions.get(&user_id)
+                            && let Some(user_tx) =
+                                state_for_bg_task.installation.user_sessions.get(&user_id)
                         {
                             let _ = user_tx.try_send(json);
                         }
@@ -242,7 +317,7 @@ async fn main() {
                                 status: status.to_string(),
                             };
                             if let Ok(json) = serde_json::to_string(&update_msg) {
-                                let _ = state_for_bg_task.tx.send(json);
+                                let _ = state_for_bg_task.installation.tx.send(json);
                             }
                         }
                     }
@@ -294,27 +369,32 @@ async fn save_config(
     headers: HeaderMap,
     axum::Json(payload): axum::Json<serde_json::Value>,
 ) -> Result<&'static str, (axum::http::StatusCode, String)> {
-    crate::security::require_admin(&headers, &state.jwt_secret, &state.pool).await?;
-    state.config_store.save(payload).await.map_err(|error| {
-        let error = match error {
-            config_store::ConfigWriteError::Busy => {
-                return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "Configuration write already in progress".to_owned(),
-                );
+    crate::security::require_admin(&headers, &state.jwt_secret, state.installation.pool()).await?;
+    state
+        .installation
+        .config_store
+        .save(payload)
+        .await
+        .map_err(|error| {
+            let error = match error {
+                config_store::ConfigWriteError::Busy => {
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "Configuration write already in progress".to_owned(),
+                    );
+                }
+                config_store::ConfigWriteError::Storage(error) => error,
+            };
+            if error.kind() == std::io::ErrorKind::InvalidData {
+                (StatusCode::BAD_REQUEST, error.to_string())
+            } else {
+                tracing::error!(%error, "Failed to persist parking configuration");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to save configuration".to_owned(),
+                )
             }
-            config_store::ConfigWriteError::Storage(error) => error,
-        };
-        if error.kind() == std::io::ErrorKind::InvalidData {
-            (StatusCode::BAD_REQUEST, error.to_string())
-        } else {
-            tracing::error!(%error, "Failed to persist parking configuration");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to save configuration".to_owned(),
-            )
-        }
-    })?;
+        })?;
 
     Ok(r#"{"status": "ok"}"#)
 }

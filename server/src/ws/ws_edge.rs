@@ -29,7 +29,7 @@ pub async fn ws_edge_handler(
         )
             .into_response();
     };
-    match crate::edge_auth::authenticate(&state.pool, token).await {
+    match crate::edge_auth::authenticate(state.installation.pool(), token).await {
         Ok(Some(principal)) => ws.on_upgrade(|socket| handle_edge_socket(socket, state, principal)),
         Ok(None) => (
             axum::http::StatusCode::UNAUTHORIZED,
@@ -51,7 +51,7 @@ fn schedule_unconfirmed_occupancy(state: SharedState, reservation_id: Uuid) {
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(15)).await;
         if let Err(error) = reservation_store::finish(
-            &state.pool,
+            state.installation.pool(),
             reservation_id,
             FinishReason::UnconfirmedOccupancy,
         )
@@ -65,7 +65,8 @@ fn schedule_unconfirmed_occupancy(state: SharedState, reservation_id: Uuid) {
 async fn revalidate_edge(state: &SharedState, principal: &crate::edge_auth::Principal) -> bool {
     matches!(
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            let tx = crate::edge_auth::begin_authorized(&state.pool, principal).await?;
+            let tx =
+                crate::edge_auth::begin_authorized(state.installation.pool(), principal).await?;
             tx.commit()
                 .await
                 .map_err(crate::edge_auth::AuthError::Database)
@@ -112,7 +113,7 @@ async fn run_edge_socket(
         "TREND_PREDICTION",
         "TREND_PREDICTION_V2",
     ];
-    if state.lpr_mode == crate::lpr::LprMode::Disabled {
+    if state.installation.lpr_mode == crate::lpr::LprMode::Disabled {
         durable_events.push("CAR_DETECTED");
     }
     let ready = ServerToEdgeMsg::Ready {
@@ -161,7 +162,7 @@ async fn run_edge_socket(
                     if let Some((spot_id, status)) = delivery.spot_update {
                         let update = ServerToAppMsg::SpotUpdate { spot_id, status };
                         if let Ok(json) = serde_json::to_string(&update) {
-                            let _ = state.tx.send(json);
+                            let _ = state.installation.tx.send(json);
                         }
                     }
                     if let Some(id) = delivery.unconfirmed_reservation {
@@ -225,7 +226,7 @@ async fn run_edge_socket(
                         timestamp,
                     } => {
                         let observation = match crate::edge_delivery::apply_legacy(
-                            &state.pool,
+                            state.installation.pool(),
                             principal,
                             &camera_id,
                             &spot_id,
@@ -254,7 +255,7 @@ async fn run_edge_socket(
                         if let Some((spot_id, status)) = observation.spot_update {
                             let update = ServerToAppMsg::SpotUpdate { spot_id, status };
                             if let Ok(json) = serde_json::to_string(&update) {
-                                let _ = state.tx.send(json);
+                                let _ = state.installation.tx.send(json);
                             }
                         }
                         if let Some(id) = observation.unconfirmed_reservation {

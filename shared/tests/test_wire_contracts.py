@@ -8,26 +8,27 @@ from pathlib import Path
 
 import pytest
 from jsonschema import Draft202012Validator, FormatChecker
-from referencing import Registry, Resource
+from referencing import Resource
+
+from contract_validation import ContractValidator
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
+CONTRACTS = ContractValidator(
+    {
+        str(path.relative_to(ROOT)): json.loads(path.read_text())
+        for path in (ROOT / "v1").glob("*.schema.json")
+    }
+)
+
+
 def registry():
-    documents = [
-        json.loads(path.read_text()) for path in (ROOT / "v1").glob("*.schema.json")
-    ]
-    return Registry().with_resources(
-        (doc["$id"], Resource.from_contents(doc)) for doc in documents
-    )
+    return CONTRACTS.registry
 
 
 def validator(name):
-    schema = json.loads((ROOT / "v1" / f"{name}.schema.json").read_text())
-    Draft202012Validator.check_schema(schema)
-    return Draft202012Validator(
-        schema, registry=registry(), format_checker=FormatChecker()
-    )
+    return CONTRACTS.validator(f"v1/{name}.schema.json")
 
 
 def test_root_rejects_non_messages():

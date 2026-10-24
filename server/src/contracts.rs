@@ -17,7 +17,9 @@ use crate::ws::messages::{
     AppToServerMsg, EdgeToServerMsg, EdgeTransportMsg, ServerToAppMsg, ServerToEdgeMsg,
 };
 
-pub const VERSION: &str = "1.2.0";
+mod catalog;
+
+pub const VERSION: &str = "1.3.0";
 
 pub fn physical_state_schema(_: &mut SchemaGenerator) -> Schema {
     json_schema!({"type":"string","enum":["free","occupied"]})
@@ -286,6 +288,8 @@ pub fn artifacts() -> BTreeMap<String, Value> {
         artifacts.insert(format!("v1/rest-{name}.schema.json"), schema);
     }
     artifacts.get_mut("v1/manifest.json").expect("manifest")["compatibility"]["forecast"] = json!({"current_event":"TREND_PREDICTION_V2","legacy_event":"TREND_PREDICTION","legacy_event_accepted":true,"evaluation_states":["available","partial","unavailable"],"stay_duration":"unavailable_until_measured","deployment_order":"server_before_forecast_producer"});
+    artifacts.get_mut("v1/manifest.json").expect("manifest")["catalog"] = json!("v1/catalog.json");
+    artifacts.insert("v1/catalog.json".into(), catalog::document());
     artifacts.insert("v1/fixtures.json".into(), fixtures());
     for (name, schema) in schemas {
         artifacts.insert(format!("v1/{name}.schema.json"), schema);

@@ -4,7 +4,7 @@ on:
   push:
     branches: [ "develop", "main", "feat/**", "feats/**", "fix/**", "refactor/**", "test/**" ]
   pull_request:
-    branches: [ "develop" ]
+    branches: [ "develop", "main" ]
 
 env:
   CARGO_TERM_COLOR: always
@@ -151,16 +151,52 @@ jobs:
         run: uv python install
 
       - name: Run Ruff Check
-        run: uv run --locked ruff check
+        run: uv run --locked ruff check . ../tools/rtsp-lab
 
       - name: Run Ruff Format Check
-        run: uv run --locked ruff format --check
+        run: uv run --locked ruff format --check . ../tools/rtsp-lab
 
       - name: Run Pytest
-        run: uv run --locked pytest
+        run: uv run --locked pytest --ignore=tests/test_rtsp_lab_integration.py
+
+  rtsp-lab-ci:
+    name: RTSP lab integration
+    needs: vision-ci
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./vision
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install OpenCV system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1 libglib2.0-0
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "vision/uv.lock"
+      - name: Set up Python
+        run: uv python install
+      - name: Prepare pinned RTSP lab image
+        run: |
+          uv run --locked python - <<'PY'
+          import subprocess
+          import sys
+          sys.path.insert(0, "../tools/rtsp-lab")
+          from services import IMAGE
+          subprocess.run(["docker", "info"], check=True, timeout=15, stdout=subprocess.DEVNULL)
+          subprocess.run(["docker", "pull", IMAGE], check=True, timeout=120)
+          PY
+      - name: Test actual RTSP publication, delivery and recovery
+        env:
+          ESTACIONA_RTSP_TEST: "1"
+        run: uv run --locked pytest -q tests/test_rtsp_lab_integration.py
 
   contracts-ci:
     name: Contract compatibility CI
+    needs: rust-ci
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -172,6 +208,19 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: "shared/uv.lock"
+      - name: Download contract exporter
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: delivery-test-server
+          path: test-server
+      - name: Verify offline export matches published contract bundle
+        env:
+          DATABASE_URL: invalid-offline-probe
+        run: |
+          chmod +x ../test-server/estaciona-ai-rust-server
+          ../test-server/estaciona-ai-rust-server --export-contracts "$RUNNER_TEMP/generated-contracts"
+          diff -u messages.json "$RUNNER_TEMP/generated-contracts/messages.json"
+          diff -ru v1 "$RUNNER_TEMP/generated-contracts/v1"
       - name: Check first-party licensing policy
         run: python ../scripts/check_licenses.py
       - name: Lint contract checks

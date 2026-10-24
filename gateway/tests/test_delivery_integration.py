@@ -82,6 +82,24 @@ class Server:
         (site / "spots_3d.json").write_text(
             json.dumps([{"id": "R02-A", "center3D": {"x": 1, "y": 0, "z": 1}}])
         )
+        (site / "installation.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "organization": {
+                        "id": str(uuid4()),
+                        "slug": "test-org",
+                        "name": "Synthetic organization",
+                    },
+                    "installation": {
+                        "id": str(uuid4()),
+                        "slug": "test-site",
+                        "name": "Synthetic installation",
+                    },
+                    "environment": "test",
+                }
+            )
+        )
         self.environment = {
             **os.environ,
             "DATABASE_URL": db_url,
@@ -205,6 +223,20 @@ def server(tmp_path):
             )
     instance = Server(binary, db_url, tmp_path)
     try:
+        initialized = subprocess.run(
+            [
+                binary,
+                "--installation-init",
+                "--manifest",
+                str(tmp_path / "site" / "installation.json"),
+            ],
+            cwd=tmp_path / "server",
+            env=instance.environment,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert initialized.returncode == 0, initialized.stdout + initialized.stderr
         instance.start()
         instance.query(
             "INSERT INTO edge_gateways (id, name, credential_digest) VALUES (%s, %s, %s)",

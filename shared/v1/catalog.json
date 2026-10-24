@@ -1,0 +1,488 @@
+{
+  "authentication": {
+    "human_bearer": {
+      "credential": "authorization_bearer",
+      "validation": "registered_current_database_session"
+    },
+    "human_session": {
+      "credential": "bearer_or_estaciona_token_cookie",
+      "validation": "registered_current_database_session"
+    },
+    "individual_gateway_bearer": {
+      "credential": "authorization_bearer",
+      "validation": "active_gateway_and_explicit_grants"
+    },
+    "local_shared_key": {
+      "credential": "authorization_bearer",
+      "validation": "gateway_process_key"
+    },
+    "public": {
+      "credential": null
+    },
+    "single_use_ticket": {
+      "credential": "ticket_query_parameter",
+      "issued_by": "websocket_ticket",
+      "validation": "destination_session_and_origin"
+    }
+  },
+  "http": [
+    {
+      "authentication": "public",
+      "authorization": "public",
+      "availability": "always",
+      "error_schema": "v1/rest-api-error.schema.json",
+      "id": "login",
+      "legacy_path": "/login",
+      "method": "POST",
+      "path": "/api/v1/login",
+      "request_encoding": "json",
+      "request_schema": "v1/rest-login-request.schema.json",
+      "responses": {
+        "200": {
+          "encoding": "json",
+          "schema": "v1/rest-login-response.schema.json"
+        }
+      }
+    },
+    {
+      "authentication": "public",
+      "authorization": "public",
+      "availability": "always",
+      "error_schema": "v1/rest-api-error.schema.json",
+      "id": "register",
+      "legacy_path": "/users",
+      "method": "POST",
+      "path": "/api/v1/users",
+      "request_encoding": "json",
+      "request_schema": "v1/rest-create-user.schema.json",
+      "responses": {
+        "201": {
+          "encoding": "json",
+          "schema": "v1/rest-user-response.schema.json"
+        }
+      }
+    },
+    {
+      "authentication": "human_session",
+      "authorization": "self_or_admin",
+      "availability": "always",
+      "error_schema": "v1/rest-api-error.schema.json",
+      "id": "get_user",
+      "legacy_path": "/users/{id}",
+      "method": "GET",
+      "path": "/api/v1/users/{id}",
+      "request_encoding": "none",
+      "request_schema": null,
+      "responses": {
+        "200": {
+          "encoding": "json",
+          "schema": "v1/rest-user-response.schema.json"
+        }
+      }
+    },
+    {
+      "authentication": "human_bearer",
+      "authorization": "current_session",
+      "availability": "always",
+      "error_schema": "v1/rest-api-error.schema.json",
+      "id": "logout",
+      "legacy_path": "/auth/logout",
+      "method": "POST",
+      "path": "/api/v1/auth/logout",
+      "request_encoding": "none",
+      "request_schema": null,
+      "responses": {
+        "204": {
+          "encoding": "empty",
+          "schema": null
+        }
+      }
+    },
+    {
+      "authentication": "human_bearer",
+      "authorization": "dashboard_requires_admin",
+      "availability": "always",
+      "effect": "single_use_destination_bound_ticket",
+      "error_schema": "v1/rest-api-error.schema.json",
+      "id": "websocket_ticket",
+      "legacy_path": "/auth/ws-ticket",
+      "method": "POST",
+      "path": "/api/v1/auth/ws-ticket",
+      "request_encoding": "json",
+      "request_schema": "v1/rest-issue-ws-ticket.schema.json",
+      "responses": {
+        "201": {
+          "encoding": "json",
+          "schema": "v1/rest-issued-ws-ticket.schema.json"
+        }
+      }
+    },
+    {
+      "authentication": "human_session",
+      "authorization": "authenticated_user",
+      "availability": "always",
+      "error_schema": "v1/rest-api-error.schema.json",
+      "expiration_source": "server_reservation_policy",
+      "id": "create_reservation",
+      "legacy_path": "/reservations",
+      "method": "POST",
+      "path": "/api/v1/reservations",
+      "request_encoding": "json",
+      "request_schema": "v1/rest-create-reservation.schema.json",
+      "responses": {
+        "200": {
+          "encoding": "json",
+          "schema": "v1/rest-reservation-response.schema.json"
+        }
+      }
+    },
+    {
+      "authentication": "human_session",
+      "authorization": "admin",
+      "availability": "always",
+      "error_schema": "v1/rest-api-error.schema.json",
+      "id": "list_reservations",
+      "legacy_path": "/reservations",
+      "method": "GET",
+      "path": "/api/v1/reservations",
+      "request_encoding": "none",
+      "request_schema": null,
+      "responses": {
+        "200": {
+          "collection": true,
+          "encoding": "json",
+          "schema": "v1/rest-reservation-response.schema.json"
+        }
+      }
+    },
+    {
+      "authentication": "human_session",
+      "authorization": "reservation_owner",
+      "availability": "always",
+      "error_schema": "v1/rest-api-error.schema.json",
+      "id": "cancel_reservation",
+      "legacy_path": "/reservations/{id}/cancel",
+      "method": "PUT",
+      "path": "/api/v1/reservations/{id}/cancel",
+      "request_encoding": "none",
+      "request_schema": null,
+      "responses": {
+        "200": {
+          "encoding": "text",
+          "schema": null
+        }
+      }
+    },
+    {
+      "authentication": "human_session",
+      "authorization": "reservation_owner",
+      "availability": "always",
+      "error_schema": "v1/rest-api-error.schema.json",
+      "id": "confirm_occupancy",
+      "legacy_path": "/reservations/{id}/confirm",
+      "method": "POST",
+      "path": "/api/v1/reservations/{id}/confirm",
+      "precondition": "unexpired_reservation_and_observed_occupied_spot",
+      "request_encoding": "none",
+      "request_schema": null,
+      "responses": {
+        "200": {
+          "encoding": "text",
+          "schema": null
+        }
+      }
+    },
+    {
+      "authentication": "human_session",
+      "authorization": "reservation_owner",
+      "availability": "always",
+      "error_schema": "v1/rest-api-error.schema.json",
+      "id": "extend_reservation",
+      "legacy_path": "/reservations/{id}/extend",
+      "method": "PUT",
+      "path": "/api/v1/reservations/{id}/extend",
+      "request_encoding": "none",
+      "request_schema": null,
+      "responses": {
+        "200": {
+          "encoding": "text",
+          "schema": null
+        }
+      }
+    },
+    {
+      "authentication": "human_session",
+      "authorization": "query_user_must_match_session",
+      "availability": "always",
+      "error_schema": "v1/rest-api-error.schema.json",
+      "id": "recommend_spot",
+      "legacy_path": "/reservations/recommend",
+      "method": "GET",
+      "path": "/api/v1/reservations/recommend",
+      "query": {
+        "user_id": "uuid_required_matches_session"
+      },
+      "request_encoding": "none",
+      "request_schema": null,
+      "responses": {
+        "200": {
+          "encoding": "json",
+          "schema": null
+        }
+      }
+    },
+    {
+      "authentication": "human_session",
+      "authorization": "admin",
+      "availability": "always",
+      "error_schema": "v1/rest-api-error.schema.json",
+      "id": "update_spot_status",
+      "legacy_path": "/spots/{id}/status",
+      "method": "PUT",
+      "path": "/api/v1/spots/{id}/status",
+      "request_encoding": "json",
+      "request_schema": "v1/rest-update-spot-status.schema.json",
+      "responses": {
+        "200": {
+          "encoding": "empty",
+          "schema": null
+        }
+      }
+    },
+    {
+      "authentication": "human_session",
+      "authorization": "admin",
+      "availability": "always",
+      "effect": "persist_geometry_for_next_restart",
+      "error_schema": "v1/rest-api-error.schema.json",
+      "id": "save_config",
+      "legacy_path": "/config",
+      "method": "POST",
+      "path": "/api/v1/config",
+      "request_encoding": "json",
+      "request_schema": null,
+      "responses": {
+        "200": {
+          "encoding": "text",
+          "schema": null
+        }
+      }
+    },
+    {
+      "authentication": "human_session",
+      "authorization": "admin",
+      "availability": "lpr_enabled",
+      "error_schema": "v1/rest-api-error.schema.json",
+      "id": "list_vehicle_bindings",
+      "legacy_path": "/admin/vehicle-bindings",
+      "method": "GET",
+      "path": "/api/v1/admin/vehicle-bindings",
+      "request_encoding": "none",
+      "request_schema": null,
+      "responses": {
+        "200": {
+          "encoding": "json",
+          "schema": null
+        }
+      }
+    },
+    {
+      "authentication": "human_session",
+      "authorization": "admin",
+      "availability": "lpr_enabled",
+      "error_schema": "v1/rest-api-error.schema.json",
+      "id": "create_vehicle_binding",
+      "legacy_path": "/admin/vehicle-bindings",
+      "method": "POST",
+      "path": "/api/v1/admin/vehicle-bindings",
+      "request_encoding": "json",
+      "request_schema": null,
+      "responses": {
+        "201": {
+          "encoding": "json",
+          "schema": null
+        }
+      }
+    },
+    {
+      "authentication": "human_session",
+      "authorization": "admin",
+      "availability": "lpr_enabled",
+      "error_schema": "v1/rest-api-error.schema.json",
+      "id": "approve_vehicle_binding",
+      "legacy_path": "/admin/vehicle-bindings/{id}/approve",
+      "method": "POST",
+      "path": "/api/v1/admin/vehicle-bindings/{id}/approve",
+      "request_encoding": "json",
+      "request_schema": null,
+      "responses": {
+        "200": {
+          "encoding": "json",
+          "schema": null
+        }
+      }
+    },
+    {
+      "authentication": "human_session",
+      "authorization": "admin",
+      "availability": "lpr_enabled",
+      "error_schema": "v1/rest-api-error.schema.json",
+      "id": "revoke_vehicle_binding",
+      "legacy_path": "/admin/vehicle-bindings/{id}/revoke",
+      "method": "POST",
+      "path": "/api/v1/admin/vehicle-bindings/{id}/revoke",
+      "request_encoding": "json",
+      "request_schema": null,
+      "responses": {
+        "200": {
+          "encoding": "json",
+          "schema": null
+        }
+      }
+    },
+    {
+      "authentication": "public",
+      "authorization": "public",
+      "availability": "always",
+      "error_schema": "v1/rest-api-error.schema.json",
+      "id": "capabilities",
+      "legacy_path": null,
+      "method": "GET",
+      "path": "/api/v1/capabilities",
+      "request_encoding": "none",
+      "request_schema": null,
+      "responses": {
+        "200": {
+          "encoding": "json",
+          "schema": "v1/rest-capabilities.schema.json"
+        }
+      }
+    },
+    {
+      "authentication": "public",
+      "authorization": "public",
+      "availability": "always",
+      "error_schema": "v1/rest-api-error.schema.json",
+      "id": "contract_artifact",
+      "legacy_path": null,
+      "method": "GET",
+      "path": "/api/v1/contracts/{path}",
+      "request_encoding": "none",
+      "request_schema": null,
+      "responses": {
+        "200": {
+          "encoding": "json",
+          "schema": null
+        }
+      }
+    },
+    {
+      "authentication": "public",
+      "authorization": "public",
+      "availability": "always",
+      "error_schema": null,
+      "id": "health",
+      "legacy_path": null,
+      "method": "GET",
+      "path": "/health",
+      "request_encoding": "none",
+      "request_schema": null,
+      "responses": {
+        "200": {
+          "encoding": "text",
+          "schema": null
+        }
+      }
+    }
+  ],
+  "installation_configuration": {
+    "files": [
+      "installation.json",
+      "config.json",
+      "spots_3d.json",
+      "reservation_policy.json"
+    ],
+    "optional_files": [
+      "reservation_policy.json"
+    ],
+    "public_endpoint": null,
+    "scope_from_client_payload": false,
+    "secrets_source": "process_environment",
+    "source": "operator_package"
+  },
+  "local_transport": {
+    "ack_boundary": "gateway_sqlite_commit",
+    "authentication": "local_shared_key",
+    "cloud_credential_reused": true,
+    "endpoint_source": "gateway_process_configuration",
+    "legacy_unwrapped_events_accepted": true,
+    "negotiation_header": {
+      "X-Estaciona-Local-Delivery": "1"
+    },
+    "receive": {
+      "schema": "v1/vision-to-gateway.schema.json"
+    },
+    "send": {
+      "schema": "v1/gateway-to-vision.schema.json"
+    },
+    "trust_boundary": "vision_and_gateway_share_credentials"
+  },
+  "schema_null_meaning": "no_exported_dto_schema",
+  "scope": "single_installation_per_process_and_database",
+  "version": "1.3.0",
+  "websockets": [
+    {
+      "authentication": "single_use_ticket",
+      "authorization": "authenticated_user",
+      "delivery": "best_effort_disconnect_requires_resnapshot",
+      "id": "app",
+      "initial_state": "active_spots",
+      "path": "/ws/app",
+      "receive": {
+        "schema": "v1/app-to-server.schema.json"
+      },
+      "send": {
+        "schema": "v1/server-to-app.schema.json"
+      },
+      "ticket_destination": "app"
+    },
+    {
+      "authentication": "single_use_ticket",
+      "authorization": "admin",
+      "delivery": "best_effort_disconnect_requires_resnapshot",
+      "id": "dashboard",
+      "initial_state": "active_spots_and_cached_forecast_if_available",
+      "path": "/ws/dashboard",
+      "receive": null,
+      "send": {
+        "schema": "v1/server-to-app.schema.json"
+      },
+      "ticket_destination": "dashboard"
+    },
+    {
+      "ack_boundary": "postgres_commit",
+      "authentication": "individual_gateway_bearer",
+      "authorization": "explicit_gateway_grants",
+      "event_authorization": {
+        "CAR_DETECTED": "lpr_enabled_camera_operation_and_granted_spots",
+        "PATH_UPDATE": "installation_wide_explicit_permission",
+        "SPOT_UPDATE": "camera_spot_pair_and_operation",
+        "TREND_PREDICTION": "installation_wide_explicit_permission",
+        "TREND_PREDICTION_V2": "installation_wide_explicit_permission"
+      },
+      "id": "edge",
+      "legacy_events_have_durable_ack": false,
+      "legacy_unwrapped_events_accepted": true,
+      "path": "/ws/edge",
+      "payload": {
+        "schema": "v1/edge-events.schema.json"
+      },
+      "receive": {
+        "schema": "v1/gateway-to-server.schema.json"
+      },
+      "send": {
+        "schema": "v1/server-to-gateway.schema.json"
+      }
+    }
+  ]
+}

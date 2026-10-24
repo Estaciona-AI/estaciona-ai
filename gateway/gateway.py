@@ -110,10 +110,12 @@ def get_unsynced_events(db_path):
         ).fetchall()
 
 
-def pending_deliveries(db_path):
+def pending_deliveries(db_path, *, after_id=0, limit=None):
     with closing(sqlite3.connect(db_path)) as conn:
         return conn.execute(
-            "SELECT id, event_uuid, message_text FROM fallback_events WHERE synced = 0 ORDER BY id"
+            "SELECT id, event_uuid, message_text FROM fallback_events "
+            "WHERE synced = 0 AND id > ? ORDER BY id LIMIT ?",
+            (after_id, -1 if limit is None else limit),
         ).fetchall()
 
 
@@ -202,8 +204,8 @@ def record_forwarding(db_path, metrics_path, event_uuid, timestamp):
     update_metrics_forwarded_batch(metrics_path, [(timestamp, event_uuid)])
 
 
-async def receive_ack(connection, event_uuid):
-    deadline = asyncio.get_running_loop().time() + ACK_TIMEOUT_SECONDS
+async def receive_ack(connection, in_flight):
+    deadline = min(in_flight.values())
     while True:
         remaining = deadline - asyncio.get_running_loop().time()
         if remaining <= 0:
@@ -218,7 +220,8 @@ async def receive_ack(connection, event_uuid):
             and ack.get("type") == "EDGE_ACK"
             and type(ack.get("version")) is int
             and ack["version"] == 1
-            and ack.get("event_id") == event_uuid
+            and isinstance(ack.get("event_id"), str)
+            and ack["event_id"] in in_flight
             and ack.get("outcome") in ("applied", "ignored", "rejected")
             and type(ack.get("duplicate")) is bool
             and "reason" in ack
@@ -439,13 +442,22 @@ async def handler(websocket, db_path, metrics_path, expected_key, sync_event):
         metrics_conn.close()
 
 
-async def sync_loop(db_path, metrics_path, cloud_url, api_key, sync_event):
+def validate_ack_window(value):
+    if type(value) is not int or not 1 <= value <= 8:
+        raise ValueError("EDGE_MAX_IN_FLIGHT must be an integer from 1 to 8")
+    return value
+
+
+async def sync_loop(
+    db_path, metrics_path, cloud_url, api_key, sync_event, *, max_in_flight=8
+):
+    validate_ack_window(max_in_flight)
     cloud_conn = None
     headers = {"Authorization": f"Bearer {api_key}"}
     try:
         while True:
             try:
-                events = pending_deliveries(db_path)
+                events = pending_deliveries(db_path, limit=64)
                 if not events:
                     await sync_event.wait()
                     sync_event.clear()
@@ -475,38 +487,66 @@ async def sync_loop(db_path, metrics_path, cloud_url, api_key, sync_event):
                     print("[INFO] CLOUD_CONNECTED delivery_version=1", flush=True)
 
                 deferred = False
-                for _, event_uuid, message_text in events:
-                    try:
-                        payload = json.loads(message_text)
-                        # Python accepts NaN/Infinity and overflow to inf; Rust JSON does not.
-                        json.dumps(payload, allow_nan=False)
-                    except ValueError, TypeError:
-                        finish_event(
-                            db_path, event_uuid, "rejected", "invalid_local_json"
+                in_flight = {}
+                cursor = 0
+                exhausted = False
+                loop = asyncio.get_running_loop()
+                while not exhausted or in_flight:
+                    while not exhausted and len(in_flight) < max_in_flight:
+                        if in_flight and min(in_flight.values()) <= loop.time():
+                            raise TimeoutError("Cloud ACK deadline expired")
+                        if not events:
+                            events = pending_deliveries(
+                                db_path, after_id=cursor, limit=64
+                            )
+                            if not events:
+                                exhausted = True
+                                break
+                        row_id, event_uuid, message_text = events.pop(0)
+                        cursor = row_id
+                        try:
+                            payload = json.loads(message_text)
+                            # Python accepts NaN/Infinity and overflow to inf; Rust JSON does not.
+                            json.dumps(payload, allow_nan=False)
+                        except ValueError, TypeError:
+                            finish_event(
+                                db_path, event_uuid, "rejected", "invalid_local_json"
+                            )
+                            print(
+                                f"[ERROR] LOCAL_EVENT_REJECTED event_id={event_uuid}",
+                                flush=True,
+                            )
+                            continue
+                        if not isinstance(payload, dict) or contains_null_character(
+                            payload
+                        ):
+                            finish_event(
+                                db_path, event_uuid, "rejected", "invalid_local_payload"
+                            )
+                            continue
+                        if payload.get("type") not in durable_events:
+                            # Advance the cursor without consuming a window slot.
+                            deferred = True
+                            await asyncio.sleep(0)
+                            continue
+                        now_str = (
+                            datetime.datetime.now(datetime.UTC)
+                            .isoformat(timespec="milliseconds")
+                            .replace("+00:00", "Z")
                         )
-                        print(
-                            f"[ERROR] LOCAL_EVENT_REJECTED event_id={event_uuid}",
-                            flush=True,
+                        deadline = loop.time() + ACK_TIMEOUT_SECONDS
+                        send_deadline = min([deadline, *in_flight.values()])
+                        await asyncio.wait_for(
+                            cloud_conn.send(
+                                encode_edge_event(event_uuid, payload, now_str)
+                            ),
+                            timeout=max(0, send_deadline - loop.time()),
                         )
-                        continue
-                    if not isinstance(payload, dict) or contains_null_character(
-                        payload
-                    ):
-                        finish_event(
-                            db_path, event_uuid, "rejected", "invalid_local_payload"
-                        )
-                        continue
-                    now_str = (
-                        datetime.datetime.now(datetime.UTC)
-                        .isoformat(timespec="milliseconds")
-                        .replace("+00:00", "Z")
-                    )
-                    if payload.get("type") in durable_events:
-                        await cloud_conn.send(
-                            encode_edge_event(event_uuid, payload, now_str)
-                        )
+                        in_flight[event_uuid] = deadline
                         record_forwarding(db_path, metrics_path, event_uuid, now_str)
-                        ack = await receive_ack(cloud_conn, event_uuid)
+                    if in_flight:
+                        ack = await receive_ack(cloud_conn, in_flight)
+                        event_uuid = ack["event_id"]
                         acknowledge_event(
                             db_path,
                             metrics_path,
@@ -514,14 +554,11 @@ async def sync_loop(db_path, metrics_path, cloud_url, api_key, sync_event):
                             ack["outcome"],
                             ack["reason"],
                         )
+                        del in_flight[event_uuid]
                         print(
                             f"[INFO] CLOUD_ACK event_id={event_uuid} outcome={ack['outcome']} duplicate={ack['duplicate']}",
                             flush=True,
                         )
-                    else:
-                        # Never turn a transport send into a claim of persistence.
-                        # Keep the UUID and payload intact until a capable server is available.
-                        deferred = True
                 if deferred:
                     # Renegotiate after backoff; unsupported rows retain their UUID.
                     await cloud_conn.close()
@@ -596,6 +633,12 @@ async def main():
     cloud_url = os.environ.get("SERVER_WS_URL", "wss://api.estaciona.tech/ws/edge")
     api_key = os.environ["EDGE_API_KEY"]
     port = int(os.environ.get("GATEWAY_PORT", "8001"))
+    try:
+        max_in_flight = validate_ack_window(
+            int(os.environ.get("EDGE_MAX_IN_FLIGHT", "8"))
+        )
+    except ValueError:
+        raise ValueError("EDGE_MAX_IN_FLIGHT must be an integer from 1 to 8") from None
 
     print(
         f"{datetime.datetime.now(datetime.UTC).strftime('%Y-%m-%d %H:%M:%S')} [INFO] STARTING_GATEWAY port={port}",
@@ -605,7 +648,14 @@ async def main():
     sync_event = asyncio.Event()
 
     asyncio.create_task(
-        sync_loop(db_path, metrics_path, cloud_url, api_key, sync_event)
+        sync_loop(
+            db_path,
+            metrics_path,
+            cloud_url,
+            api_key,
+            sync_event,
+            max_in_flight=max_in_flight,
+        )
     )
 
     asyncio.create_task(prediction_loop(db_path, sync_event))

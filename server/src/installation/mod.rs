@@ -1,0 +1,46 @@
+// SPDX-FileCopyrightText: 2026 Guilherme Pedroza
+// SPDX-License-Identifier: Apache-2.0
+
+//! Pure installation descriptor types; database binding and startup are separate.
+
+mod descriptor;
+
+pub use descriptor::{
+    DescriptorEntity, DescriptorError, Environment, InstallationDescriptor, InstallationIdentity,
+};
+
+#[cfg(test)]
+mod tests;
+
+#[cfg(test)]
+mod binding_tests;
+
+pub mod store;
+
+#[cfg(test)]
+mod store_tests;
+
+#[cfg(test)]
+mod cli_tests;
+
+pub mod cli;
+
+pub mod startup;
+
+#[cfg(test)]
+mod context_tests;
+
+mod bound;
+pub use bound::VerifiedInstallation;
+
+#[cfg(test)]
+pub(crate) mod test_support;
+
+mod context;
+pub use context::InstallationContext;
+
+#[cfg(test)]
+mod package_tests;
+
+mod package;
+pub use package::{InstallationPackage, PackageError};

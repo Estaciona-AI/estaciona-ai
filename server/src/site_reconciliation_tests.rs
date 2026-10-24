@@ -28,19 +28,19 @@ fn site(spots: &[(&str, f64)]) -> SiteConfig {
 #[sqlx::test(migrations = "./migrations")]
 async fn moved_spot_coordinates_follow_the_applied_map(pool: PgPool) {
     crate::state::init_state(
-        pool.clone(),
+        crate::installation::test_support::provision(&pool).await,
         "test".into(),
         "test".into(),
-        site(&[("R07-A", 2.0)]),
+        crate::installation::test_support::package(site(&[("R07-A", 2.0)])),
         Default::default(),
     )
     .await
     .unwrap();
     crate::state::init_state(
-        pool.clone(),
+        crate::installation::test_support::provision(&pool).await,
         "test".into(),
         "test".into(),
-        site(&[("R07-A", 8.0)]),
+        crate::installation::test_support::package(site(&[("R07-A", 8.0)])),
         Default::default(),
     )
     .await
@@ -353,10 +353,10 @@ async fn downgrade_refuses_retired_spots_and_upgrade_preserves_legacy_rows(pool:
 #[sqlx::test(migrations = "./migrations")]
 async fn r11_navigation_collision_does_not_reconcile_any_database_changes(pool: PgPool) {
     crate::state::init_state(
-        pool.clone(),
+        crate::installation::test_support::provision(&pool).await,
         "test".into(),
         "test".into(),
-        site(&[("R11-A", 2.0)]),
+        crate::installation::test_support::package(site(&[("R11-A", 2.0)])),
         Default::default(),
     )
     .await
@@ -372,10 +372,14 @@ async fn r11_navigation_collision_does_not_reconcile_any_database_changes(pool: 
         .unwrap();
     for collision in ["cam-01", "path_node_1"] {
         let result = crate::state::init_state(
-            pool.clone(),
+            crate::installation::test_support::provision(&pool).await,
             "test".into(),
             "test".into(),
-            site(&[("R11-A", 9.0), (collision, 3.0), ("R11-new", 4.0)]),
+            crate::installation::test_support::package(site(&[
+                ("R11-A", 9.0),
+                (collision, 3.0),
+                ("R11-new", 4.0),
+            ])),
             Default::default(),
         )
         .await;

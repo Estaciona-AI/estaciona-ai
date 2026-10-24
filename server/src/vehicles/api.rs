@@ -61,7 +61,9 @@ fn deadline(session: &AuthSession) -> Instant {
         .min(Instant::now() + Duration::from_secs(5))
 }
 async fn admin(state: &SharedState, headers: &HeaderMap) -> Result<AuthSession, ApiError> {
-    let session = security::authenticated_session(headers, &state.jwt_secret, &state.pool).await?;
+    let session =
+        security::authenticated_session(headers, &state.jwt_secret, state.installation.pool())
+            .await?;
     if session.role != "admin" {
         return Err((StatusCode::FORBIDDEN, "Admin required".into()));
     }
@@ -71,7 +73,12 @@ async fn begin<'a>(
     state: &'a SharedState,
     session: &AuthSession,
 ) -> Result<Transaction<'a, Postgres>, ApiError> {
-    let mut tx = state.pool.begin().await.map_err(unavailable)?;
+    let mut tx = state
+        .installation
+        .pool()
+        .begin()
+        .await
+        .map_err(unavailable)?;
     sqlx::raw_sql("SET LOCAL statement_timeout = '2s'; SET LOCAL lock_timeout = '2s'")
         .execute(&mut *tx)
         .await

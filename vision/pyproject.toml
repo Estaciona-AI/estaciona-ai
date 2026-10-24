@@ -1,6 +1,6 @@
 [project]
 name = "estaciona-ai-vision"
-version = "0.1.0"
+version = "0.9.0"
 license = "Apache-2.0"
 description = "Computer vision module for Estaciona AI"
 requires-python = ">=3.14"
@@ -14,6 +14,9 @@ dependencies = [
 
 [project.optional-dependencies]
 cuda = ["onnxruntime-gpu[cuda,cudnn]==1.31.0"]
+# NVIDIA TensorRT runtime (proprietary NVIDIA license), loaded only by
+# detector profiles that select provider "tensorrt".
+tensorrt = ["onnxruntime-gpu[cuda,cudnn]==1.31.0", "tensorrt-cu13-libs==10.16.1.11"]
 
 [dependency-groups]
 dev = [
@@ -26,3 +29,12 @@ pythonpath = ["src"]
 
 [tool.ruff.lint]
 ignore = ["E402", "E741"]
+
+# PyPI only hosts a download stub; pin NVIDIA's own wheel and hash instead.
+[[tool.uv.index]]
+name = "nvidia"
+url = "https://pypi.nvidia.com"
+explicit = true
+
+[tool.uv.sources]
+tensorrt-cu13-libs = { index = "nvidia" }

@@ -90,7 +90,12 @@ pub(crate) async fn logout(
     let expiry =
         expires_at(&session).map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid session expiry"))?;
     let operation = async {
-        let mut tx = state.pool.begin().await.map_err(unavailable)?;
+        let mut tx = state
+            .installation
+            .pool()
+            .begin()
+            .await
+            .map_err(unavailable)?;
         sqlx::raw_sql("SET LOCAL lock_timeout='2s'; SET LOCAL statement_timeout='2s'")
             .execute(&mut *tx)
             .await
@@ -145,20 +150,21 @@ mod tests {
     use axum::response::IntoResponse;
 
     async fn fixture(pool: PgPool) -> (SharedState, Uuid) {
+        let verified = crate::installation::test_support::provision(&pool).await;
         let user = Uuid::new_v4();
         sqlx::query("INSERT INTO users (id,name,email,password_hash,role) VALUES ($1,'Sessions',$2,'unused','user')")
             .bind(user).bind(format!("{user}@example.invalid")).execute(&pool).await.unwrap();
         let state = crate::state::init_state(
-            pool,
+            verified,
             "session-test-secret".into(),
             "test-pepper".into(),
-            SiteConfig {
+            crate::installation::test_support::package(SiteConfig {
                 directory: std::env::temp_dir(),
                 spots: vec![],
                 parkings: vec![ParkingLotConfig {
                     path: vec![PathNode { x: 0.0, z: 0.0 }, PathNode { x: 1.0, z: 0.0 }],
                 }],
-            },
+            }),
             Default::default(),
         )
         .await
@@ -178,17 +184,20 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn r03b_logout_revokes_only_one_independent_session(pool: PgPool) {
         let (state, user) = fixture(pool).await;
-        let first = issue(&state.pool, user, "user", &state.jwt_secret)
+        let first = issue(state.installation.pool(), user, "user", &state.jwt_secret)
             .await
             .unwrap();
-        let other = issue(&state.pool, user, "user", &state.jwt_secret)
+        let other = issue(state.installation.pool(), user, "user", &state.jwt_secret)
             .await
             .unwrap();
         assert_ne!(first, other);
-        let active =
-            security::authenticated_session(&headers(&first), &state.jwt_secret, &state.pool)
-                .await
-                .unwrap();
+        let active = security::authenticated_session(
+            &headers(&first),
+            &state.jwt_secret,
+            state.installation.pool(),
+        )
+        .await
+        .unwrap();
         let response = logout(State(state.clone()), headers(&first))
             .await
             .unwrap()
@@ -201,20 +210,32 @@ mod tests {
                 .contains("Max-Age=0")
         );
         assert_eq!(
-            active.revalidate(&state.pool).await.unwrap_err().0,
-            StatusCode::UNAUTHORIZED
-        );
-        assert_eq!(
-            security::authenticated_session(&headers(&first), &state.jwt_secret, &state.pool)
+            active
+                .revalidate(state.installation.pool())
                 .await
                 .unwrap_err()
                 .0,
             StatusCode::UNAUTHORIZED
         );
+        assert_eq!(
+            security::authenticated_session(
+                &headers(&first),
+                &state.jwt_secret,
+                state.installation.pool()
+            )
+            .await
+            .unwrap_err()
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
         assert!(
-            security::authenticated_session(&headers(&other), &state.jwt_secret, &state.pool)
-                .await
-                .is_ok()
+            security::authenticated_session(
+                &headers(&other),
+                &state.jwt_secret,
+                state.installation.pool()
+            )
+            .await
+            .is_ok()
         );
         assert!(logout(State(state), headers(&first)).await.is_ok());
     }
@@ -222,11 +243,11 @@ mod tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn r03b_logout_database_failure_does_not_claim_success(pool: PgPool) {
         let (state, user) = fixture(pool).await;
-        let jwt = issue(&state.pool, user, "user", &state.jwt_secret)
+        let jwt = issue(state.installation.pool(), user, "user", &state.jwt_secret)
             .await
             .unwrap();
         sqlx::query("ALTER TABLE auth_sessions RENAME TO unavailable_sessions")
-            .execute(&state.pool)
+            .execute(state.installation.pool())
             .await
             .unwrap();
         let status = match logout(State(state.clone()), headers(&jwt)).await {
@@ -235,13 +256,17 @@ mod tests {
         };
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         sqlx::query("ALTER TABLE unavailable_sessions RENAME TO auth_sessions")
-            .execute(&state.pool)
+            .execute(state.installation.pool())
             .await
             .unwrap();
         assert!(
-            security::authenticated_session(&headers(&jwt), &state.jwt_secret, &state.pool)
-                .await
-                .is_ok()
+            security::authenticated_session(
+                &headers(&jwt),
+                &state.jwt_secret,
+                state.installation.pool()
+            )
+            .await
+            .is_ok()
         );
     }
 
@@ -250,14 +275,17 @@ mod tests {
         pool: PgPool,
     ) {
         let (state, user) = fixture(pool).await;
-        let jwt = issue(&state.pool, user, "user", &state.jwt_secret)
+        let jwt = issue(state.installation.pool(), user, "user", &state.jwt_secret)
             .await
             .unwrap();
-        let session =
-            security::authenticated_session(&headers(&jwt), &state.jwt_secret, &state.pool)
-                .await
-                .unwrap();
-        let mut tx = state.pool.begin().await.unwrap();
+        let session = security::authenticated_session(
+            &headers(&jwt),
+            &state.jwt_secret,
+            state.installation.pool(),
+        )
+        .await
+        .unwrap();
+        let mut tx = state.installation.pool().begin().await.unwrap();
         assert!(lock_active(&mut tx, &session).await.unwrap());
         sqlx::query("INSERT INTO ws_tickets (digest,session_id,user_id,role,destination,session_expires_at,expires_at) VALUES ($1,$2,$3,'user','app',$4,NOW()+INTERVAL '30 seconds')")
             .bind(vec![1u8;32]).bind(session.session_id).bind(user).bind(session.expires_at() as i64)
@@ -273,11 +301,11 @@ mod tests {
         let pending: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM ws_tickets WHERE session_id=$1")
                 .bind(session.session_id)
-                .fetch_one(&state.pool)
+                .fetch_one(state.installation.pool())
                 .await
                 .unwrap();
         assert_eq!(pending, 0);
-        let mut tx = state.pool.begin().await.unwrap();
+        let mut tx = state.installation.pool().begin().await.unwrap();
         assert!(!lock_active(&mut tx, &session).await.unwrap());
         tx.rollback().await.unwrap();
     }
@@ -287,27 +315,34 @@ mod tests {
         let (state, user) = fixture(pool).await;
         for _ in 0..1001 {
             sqlx::query("INSERT INTO auth_sessions (id,user_id,role,expires_at) VALUES ($1,$2,'user',NOW()-INTERVAL '1 second')")
-                .bind(Uuid::new_v4()).bind(user).execute(&state.pool).await.unwrap();
+                .bind(Uuid::new_v4()).bind(user).execute(state.installation.pool()).await.unwrap();
         }
-        let valid = issue(&state.pool, user, "user", &state.jwt_secret)
+        let valid = issue(state.installation.pool(), user, "user", &state.jwt_secret)
             .await
             .unwrap();
-        assert_eq!(cleanup_expired(&state.pool).await.unwrap(), 1000);
-        assert!(
-            security::authenticated_session(&headers(&valid), &state.jwt_secret, &state.pool)
-                .await
-                .is_ok()
+        assert_eq!(
+            cleanup_expired(state.installation.pool()).await.unwrap(),
+            1000
         );
-        assert_eq!(cleanup_expired(&state.pool).await.unwrap(), 1);
+        assert!(
+            security::authenticated_session(
+                &headers(&valid),
+                &state.jwt_secret,
+                state.installation.pool()
+            )
+            .await
+            .is_ok()
+        );
+        assert_eq!(cleanup_expired(state.installation.pool()).await.unwrap(), 1);
     }
     #[sqlx::test(migrations = "./migrations")]
     async fn r03b_downgrade_cannot_discard_unexpired_revocation_state(pool: PgPool) {
         let (state, user) = fixture(pool).await;
-        let jwt = issue(&state.pool, user, "user", &state.jwt_secret)
+        let jwt = issue(state.installation.pool(), user, "user", &state.jwt_secret)
             .await
             .unwrap();
         assert!(logout(State(state.clone()), headers(&jwt)).await.is_ok());
-        let mut tx = state.pool.begin().await.unwrap();
+        let mut tx = state.installation.pool().begin().await.unwrap();
         let down = sqlx::raw_sql(include_str!(
             "../migrations/20261018020000_revocable_sessions.down.sql"
         ))
@@ -319,33 +354,41 @@ mod tests {
         );
         tx.rollback().await.unwrap();
         assert_eq!(
-            security::authenticated_session(&headers(&jwt), &state.jwt_secret, &state.pool)
-                .await
-                .unwrap_err()
-                .0,
+            security::authenticated_session(
+                &headers(&jwt),
+                &state.jwt_secret,
+                state.installation.pool()
+            )
+            .await
+            .unwrap_err()
+            .0,
             StatusCode::UNAUTHORIZED
         );
         sqlx::query("UPDATE auth_sessions SET expires_at=NOW()-INTERVAL '1 second'")
-            .execute(&state.pool)
+            .execute(state.installation.pool())
             .await
             .unwrap();
         sqlx::raw_sql(include_str!(
             "../migrations/20261018020000_revocable_sessions.down.sql"
         ))
-        .execute(&state.pool)
+        .execute(state.installation.pool())
         .await
         .unwrap();
         sqlx::raw_sql(include_str!(
             "../migrations/20261018020000_revocable_sessions.up.sql"
         ))
-        .execute(&state.pool)
+        .execute(state.installation.pool())
         .await
         .unwrap();
         assert_eq!(
-            security::authenticated_session(&headers(&jwt), &state.jwt_secret, &state.pool)
-                .await
-                .unwrap_err()
-                .0,
+            security::authenticated_session(
+                &headers(&jwt),
+                &state.jwt_secret,
+                state.installation.pool()
+            )
+            .await
+            .unwrap_err()
+            .0,
             StatusCode::UNAUTHORIZED
         );
     }
