@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [ "develop", "main" ]
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   SQLX_OFFLINE: true
@@ -34,10 +37,10 @@ jobs:
       run:
         working-directory: ./server
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           components: rustfmt, clippy
 
@@ -87,7 +90,7 @@ jobs:
       run:
         working-directory: ./gateway
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Download integration server
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -99,7 +102,7 @@ jobs:
         run: chmod +x "$ESTACIONA_TEST_SERVER"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
         with:
           enable-cache: true
           cache-dependency-glob: "gateway/uv.lock"
@@ -134,7 +137,7 @@ jobs:
       run:
         working-directory: ./vision
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install OpenCV system dependencies
         run: |
@@ -142,7 +145,7 @@ jobs:
           sudo apt-get install -y libgl1 libglib2.0-0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
         with:
           enable-cache: true
           cache-dependency-glob: "vision/uv.lock"
@@ -167,13 +170,13 @@ jobs:
       run:
         working-directory: ./vision
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install OpenCV system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libgl1 libglib2.0-0
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
         with:
           enable-cache: true
           cache-dependency-glob: "vision/uv.lock"
@@ -202,9 +205,9 @@ jobs:
       run:
         working-directory: ./shared
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
         with:
           enable-cache: true
           cache-dependency-glob: "shared/uv.lock"
