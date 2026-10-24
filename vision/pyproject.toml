@@ -1,6 +1,6 @@
 [project]
 name = "estaciona-ai-vision"
-version = "0.1.0"
+version = "0.9.0"
 license = "Apache-2.0"
 description = "Computer vision module for Estaciona AI"
 requires-python = ">=3.14"
