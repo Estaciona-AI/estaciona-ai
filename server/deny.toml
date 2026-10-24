@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: 2026 Guilherme Pedroza
+# SPDX-License-Identifier: Apache-2.0
+
+[advisories]
+# Fetch RustSec on every run; fail on yanked and newly reported vulnerable crates.
+yanked = "deny"
+unused-ignored-advisory = "deny"
+ignore = [
+    # Reviewed 2026-10-24; review again by 2026-11-24 or before changing JWT algorithms.
+    # jsonwebtoken/rust_crypto includes RSA, but security.rs only uses HS256 and
+    # EncodingKey/DecodingKey::from_secret; no RSA operation or private key is used.
+    { id = "RUSTSEC-2023-0071", reason = "RSA timing attack is outside the enabled HS256 call path; upstream has no patched release." },
+    # Same review deadline. crypto-bigint 0.5.5 arrives through p256/p384 and
+    # elliptic-curve, also pulled by jsonwebtoken/rust_crypto. No EC keys or
+    # asymmetric JWT algorithms are accepted. A compatible patched transitive
+    # upgrade is unavailable; review this exception before enabling any of them.
+    { id = "RUSTSEC-2026-0387", reason = "Elliptic-curve bigint timing paths are unused by HS256/from_secret; retained transitively by jsonwebtoken." },
+]
