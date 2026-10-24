@@ -12,6 +12,24 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
 
 ## [Unreleased]
 
+### Security
+
+- Update the locked Rust TLS, runtime and cryptography dependencies, including
+  `rustls`, `rustls-webpki`, `webpki-roots`, `tokio` and `ctutils`, and replace
+  yanked `chacha20` and `spin` releases.
+- Add a RustSec audit gate for pull requests, pushes to `develop`/`main`, and a
+  weekly schedule. Document the two unused asymmetric-cryptography advisory
+  exceptions by ID in `server/deny.toml`.
+- Pin CI Actions to commit SHAs, restrict workflow token permissions to read-only,
+  and configure weekly Action updates plus security-only Cargo/uv updates.
+  Dependabot security updates still require enabling the repository setting.
+- Add a private vulnerability reporting policy and define the maintained core
+  release line. GitHub security settings and deployment hardening are separate
+  controls; this policy does not enable them automatically.
+- Python dependency audit automation remains a separate draft while known
+  gateway and model-export advisories are unresolved. No Python/CUDA dependency
+  upgrades or advisory suppressions are included in this security batch.
+
 ## [0.9.0] - 2026-10-23
 
 **Release stage: pilot.** This is the first build that is not a pre-release.
