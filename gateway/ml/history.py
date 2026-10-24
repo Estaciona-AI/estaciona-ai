@@ -7,6 +7,9 @@ from datetime import datetime, timezone
 import pandas as pd
 from sqlalchemy import text
 
+# Share of monitored spots an hour needs before its occupancy rate counts.
+MIN_COVERAGE = 0.9
+
 
 def physical_history(engine, start=None, end=None):
     end = end or datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
@@ -29,6 +32,12 @@ def physical_history(engine, start=None, end=None):
             text("SELECT COUNT(*) FROM spots WHERE is_active")
         ).scalar_one()
         frame = pd.read_sql(query, connection, params=params)
+    frame["occupied"] = frame["occupancy"].astype(float)
+    # Spots are not dated, so hours are judged against the most spots seen so far:
+    # registering a new spot does not erase the history recorded before it.
+    monitored = frame["observed_spots"].cummax().clip(upper=capacity)
+    covered = (frame["observed_spots"] >= MIN_COVERAGE * monitored) & (monitored > 0)
+    frame["rate"] = (frame["occupied"] / frame["observed_spots"]).where(covered)
     # Partial camera coverage is not an observation of the whole parking lot.
     frame.loc[(frame["observed_spots"] != capacity) | (capacity == 0), "occupancy"] = (
         float("nan")

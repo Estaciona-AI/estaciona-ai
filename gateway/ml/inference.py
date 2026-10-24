@@ -1,8 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Guilherme Pedroza
 # SPDX-License-Identifier: Apache-2.0
 
+import hashlib
+import json
 import os
 import logging
+import lightgbm as lgb
 import pandas as pd
 import numpy as np
 import torch
@@ -13,9 +16,35 @@ from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
 
 if __package__:
+    from .backtest import BASELINES, HORIZON
     from .history import physical_history
+    from .site_calendar import profile_from_env
+    from .train import (
+        FEATURES,
+        LOOKBACK,
+        MANIFEST_FILE,
+        MANIFEST_VERSION,
+        MODEL_FILE,
+        baseline_rates,
+        calendar_for,
+        has_recent_history,
+        predict_rates,
+    )
 else:
+    from backtest import BASELINES, HORIZON
     from history import physical_history
+    from site_calendar import profile_from_env
+    from train import (
+        FEATURES,
+        LOOKBACK,
+        MANIFEST_FILE,
+        MANIFEST_VERSION,
+        MODEL_FILE,
+        baseline_rates,
+        calendar_for,
+        has_recent_history,
+        predict_rates,
+    )
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "../../.env"))
@@ -76,22 +105,47 @@ def get_db_engine():
     return create_engine(db_url)
 
 
+def load_occupancy_model(models_dir):
+    """Load the LightGBM artifact only if it matches its manifest."""
+    with open(os.path.join(models_dir, MANIFEST_FILE), encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    if manifest.get("manifest_version") != MANIFEST_VERSION:
+        raise ValueError("Unsupported forecast manifest version")
+    if manifest.get("features") != FEATURES:
+        raise ValueError("Forecast artifact features do not match this code")
+    if manifest.get("serving") not in ("model",) + BASELINES:
+        raise ValueError("Forecast manifest names an unknown serving method")
+    with open(os.path.join(models_dir, MODEL_FILE), "rb") as handle:
+        model_text = handle.read()
+    if hashlib.sha256(model_text).hexdigest() != manifest.get("model_sha256"):
+        raise ValueError("Forecast model does not match its manifest")
+    return manifest, lgb.Booster(model_str=model_text.decode())
+
+
 class PredictiveEngine:
-    def __init__(self):
-        models_dir = os.path.join(os.path.dirname(__file__), "models")
+    mode = "legacy_attention"
 
-        pt_path = os.path.join(models_dir, "occupancy_transformer.pt")
-        checkpoint = torch.load(pt_path, weights_only=True)
-        self.max_val = checkpoint["max_val"]
+    def __init__(self, models_dir=None, engine=None):
+        models_dir = models_dir or os.path.join(os.path.dirname(__file__), "models")
 
-        self.transformer = TemporalAttentionForecast()
-        self.transformer.load_state_dict(checkpoint["model_state_dict"])
-        self.transformer.eval()
+        if os.path.exists(os.path.join(models_dir, MANIFEST_FILE)):
+            self.mode = "lightgbm"
+            self.manifest, self.model = load_occupancy_model(models_dir)
+        else:
+            pt_path = os.path.join(models_dir, "occupancy_transformer.pt")
+            checkpoint = torch.load(pt_path, weights_only=True)
+            self.max_val = checkpoint["max_val"]
 
-        self.engine = get_db_engine()
+            self.transformer = TemporalAttentionForecast()
+            self.transformer.load_state_dict(checkpoint["model_state_dict"])
+            self.transformer.eval()
 
-    def get_history(self, hours_back):
-        end_time = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        self.engine = engine or get_db_engine()
+
+    def get_history(self, hours_back, end_time=None):
+        end_time = end_time or datetime.now(timezone.utc).replace(
+            minute=0, second=0, microsecond=0
+        )
         start_time = end_time - timedelta(hours=hours_back)
         frame = physical_history(self.engine, start_time, end_time)
         hours = pd.date_range(start=start_time, periods=hours_back, freq="h", tz="UTC")
@@ -106,11 +160,85 @@ class PredictiveEngine:
             )
 
     def predict_trends(self):
+        if self.mode == "lightgbm":
+            return self._predict_occupancy_rate()
+        return self._predict_legacy_attention()
+
+    def _rates(self, rate, calendar, origin):
+        predicted = predict_rates(self.model, rate, calendar, [origin])[0]
+        serving = self.manifest["serving"]
+        if serving != "model":
+            # The model fills hours the baseline cannot cover after gaps.
+            baseline = baseline_rates(serving, rate, [origin])[0]
+            predicted = np.where(np.isfinite(baseline), baseline, predicted)
+        return predicted
+
+    def _predict_occupancy_rate(self):
         now = datetime.now(timezone.utc)
+        origin = now.replace(minute=0, second=0, microsecond=0)
+        capacity = self.get_capacity()
+        if capacity <= 0:
+            raise ValueError("Forecast requires registered active spots")
+
+        # Lags for a backtest origin 24 h ago, then the forecast origin itself.
+        start = origin - timedelta(hours=LOOKBACK + HORIZON)
+        index = pd.date_range(start, periods=LOOKBACK + 2 * HORIZON, freq="h", tz="UTC")
+        frame = physical_history(self.engine, start, origin)
+        rate = (
+            frame.set_index("timestamp")["rate"]
+            .reindex(index)
+            .to_numpy(dtype=np.float64)
+        )
+        backtest_origin, forecast_origin = LOOKBACK, LOOKBACK + HORIZON
+        if not has_recent_history(rate, forecast_origin):
+            raise ValueError(
+                "Insufficient observed physical history: recent coverage required"
+            )
+        calendar = calendar_for(profile_from_env(capacity), index)
+
+        t_start = time.perf_counter()
+        predicted = self._rates(rate, calendar, forecast_origin)
+        inference_time_ms = (time.perf_counter() - t_start) * 1000
+        if np.shape(predicted) != (HORIZON,) or not np.isfinite(predicted).all():
+            raise ValueError("Forecast inference returned invalid values")
+        counts = np.rint(predicted.clip(0, 1) * capacity).astype(int).tolist()
+
+        actual = rate[backtest_origin:forecast_origin] * capacity
+        if has_recent_history(rate, backtest_origin) and np.isfinite(actual).all():
+            backtest = self._rates(rate, calendar, backtest_origin) * capacity
+            evaluation = evaluate_forecast(actual, backtest, inference_time_ms)
+        else:
+            evaluation = {
+                "status": "unavailable",
+                "reason": "invalid_evaluation_window",
+                "inference_time_ms": inference_time_ms,
+            }
+        return self._payload(now, origin, counts, evaluation, capacity)
+
+    def _payload(self, now, origin, counts, evaluation, capacity):
+        return {
+            "type": "TREND_PREDICTION_V2",
+            "timestamp": now.isoformat(),
+            "stay_duration": {"status": "unavailable", "reason": "not_measured"},
+            "evaluation": evaluation,
+            "next_24h_occupancy": [
+                {
+                    "timestamp": (origin + timedelta(hours=i)).isoformat(),
+                    "occupancy": value,
+                }
+                for i, value in enumerate(counts)
+            ],
+            "max_capacity": capacity,
+        }
+
+    def _predict_legacy_attention(self):
+        now = datetime.now(timezone.utc)
+        # History ends before this hour, so the model's first step is this hour.
+        origin = now.replace(minute=0, second=0, microsecond=0)
         capacity = self.get_capacity()
 
         # Get 192 hours to evaluate the last 24h performance and predict next 24h
-        history_counts = self.get_history(192)
+        history_counts = self.get_history(192, origin)
 
         # 1. Predict next 24h using the last 168h
         if not np.isfinite(self.max_val) or self.max_val <= 0:
@@ -131,17 +259,10 @@ class PredictiveEngine:
         if np.shape(preds_norm) != (24,) or not np.isfinite(preds_norm).all():
             raise ValueError("Forecast inference returned invalid values")
         preds_real = (
-            (preds_norm * self.max_val).clip(min=0, max=capacity).astype(int).tolist()
+            np.rint((preds_norm * self.max_val).clip(min=0, max=capacity))
+            .astype(int)
+            .tolist()
         )
-
-        forecast_array = []
-        for i, val in enumerate(preds_real):
-            forecast_time = (now + timedelta(hours=i + 1)).replace(
-                minute=0, second=0, microsecond=0
-            )
-            forecast_array.append(
-                {"timestamp": forecast_time.isoformat(), "occupancy": val}
-            )
 
         # 2. Evaluate model health using the previous 168h to predict the last 24h
         eval_168 = history_counts[:168]
@@ -163,16 +284,7 @@ class PredictiveEngine:
                 actual_24, eval_preds_real, inference_time_ms
             )
 
-        payload = {
-            "type": "TREND_PREDICTION_V2",
-            "timestamp": now.isoformat(),
-            "stay_duration": {"status": "unavailable", "reason": "not_measured"},
-            "evaluation": evaluation,
-            "next_24h_occupancy": forecast_array,
-            "max_capacity": capacity,
-        }
-
-        return payload
+        return self._payload(now, origin, preds_real, evaluation, capacity)
 
 
 if __name__ == "__main__":

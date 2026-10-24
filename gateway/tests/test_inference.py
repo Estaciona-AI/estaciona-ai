@@ -54,7 +54,7 @@ def forecast_predictor(history=None):
     predictor.max_val = 44.0
     predictor.transformer = FixedForecast()
     predictor.get_capacity = lambda: 400
-    predictor.get_history = lambda _: [0] * 192 if history is None else history
+    predictor.get_history = lambda *_: [0] * 192 if history is None else history
     return predictor
 
 
@@ -317,3 +317,103 @@ def test_training_does_not_fall_back_to_an_older_run_or_fabricate_samples(kind):
     ):
         with pytest.raises(ValueError, match="193 hours"):
             train.train_forecasting_model()
+
+
+class PersistenceForecast(torch.nn.Module):
+    def forward(self, values):
+        return values[:, -1, :].repeat(1, 24)
+
+
+def frozen_clock(*instants):
+    from datetime import datetime
+
+    readings = iter(instants)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            cls.current = next(readings, cls.current)
+            return cls.current.astimezone(tz)
+
+    Clock.current = instants[0]
+    return Clock
+
+
+def hourly_history_engine(last_hour):
+    import pandas as pd
+
+    # Spot a is always occupied; spot b only in the most recent stored hour.
+    engine = create_engine("sqlite://")
+    with engine.begin() as connection:
+        connection.execute(
+            text("CREATE TABLE spots (id TEXT PRIMARY KEY,is_active BOOLEAN)")
+        )
+        connection.execute(text("INSERT INTO spots VALUES ('a',TRUE),('b',TRUE)"))
+        connection.execute(
+            text(
+                "CREATE TABLE physical_occupancy_hourly (spot_id TEXT,hour_start TEXT,status TEXT)"
+            )
+        )
+        for offset in range(200):
+            hour = (pd.Timestamp(last_hour) - pd.Timedelta(hours=offset)).isoformat()
+            connection.execute(
+                text(
+                    "INSERT INTO physical_occupancy_hourly VALUES ('a',:hour,'occupied'),('b',:hour,:b)"
+                ),
+                {"hour": hour, "b": "occupied" if offset == 0 else "free"},
+            )
+    predictor = PredictiveEngine.__new__(PredictiveEngine)
+    predictor.engine = engine
+    predictor.max_val = 2.0
+    predictor.transformer = PersistenceForecast()
+    return predictor
+
+
+def test_first_forecast_hour_follows_the_last_observed_hour():
+    from datetime import datetime, timedelta, timezone
+
+    predictor = hourly_history_engine("2026-10-24T12:00:00+00:00")
+    now = datetime(2026, 10, 24, 13, 42, 10, tzinfo=timezone.utc)
+    with patch("ml.inference.datetime", frozen_clock(now)):
+        forecast = predictor.predict_trends()["next_24h_occupancy"]
+
+    # Hour 12 is the latest complete input, so the model's first step is hour 13.
+    assert forecast[0] == {"timestamp": "2026-10-24T13:00:00+00:00", "occupancy": 2}
+    origin = datetime(2026, 10, 24, 13, tzinfo=timezone.utc)
+    assert [item["timestamp"] for item in forecast] == [
+        (origin + timedelta(hours=step)).isoformat() for step in range(24)
+    ]
+    predictor.engine.dispose()
+
+
+def test_history_and_labels_share_one_origin_across_an_hour_boundary():
+    from datetime import datetime, timezone
+
+    from ml import inference
+
+    predictor = hourly_history_engine("2026-10-24T12:00:00+00:00")
+    before = datetime(2026, 10, 24, 12, 59, 59, 999000, tzinfo=timezone.utc)
+    after = datetime(2026, 10, 24, 13, 0, 0, 1000, tzinfo=timezone.utc)
+    with (
+        patch("ml.inference.datetime", frozen_clock(before, after)),
+        patch.object(
+            inference, "physical_history", wraps=inference.physical_history
+        ) as history,
+    ):
+        forecast = predictor.predict_trends()["next_24h_occupancy"]
+
+    history_end = history.call_args.args[2]
+    assert forecast[0]["timestamp"] == history_end.isoformat()
+    predictor.engine.dispose()
+
+
+def test_forecast_rounds_to_the_nearest_spot_instead_of_truncating():
+    class HalfScale(torch.nn.Module):
+        def forward(self, values):
+            return torch.full((values.shape[0], 24), 0.5)
+
+    predictor = forecast_predictor()
+    predictor.max_val = 3.2  # 0.5 * 3.2 = 1.6 spots
+    predictor.transformer = HalfScale()
+    forecast = predictor.predict_trends()["next_24h_occupancy"]
+    assert {item["occupancy"] for item in forecast} == {2}
