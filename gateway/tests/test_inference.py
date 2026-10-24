@@ -1,46 +1,100 @@
 # SPDX-FileCopyrightText: 2026 Guilherme Pedroza
 # SPDX-License-Identifier: Apache-2.0
 
+import json
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
+import numpy as np
+import pandas as pd
 import pytest
-import torch
 from sqlalchemy import create_engine, text
 
-from ml.inference import PredictiveEngine
+from ml import history, inference, train
+from ml.backtest import HORIZON
+from ml.inference import PredictiveEngine, evaluate_forecast
+
+WINDOW = train.LOOKBACK + HORIZON  # hours before the forecast origin
+BACKTEST = slice(train.LOOKBACK, train.LOOKBACK + HORIZON)
 
 
-class FixedForecast(torch.nn.Module):
-    def forward(self, values):
-        return torch.full((values.shape[0], 24), 2.0)
+class FixedRate:
+    def __init__(self, rate):
+        self.rate = rate
+
+    def predict(self, features):
+        return np.full(len(features), self.rate)
 
 
-@pytest.mark.parametrize("spot_count", [0, 3, 35])
-def test_forecast_capacity_comes_from_registered_spots(spot_count):
-    # A real SQL table exercises capacity lookup without depending on a checkpoint.
+class LastRate:
+    """Persistence: every horizon repeats the last observed rate."""
+
+    def predict(self, features):
+        return features["last_rate"].to_numpy()
+
+
+@pytest.fixture(autouse=True)
+def generic_profile(monkeypatch):
+    monkeypatch.delenv("FORECAST_PROFILE", raising=False)
+
+
+def forecast_predictor(rates=None, capacity=400, model=None):
+    """A predictor over WINDOW hourly rates ending at the current hour."""
+    rates = np.full(WINDOW, 0.25) if rates is None else np.asarray(rates, float)
+    origin = pd.Timestamp.now(tz="UTC").floor("h")
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range(
+                origin - pd.Timedelta(hours=len(rates)), periods=len(rates), freq="h"
+            ),
+            "rate": rates,
+        }
+    )
+    predictor = PredictiveEngine.__new__(PredictiveEngine)
+    predictor.engine = None
+    predictor.manifest = {"serving": "model"}
+    predictor.model = model or FixedRate(0.5)
+    predictor.get_capacity = lambda: capacity
+    predictor.history_frame = frame
+    return predictor
+
+
+def predict(predictor):
+    with patch.object(
+        inference, "physical_history", return_value=predictor.history_frame
+    ):
+        return predictor.predict_trends()
+
+
+def spots_engine(active, retired=()):
     engine = create_engine("sqlite://")
     with engine.begin() as connection:
         connection.execute(
-            text(
-                "CREATE TABLE spots (id TEXT PRIMARY KEY, is_active BOOLEAN NOT NULL DEFAULT TRUE)"
-            )
+            text("CREATE TABLE spots (id TEXT PRIMARY KEY,is_active BOOLEAN)")
         )
-        for index in range(spot_count):
-            connection.execute(
-                text("INSERT INTO spots (id) VALUES (:id)"), {"id": str(index)}
-            )
-
         connection.execute(
-            text("INSERT INTO spots (id,is_active) VALUES ('retired',FALSE)")
+            text(
+                "CREATE TABLE physical_occupancy_hourly (spot_id TEXT,hour_start TEXT,status TEXT)"
+            )
         )
+        for spot in active:
+            connection.execute(
+                text("INSERT INTO spots VALUES (:id,TRUE)"), {"id": spot}
+            )
+        for spot in retired:
+            connection.execute(
+                text("INSERT INTO spots VALUES (:id,FALSE)"), {"id": spot}
+            )
+    return engine
 
-    predictor = PredictiveEngine.__new__(PredictiveEngine)
+
+@pytest.mark.parametrize("spot_count", [3, 35])
+def test_forecast_capacity_comes_from_registered_spots(spot_count):
+    engine = spots_engine([str(index) for index in range(spot_count)], ["retired"])
+    predictor = forecast_predictor()
     predictor.engine = engine
-    predictor.max_val = 44.0  # Training normalization is independent of site capacity.
-    predictor.transformer = FixedForecast()
-    with patch.object(predictor, "get_history", return_value=[0] * 192):
-        payload = predictor.predict_trends()
-
+    del predictor.get_capacity
+    payload = predict(predictor)
     assert payload["max_capacity"] == spot_count
     assert len(payload["next_24h_occupancy"]) == 24
     assert all(
@@ -49,17 +103,13 @@ def test_forecast_capacity_comes_from_registered_spots(spot_count):
     engine.dispose()
 
 
-def forecast_predictor(history=None):
-    predictor = PredictiveEngine.__new__(PredictiveEngine)
-    predictor.max_val = 44.0
-    predictor.transformer = FixedForecast()
-    predictor.get_capacity = lambda: 400
-    predictor.get_history = lambda *_: [0] * 192 if history is None else history
-    return predictor
+def test_forecast_refuses_a_lot_without_active_spots():
+    with pytest.raises(ValueError, match="active spots"):
+        predict(forecast_predictor(capacity=0))
 
 
 def test_forecast_marks_unmeasured_stay_duration_instead_of_fabricating_zero():
-    payload = forecast_predictor().predict_trends()
+    payload = predict(forecast_predictor())
     assert payload["type"] == "TREND_PREDICTION_V2"
     assert payload["stay_duration"] == {
         "status": "unavailable",
@@ -71,8 +121,7 @@ def test_forecast_marks_unmeasured_stay_duration_instead_of_fabricating_zero():
 
 
 def test_constant_targets_have_real_errors_but_no_fabricated_r2():
-    payload = forecast_predictor().predict_trends()
-    evaluation = payload["evaluation"]
+    evaluation = predict(forecast_predictor())["evaluation"]
     assert evaluation["status"] == "partial"
     assert evaluation["reason"] == "constant_target"
     assert "r2_score" not in evaluation
@@ -81,26 +130,35 @@ def test_constant_targets_have_real_errors_but_no_fabricated_r2():
 
 
 def test_negative_r2_is_a_valid_result_not_clamped_to_zero():
-    payload = forecast_predictor(list(range(192))).predict_trends()
-    assert payload["evaluation"]["status"] == "available"
-    assert payload["evaluation"]["r2_score"] < 0
+    rates = np.full(WINDOW, 0.25)
+    rates[BACKTEST] = np.linspace(0.0, 0.2, HORIZON)
+    evaluation = predict(forecast_predictor(rates))["evaluation"]
+    assert evaluation["status"] == "available"
+    assert evaluation["r2_score"] < 0
+
+
+def test_r2_matches_its_definition():
+    actual = np.arange(24.0)
+    predicted = actual + np.tile([1.0, -1.0], 12)
+    evaluation = evaluate_forecast(actual, predicted, 1.0)
+    expected = 1 - 24 / np.sum((actual - actual.mean()) ** 2)
+    assert evaluation["r2_score"] == pytest.approx(expected)
+    assert evaluation["mae"] == pytest.approx(1.0)
+    assert evaluation["rmse"] == pytest.approx(1.0)
 
 
 def test_evaluation_failure_is_not_reported_as_perfect_zero_error():
-    with patch(
-        "ml.inference.mean_absolute_error", side_effect=ValueError("fixture failure")
-    ):
-        payload = forecast_predictor().predict_trends()
-    evaluation = payload["evaluation"]
-    assert evaluation["status"] == "unavailable"
-    assert evaluation["reason"] == "evaluation_failed"
-    assert not {"mae", "rmse", "r2_score"} & evaluation.keys()
-    assert len(payload["next_24h_occupancy"]) == 24
+    evaluation = evaluate_forecast(["not a number"] * 24, [0] * 24, 1.0)
+    assert evaluation == {
+        "status": "unavailable",
+        "reason": "evaluation_failed",
+        "inference_time_ms": 1.0,
+    }
 
 
 def test_perfect_constant_predictions_keep_actual_zero_errors():
-    history = [88] * 192  # FixedForecast emits 2 * max_val = 88.
-    evaluation = forecast_predictor(history).predict_trends()["evaluation"]
+    rates = np.full(WINDOW, 0.5)  # FixedRate predicts 0.5 as well.
+    evaluation = predict(forecast_predictor(rates))["evaluation"]
     assert evaluation["status"] == "partial"
     assert evaluation["mae"] == 0.0
     assert evaluation["rmse"] == 0.0
@@ -115,9 +173,6 @@ def test_perfect_constant_predictions_keep_actual_zero_errors():
     ],
 )
 def test_invalid_backtest_has_no_numeric_quality_claim(actual, predicted, reason):
-    import json
-    from ml.inference import evaluate_forecast
-
     evaluation = evaluate_forecast(actual, predicted, 1.0)
     assert evaluation == {
         "status": "unavailable",
@@ -128,205 +183,54 @@ def test_invalid_backtest_has_no_numeric_quality_claim(actual, predicted, reason
 
 
 def test_non_finite_future_prediction_is_not_queued_as_a_forecast():
-    predictor = forecast_predictor()
-
-    class InvalidForecast(torch.nn.Module):
-        def forward(self, values):
-            return torch.full((values.shape[0], 24), float("nan"))
-
-    predictor.transformer = InvalidForecast()
+    predictor = forecast_predictor(model=FixedRate(float("nan")))
     with pytest.raises(ValueError, match="invalid values"):
-        predictor.predict_trends()
+        predict(predictor)
 
 
 def test_history_reads_physical_samples_without_personal_history():
-    import pandas as pd
-
-    engine = create_engine("sqlite://")
-    now = pd.Timestamp.now(tz="UTC").floor("h")
+    engine = spots_engine(["a", "b"], ["retired"])
+    hour = pd.Timestamp.now(tz="UTC").floor("h") - pd.Timedelta(hours=1)
     with engine.begin() as connection:
-        connection.execute(
-            text("CREATE TABLE spots (id TEXT PRIMARY KEY,is_active BOOLEAN)")
-        )
-        connection.execute(
-            text("INSERT INTO spots VALUES ('a',TRUE),('b',TRUE),('retired',FALSE)")
-        )
-        connection.execute(
-            text(
-                "CREATE TABLE physical_occupancy_hourly (spot_id TEXT,hour_start TEXT,status TEXT)"
-            )
-        )
         for spot, status in [("a", "occupied"), ("b", "free"), ("retired", "occupied")]:
             connection.execute(
                 text(
                     "INSERT INTO physical_occupancy_hourly VALUES (:spot,:hour,:status)"
                 ),
-                {
-                    "spot": spot,
-                    "hour": (now - pd.Timedelta(hours=1)).isoformat(),
-                    "status": status,
-                },
+                {"spot": spot, "hour": hour.isoformat(), "status": status},
             )
-    predictor = PredictiveEngine.__new__(PredictiveEngine)
-    predictor.engine = engine
-    assert predictor.get_history(1) == [1]
+    frame = history.physical_history(engine)
+    assert frame["rate"].tolist() == [0.5]
     engine.dispose()
 
 
-@pytest.mark.parametrize("history", [[], [0] * 167, [float("nan")] * 192])
-def test_forecast_refuses_missing_recent_history(history):
+@pytest.mark.parametrize(
+    "rates", [[], [0.25] * 24, [float("nan")] * WINDOW], ids=["empty", "short", "nan"]
+)
+def test_forecast_refuses_missing_recent_history(rates):
     with pytest.raises(ValueError, match="history"):
-        forecast_predictor(history).predict_trends()
+        predict(forecast_predictor(rates))
+
+
+def test_empty_physical_history_is_unknown_instead_of_zero():
+    engine = spots_engine(["a"])
+    predictor = forecast_predictor()
+    predictor.engine = engine
+    with pytest.raises(ValueError, match="history"):
+        predictor.predict_trends()
+    engine.dispose()
 
 
 def test_forecast_can_predict_without_claiming_an_unavailable_backtest():
-    payload = forecast_predictor([float("nan")] * 24 + [0] * 168).predict_trends()
+    rates = np.full(WINDOW, 0.25)
+    rates[train.LOOKBACK] = np.nan  # One unobserved hour in the backtest window.
+    payload = predict(forecast_predictor(rates))
     assert len(payload["next_24h_occupancy"]) == 24
     assert payload["evaluation"]["status"] == "unavailable"
     assert payload["evaluation"]["reason"] == "invalid_evaluation_window"
 
 
-def test_empty_physical_history_is_unknown_instead_of_zero():
-    import numpy as np
-
-    engine = create_engine("sqlite://")
-    with engine.begin() as connection:
-        connection.execute(
-            text("CREATE TABLE spots (id TEXT PRIMARY KEY,is_active BOOLEAN)")
-        )
-        connection.execute(text("INSERT INTO spots VALUES ('a',TRUE)"))
-        connection.execute(
-            text(
-                "CREATE TABLE physical_occupancy_hourly (spot_id TEXT,hour_start TEXT,status TEXT)"
-            )
-        )
-    predictor = PredictiveEngine.__new__(PredictiveEngine)
-    predictor.engine = engine
-    assert np.isnan(predictor.get_history(24)).all()
-    engine.dispose()
-
-
-@pytest.mark.parametrize("observed_spots", [1, 2])
-def test_partial_coverage_is_unknown_but_observed_empty_is_zero(observed_spots):
-    import numpy as np
-    import pandas as pd
-
-    engine = create_engine("sqlite://")
-    hour = (pd.Timestamp.now(tz="UTC").floor("h") - pd.Timedelta(hours=1)).isoformat()
-    with engine.begin() as connection:
-        connection.execute(
-            text("CREATE TABLE spots (id TEXT PRIMARY KEY,is_active BOOLEAN)")
-        )
-        connection.execute(text("INSERT INTO spots VALUES ('0',TRUE),('1',TRUE)"))
-        connection.execute(
-            text(
-                "CREATE TABLE physical_occupancy_hourly (spot_id TEXT,hour_start TEXT,status TEXT)"
-            )
-        )
-        for index in range(observed_spots):
-            connection.execute(
-                text("INSERT INTO physical_occupancy_hourly VALUES (:id,:hour,'free')"),
-                {"id": str(index), "hour": hour},
-            )
-    predictor = PredictiveEngine.__new__(PredictiveEngine)
-    predictor.engine = engine
-    values = predictor.get_history(2)
-    assert np.isnan(values[0])
-    if observed_spots == 2:
-        assert values[1] == 0
-    else:
-        assert np.isnan(values[1])
-    engine.dispose()
-
-
-@pytest.mark.parametrize("kind", ["missing", "gap", "short"])
-def test_training_rejects_unobserved_or_discontinuous_history(kind):
-    import pandas as pd
-    from ml.train import create_sequences
-
-    frame = pd.DataFrame(
-        {
-            "timestamp": pd.date_range("2026-01-01", periods=193, freq="h", tz="UTC"),
-            "occupancy": [0.0] * 193,
-        }
-    )
-    if kind == "missing":
-        frame.loc[50, "occupancy"] = float("nan")
-    elif kind == "gap":
-        frame.loc[100:, "timestamp"] += pd.Timedelta(hours=1)
-    else:
-        frame = frame.iloc[:192]
-    with pytest.raises(ValueError, match="history"):
-        create_sequences(frame)
-
-
-@pytest.mark.parametrize("bad_hour", ["gap", "partial"])
-def test_training_recovers_after_old_incomplete_history(bad_hour):
-    import pandas as pd
-    from ml import train
-
-    frame = pd.DataFrame(
-        {
-            "timestamp": pd.date_range("2026-01-01", periods=500, freq="h", tz="UTC"),
-            "occupancy": [0.0] * 500,
-        }
-    )
-    if bad_hour == "gap":
-        frame = frame.drop(index=40)
-    else:
-        frame.loc[40, "occupancy"] = float("nan")
-    frame = frame.iloc[::-1]  # The consumer must order samples before selecting.
-    original = train.create_sequences
-
-    def stop_before_training(selected, seq_len, pred_len):
-        original(selected, seq_len, pred_len)
-        assert len(selected) == 459
-        assert selected["timestamp"].iloc[0] == pd.Timestamp("2026-01-02T17:00:00Z")
-        assert selected["occupancy"].eq(0).all()
-        raise RuntimeError("valid window reached training")
-
-    with (
-        patch.object(train, "get_db_engine", return_value=None),
-        patch.object(train, "physical_history", return_value=frame),
-        patch.object(train, "create_sequences", side_effect=stop_before_training),
-    ):
-        with pytest.raises(RuntimeError, match="valid window reached training"):
-            train.train_forecasting_model()
-
-
-@pytest.mark.parametrize("kind", ["empty", "partial", "short_latest"])
-def test_training_does_not_fall_back_to_an_older_run_or_fabricate_samples(kind):
-    import pandas as pd
-    from ml import train
-
-    frame = pd.DataFrame(
-        {
-            "timestamp": pd.date_range("2026-01-01", periods=500, freq="h", tz="UTC"),
-            "occupancy": [0.0] * 500,
-        }
-    )
-    if kind == "empty":
-        frame = frame.iloc[:0]
-    elif kind == "partial":
-        frame["occupancy"] = float("nan")
-    else:
-        frame = frame.drop(index=400)  # 99 latest hours; older run has 400.
-    with (
-        patch.object(train, "get_db_engine", return_value=None),
-        patch.object(train, "physical_history", return_value=frame),
-    ):
-        with pytest.raises(ValueError, match="193 hours"):
-            train.train_forecasting_model()
-
-
-class PersistenceForecast(torch.nn.Module):
-    def forward(self, values):
-        return values[:, -1, :].repeat(1, 24)
-
-
 def frozen_clock(*instants):
-    from datetime import datetime
-
     readings = iter(instants)
 
     class Clock(datetime):
@@ -340,20 +244,9 @@ def frozen_clock(*instants):
 
 
 def hourly_history_engine(last_hour):
-    import pandas as pd
-
     # Spot a is always occupied; spot b only in the most recent stored hour.
-    engine = create_engine("sqlite://")
+    engine = spots_engine(["a", "b"])
     with engine.begin() as connection:
-        connection.execute(
-            text("CREATE TABLE spots (id TEXT PRIMARY KEY,is_active BOOLEAN)")
-        )
-        connection.execute(text("INSERT INTO spots VALUES ('a',TRUE),('b',TRUE)"))
-        connection.execute(
-            text(
-                "CREATE TABLE physical_occupancy_hourly (spot_id TEXT,hour_start TEXT,status TEXT)"
-            )
-        )
         for offset in range(200):
             hour = (pd.Timestamp(last_hour) - pd.Timedelta(hours=offset)).isoformat()
             connection.execute(
@@ -364,14 +257,12 @@ def hourly_history_engine(last_hour):
             )
     predictor = PredictiveEngine.__new__(PredictiveEngine)
     predictor.engine = engine
-    predictor.max_val = 2.0
-    predictor.transformer = PersistenceForecast()
+    predictor.manifest = {"serving": "model"}
+    predictor.model = LastRate()
     return predictor
 
 
 def test_first_forecast_hour_follows_the_last_observed_hour():
-    from datetime import datetime, timedelta, timezone
-
     predictor = hourly_history_engine("2026-10-24T12:00:00+00:00")
     now = datetime(2026, 10, 24, 13, 42, 10, tzinfo=timezone.utc)
     with patch("ml.inference.datetime", frozen_clock(now)):
@@ -387,10 +278,6 @@ def test_first_forecast_hour_follows_the_last_observed_hour():
 
 
 def test_history_and_labels_share_one_origin_across_an_hour_boundary():
-    from datetime import datetime, timezone
-
-    from ml import inference
-
     predictor = hourly_history_engine("2026-10-24T12:00:00+00:00")
     before = datetime(2026, 10, 24, 12, 59, 59, 999000, tzinfo=timezone.utc)
     after = datetime(2026, 10, 24, 13, 0, 0, 1000, tzinfo=timezone.utc)
@@ -398,22 +285,16 @@ def test_history_and_labels_share_one_origin_across_an_hour_boundary():
         patch("ml.inference.datetime", frozen_clock(before, after)),
         patch.object(
             inference, "physical_history", wraps=inference.physical_history
-        ) as history,
+        ) as physical_history,
     ):
         forecast = predictor.predict_trends()["next_24h_occupancy"]
 
-    history_end = history.call_args.args[2]
+    history_end = physical_history.call_args.args[2]
     assert forecast[0]["timestamp"] == history_end.isoformat()
     predictor.engine.dispose()
 
 
 def test_forecast_rounds_to_the_nearest_spot_instead_of_truncating():
-    class HalfScale(torch.nn.Module):
-        def forward(self, values):
-            return torch.full((values.shape[0], 24), 0.5)
-
-    predictor = forecast_predictor()
-    predictor.max_val = 3.2  # 0.5 * 3.2 = 1.6 spots
-    predictor.transformer = HalfScale()
-    forecast = predictor.predict_trends()["next_24h_occupancy"]
+    predictor = forecast_predictor(capacity=4, model=FixedRate(0.4))  # 1.6 spots
+    forecast = predict(predictor)["next_24h_occupancy"]
     assert {item["occupancy"] for item in forecast} == {2}

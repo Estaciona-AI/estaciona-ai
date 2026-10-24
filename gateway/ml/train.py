@@ -3,7 +3,6 @@
 
 #
 
-import argparse
 import hashlib
 import json
 import os
@@ -13,10 +12,6 @@ import pandas as pd
 import numpy as np
 import lightgbm as lgb
 import pickle
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
 
@@ -138,126 +133,6 @@ def train_duration_model(df):
 
     print(f"Pesos salvos em: {model_path}")
     return model
-
-
-class TemporalAttentionForecast(nn.Module):
-    def __init__(self, seq_len=168, pred_len=24, d_model=32):
-        super().__init__()
-        self.seq_len = seq_len
-        self.pred_len = pred_len
-
-        self.feature_proj = nn.Linear(1, d_model)
-        self.attention = nn.MultiheadAttention(
-            embed_dim=d_model, num_heads=4, batch_first=True
-        )
-
-        self.fc = nn.Sequential(
-            nn.Linear(d_model * seq_len, 128), nn.ReLU(), nn.Linear(128, pred_len)
-        )
-
-    def forward(self, x):
-        x = self.feature_proj(x)
-        attn_out, _ = self.attention(x, x, x)
-        flat = attn_out.reshape(attn_out.size(0), -1)
-        return self.fc(flat)
-
-
-def prepare_timeseries_data(df):
-    print("[4/6] Agrupando histórico em série temporal (hora a hora)...")
-    start_time = df["occupied_at"].min().floor("h")
-    end_time = df["released_at"].max().ceil("h")
-
-    hours = pd.date_range(start=start_time, end=end_time, freq="h")
-    ts_df = pd.DataFrame({"timestamp": hours})
-
-    occupancy_counts = []
-    for h in hours:
-        count = ((df["occupied_at"] <= h) & (df["released_at"] > h)).sum()
-        occupancy_counts.append(count)
-
-    ts_df["occupancy"] = occupancy_counts
-    return ts_df
-
-
-def create_sequences(ts_df, seq_len=168, pred_len=24):
-    data = ts_df["occupancy"].values.astype(np.float32)
-    if len(data) < seq_len + pred_len + 1 or not np.isfinite(data).all():
-        raise ValueError(
-            "Training requires sufficient finite observed physical history"
-        )
-    if not ts_df["timestamp"].diff().dropna().eq(pd.Timedelta(hours=1)).all():
-        raise ValueError("Training physical history contains missing hours")
-    max_val = data.max() if data.max() > 0 else 1.0
-    data_norm = data / max_val
-
-    X, y = [], []
-    for i in range(len(data_norm) - seq_len - pred_len):
-        X.append(data_norm[i : i + seq_len])
-        y.append(data_norm[i + seq_len : i + seq_len + pred_len])
-
-    return torch.tensor(np.array(X)).unsqueeze(-1), torch.tensor(np.array(y)), max_val
-
-
-def train_forecasting_model():
-    ts_df = physical_history(get_db_engine())
-    if not ts_df.empty:
-        # Unknown samples split the timeline; never fill them or join runs.
-        ts_df = ts_df.loc[np.isfinite(ts_df["occupancy"])].sort_values("timestamp")
-    if not ts_df.empty:
-        runs = ts_df["timestamp"].diff().ne(pd.Timedelta(hours=1)).cumsum()
-        ts_df = ts_df.loc[runs == runs.iloc[-1]].reset_index(drop=True)
-    if len(ts_df) < 193:
-        raise ValueError(
-            "At least 193 hours of physical occupancy are required for training"
-        )
-
-    print("[5/6] Preparando tensores para o PyTorch tranformer...")
-    seq_len = 168
-    pred_len = 24
-
-    X, y, max_val = create_sequences(ts_df, seq_len, pred_len)
-
-    dataset = TensorDataset(X, y)
-    loader = DataLoader(dataset, batch_size=32, shuffle=True)
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(
-        f"[6/6] Treinando Rede Neural de Atenção (Aceleração: {device.type.upper()})..."
-    )
-
-    model = TemporalAttentionForecast(seq_len, pred_len).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
-    criterion = nn.MSELoss()
-
-    model.train()
-    epochs = 50
-
-    for epoch in range(epochs):
-        total_loss = 0
-        for batch_X, batch_y in loader:
-            batch_X, batch_y = batch_X.to(device), batch_y.to(device)
-            optimizer.zero_grad()
-            preds = model(batch_X)
-            loss = criterion(preds, batch_y)
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item()
-
-        if (epoch + 1) % 5 == 0:
-            print(
-                f"    Epoch {epoch + 1}/{epochs} | Loss: {total_loss / len(loader):.4f}"
-            )
-
-    print("Treinamento finalizado.")
-
-    models_dir = os.path.join(os.path.dirname(__file__), "models")
-    os.makedirs(models_dir, exist_ok=True)
-
-    torch.save(
-        {"model_state_dict": model.state_dict(), "max_val": float(max_val)},
-        os.path.join(models_dir, "occupancy_transformer.pt"),
-    )
-    print("Pesos do transformer salvos com sucesso.")
 
 
 # Occupancy model: LightGBM on occupancy rate, one row per forecast horizon.
@@ -495,16 +370,7 @@ if __name__ == "__main__":
     print("Licensed under Apache-2.0; provided AS IS, without warranties.")
     print("Redistribution is permitted under Apache License 2.0;")
     print("see LICENSE for conditions and attribution requirements.\n")
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--legacy-attention",
-        action="store_true",
-        help="also train the legacy attention checkpoint",
-    )
-    args = parser.parse_args()
     df = load_and_preprocess_data()
     if not df.empty:
         train_duration_model(df)
     train_occupancy_model()
-    if args.legacy_attention:
-        train_forecasting_model()
