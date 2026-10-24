@@ -342,7 +342,6 @@ def test_main_startup(monkeypatch, window):
             patch("gateway.init_db") as mock_init_db,
             patch("gateway.init_metrics_db") as mock_init_metrics,
             patch("gateway.sync_loop", new_callable=AsyncMock) as mock_sync_loop,
-            patch("gateway.prediction_loop", new_callable=AsyncMock),
         ):
             mock_serve.return_value.__aenter__ = AsyncMock()
             mock_serve.return_value.__aexit__ = AsyncMock()

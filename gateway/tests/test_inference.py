@@ -298,3 +298,10 @@ def test_forecast_rounds_to_the_nearest_spot_instead_of_truncating():
     predictor = forecast_predictor(capacity=4, model=FixedRate(0.4))  # 1.6 spots
     forecast = predict(predictor)["next_24h_occupancy"]
     assert {item["occupancy"] for item in forecast} == {2}
+
+
+def test_forecast_never_falls_back_to_the_server_owner_credential(monkeypatch):
+    monkeypatch.delenv("ML_DATABASE_URL", raising=False)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://owner@db/estaciona")
+    with pytest.raises(ValueError, match="ML_DATABASE_URL"):
+        train.get_db_engine()
