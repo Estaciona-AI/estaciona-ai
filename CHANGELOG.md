@@ -23,6 +23,14 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
   detection noise and camera outages. Simulated data is never stored or
   reported as an observation.
 - Offline forecast acceptance check: `python -m ml.backtest` in `gateway/`.
+- Forecast worker, `python -m ml.worker` in `gateway/`, meant to run next to
+  the server. It forecasts each hour at five past, retrains daily at 03:30
+  site time, and trains on start when no valid artifact exists. It publishes
+  `TREND_PREDICTION_V2` through `/ws/edge` with its own edge credential
+  (`FORECAST_EDGE_API_KEY`, granted only `trend_prediction`) and the same
+  durable outbox as the gateway.
+- `infra/forecast-reader.sql` creates the worker's read-only database role,
+  limited to `spots` and `physical_occupancy_hourly`.
 
 ### Changed
 
@@ -33,9 +41,19 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
   The model is saved in LightGBM's text format with a manifest (hash, features,
   data window, real hours, source, backtest), and inference refuses mismatched
   artifacts. The payload stays `TREND_PREDICTION_V2`.
-- Run `python ml/train.py` in `gateway/` to produce the new artifact. Without
-  it, inference falls back to the legacy attention checkpoint, which
-  `python ml/train.py --legacy-attention` still trains.
+- The gateway no longer runs the forecast and no longer needs
+  `ML_DATABASE_URL`. `ML_DATABASE_URL` is now required by the worker and must
+  name the read-only role; it no longer falls back to `DATABASE_URL`.
+
+### Removed
+
+- The attention forecast model, its checkpoint and `torch`. Without a LightGBM
+  artifact, the worker trains the simulated prior instead.
+- The stay-duration model, which read users' disability status and age, and
+  `scikit-learn`. The forecast already reported stay duration as unavailable.
+- `gateway/ml/generate_data.py`, which replaced `user_occupancy_history` with
+  synthetic users without any environment check. The simulator covers demos and
+  tests without writing to the database.
 
 ### Fixed
 
@@ -48,6 +66,10 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
 
 ### Security
 
+- The edge gateway no longer holds a database credential for the forecast. The
+  worker refuses to start if its role can insert, update, delete or truncate
+  any table. Removing `torch` also drops its `filelock`, `fsspec` and
+  `setuptools` advisories from the gateway lock.
 - Update the locked Rust TLS, runtime and cryptography dependencies, including
   `rustls`, `rustls-webpki`, `webpki-roots`, `tokio` and `ctutils`, and replace
   yanked `chacha20` and `spin` releases.
