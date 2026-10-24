@@ -170,6 +170,11 @@ requires a planned reconciliation, not an automatic `down` migration.
   [#126], [#127]).
 - Arrivals with no valid route now produce `NAVIGATION_UNAVAILABLE` instead of
   a fabricated route ([#97]).
+- The server, gateway, vision and model export packages are versioned `0.9.0`,
+  matching the release tag. The contract check package keeps its own version.
+- `.env.example` lists every setting the server requires, including
+  `WS_ALLOWED_ORIGINS`, together with the optional `LPR_ENABLED` and
+  `EDGE_MAX_IN_FLIGHT`.
 
 ### Performance
 
@@ -257,9 +262,9 @@ requires a planned reconciliation, not an automatic `down` migration.
 - **Client applications live outside this repository.** They must adopt
   WebSocket tickets, the `Origin` allowlist, `TREND_PREDICTION_V2` and
   `NAVIGATION_UNAVAILABLE`.
-- **Operator documentation is incomplete.** The READMEs are being rewritten,
-  and `.env.example` does not yet list `WS_ALLOWED_ORIGINS`, `LPR_ENABLED` or
-  `EDGE_MAX_IN_FLIGHT`.
+- **Operator documentation is incomplete.** The READMEs are being rewritten.
+  Until then, `.env.example` and this changelog describe the required
+  settings.
 - **One gateway test is timing-sensitive.**
   `test_timeout_retry_preserves_uuid_and_payload` occasionally fails in CI and
   passes on retry.
