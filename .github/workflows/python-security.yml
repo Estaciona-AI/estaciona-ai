@@ -1,0 +1,57 @@
+name: Python dependency security
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+  schedule:
+    - cron: '43 8 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: python-security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python-advisories:
+    name: Python advisories (${{ matrix.project }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [gateway, vision, vision/export, shared]
+    defaults:
+      run:
+        working-directory: ${{ matrix.project }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+      - name: Select the project's Python
+        run: uv python install
+      - name: Export frozen dependencies without installing the project
+        run: >-
+          uv export --frozen --all-groups --all-extras --no-emit-project
+          --no-header --no-annotate --output-file "$RUNNER_TEMP/requirements.txt"
+      - name: Audit every pinned dependency without resolving or installing it
+        run: >-
+          uv tool run --python "$(uv python find)" --from pip-audit==2.10.1 pip-audit
+          --require-hashes --no-deps --disable-pip --strict --progress-spinner off
+          --requirement "$RUNNER_TEMP/requirements.txt"
+          --format json --output "$RUNNER_TEMP/audit.json"
+      - name: Upload audit evidence even when vulnerabilities are found
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: python-audit-${{ strategy.job-index }}
+          path: |
+            ${{ runner.temp }}/requirements.txt
+            ${{ runner.temp }}/audit.json
+          if-no-files-found: warn
+          retention-days: 14
