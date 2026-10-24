@@ -12,6 +12,40 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
 
 ## [Unreleased]
 
+### Added
+
+- Forecast site profile (`FORECAST_PROFILE`, optional JSON) with the local
+  timezone, expected cars per shift, academic periods and local holidays.
+  Brazilian national holidays, including the Easter-based ones, are computed
+  for any year.
+- Campus occupancy simulator used only as a training prior. It samples
+  plausible campuses around the profile, censors demand at capacity and adds
+  detection noise and camera outages. Simulated data is never stored or
+  reported as an observation.
+- Offline forecast acceptance check: `python -m ml.backtest` in `gateway/`.
+
+### Changed
+
+- The forecast predicts the occupancy rate with a calendar-aware LightGBM
+  model instead of the attention model. Training pools simulated campuses with
+  the real history, weighting real hours more. With four weeks of real
+  history, a backtest decides whether the model or a naive baseline is served.
+  The model is saved in LightGBM's text format with a manifest (hash, features,
+  data window, real hours, source, backtest), and inference refuses mismatched
+  artifacts. The payload stays `TREND_PREDICTION_V2`.
+- Run `python ml/train.py` in `gateway/` to produce the new artifact. Without
+  it, inference falls back to the legacy attention checkpoint, which
+  `python ml/train.py --legacy-attention` still trains.
+
+### Fixed
+
+- Forecast timestamps were one hour late: the first point is now the current
+  hour, the first one not yet observed. Predicted counts are rounded instead of
+  truncated.
+- One silent spot no longer discards a whole hour of history, and registering a
+  new spot no longer discards earlier hours. An hour counts when at least 90% of
+  the spots monitored so far reported.
+
 ### Security
 
 - Update the locked Rust TLS, runtime and cryptography dependencies, including
