@@ -90,8 +90,10 @@ class PredictiveEngine:
 
         self.engine = get_db_engine()
 
-    def get_history(self, hours_back):
-        end_time = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    def get_history(self, hours_back, end_time=None):
+        end_time = end_time or datetime.now(timezone.utc).replace(
+            minute=0, second=0, microsecond=0
+        )
         start_time = end_time - timedelta(hours=hours_back)
         frame = physical_history(self.engine, start_time, end_time)
         hours = pd.date_range(start=start_time, periods=hours_back, freq="h", tz="UTC")
@@ -107,10 +109,12 @@ class PredictiveEngine:
 
     def predict_trends(self):
         now = datetime.now(timezone.utc)
+        # History ends before this hour, so the model's first step is this hour.
+        origin = now.replace(minute=0, second=0, microsecond=0)
         capacity = self.get_capacity()
 
         # Get 192 hours to evaluate the last 24h performance and predict next 24h
-        history_counts = self.get_history(192)
+        history_counts = self.get_history(192, origin)
 
         # 1. Predict next 24h using the last 168h
         if not np.isfinite(self.max_val) or self.max_val <= 0:
@@ -131,14 +135,14 @@ class PredictiveEngine:
         if np.shape(preds_norm) != (24,) or not np.isfinite(preds_norm).all():
             raise ValueError("Forecast inference returned invalid values")
         preds_real = (
-            (preds_norm * self.max_val).clip(min=0, max=capacity).astype(int).tolist()
+            np.rint((preds_norm * self.max_val).clip(min=0, max=capacity))
+            .astype(int)
+            .tolist()
         )
 
         forecast_array = []
         for i, val in enumerate(preds_real):
-            forecast_time = (now + timedelta(hours=i + 1)).replace(
-                minute=0, second=0, microsecond=0
-            )
+            forecast_time = origin + timedelta(hours=i)
             forecast_array.append(
                 {"timestamp": forecast_time.isoformat(), "occupancy": val}
             )
