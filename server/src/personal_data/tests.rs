@@ -156,11 +156,15 @@ fn invalid_keyrings_are_refused_without_echoing_their_contents() {
 }
 
 #[test]
-fn keyring_files_are_read_with_a_size_limit() {
+fn keyring_files_must_be_private_and_within_the_size_limit() {
     let directory = std::env::temp_dir().join(format!("personal-data-{}", Uuid::new_v4()));
     std::fs::create_dir(&directory).unwrap();
     let path = directory.join("keys");
     std::fs::write(&path, format!("1:{}\n", key(3))).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(Keyring::load(&path).err(), Some(KeyringError::Unreadable));
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     assert!(Keyring::load(&path).is_ok());
     std::fs::write(&path, "#".repeat(16 * 1024 + 1)).unwrap();
     assert_eq!(Keyring::load(&path).err(), Some(KeyringError::Unreadable));

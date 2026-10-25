@@ -131,14 +131,17 @@ async fn run_database(manifest: PathBuf, operation: Operation) -> i32 {
             return 2;
         }
     };
-    let Ok(url) = std::env::var("DATABASE_URL") else {
-        eprintln!("DATABASE_URL is required");
-        return 1;
+    let database = match crate::runtime_config::database_from_env() {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("{error}");
+            return 1;
+        }
     };
     let pool = match sqlx::postgres::PgPoolOptions::new()
         .max_connections(2)
         .acquire_timeout(Duration::from_secs(5))
-        .connect(&url)
+        .connect_with(database)
         .await
     {
         Ok(pool) => pool,

@@ -2,8 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{lpr::LprMode, ws_origin::WsOriginPolicy};
-use sqlx::postgres::PgConnectOptions;
-use std::{ffi::OsString, fmt, path::PathBuf, str::FromStr};
+use sqlx::postgres::{PgConnectOptions, PgSslMode};
+use std::{ffi::OsString, fmt, net::IpAddr, path::PathBuf, str::FromStr};
+
+/// Shorter signing keys and peppers are refused at startup.
+const MIN_SECRET_BYTES: usize = 32;
+const MAX_SECRET_FILE_BYTES: u64 = 4096;
 
 // Never derive Debug/Serialize: these settings contain credentials.
 pub(crate) struct RuntimeConfig {
@@ -25,30 +29,102 @@ impl fmt::Display for ConfigError {
 }
 impl std::error::Error for ConfigError {}
 
+fn required(
+    get: &mut impl FnMut(&str) -> Option<OsString>,
+    key: &'static str,
+) -> Result<String, ConfigError> {
+    let text = get(key)
+        .ok_or(ConfigError(key))?
+        .into_string()
+        .map_err(|_| ConfigError(key))?;
+    if text.is_empty() {
+        return Err(ConfigError(key));
+    }
+    Ok(text)
+}
+
+/// A secret comes from `KEY` or from the private file named by `KEY_FILE`, never both.
+fn secret(
+    get: &mut impl FnMut(&str) -> Option<OsString>,
+    key: &'static str,
+    file_key: &'static str,
+) -> Result<String, ConfigError> {
+    let Some(path) = get(file_key) else {
+        return required(get, key);
+    };
+    if get(key).is_some() {
+        return Err(ConfigError(file_key));
+    }
+    let text = crate::secret_file::read(std::path::Path::new(&path), MAX_SECRET_FILE_BYTES)
+        .map_err(|_| ConfigError(file_key))?;
+    if text.is_empty() {
+        return Err(ConfigError(file_key));
+    }
+    Ok(text.to_string())
+}
+
+fn signing_secret(
+    get: &mut impl FnMut(&str) -> Option<OsString>,
+    key: &'static str,
+    file_key: &'static str,
+    too_short: &'static str,
+) -> Result<String, ConfigError> {
+    let value = secret(get, key, file_key)?;
+    if value.len() < MIN_SECRET_BYTES {
+        return Err(ConfigError(too_short));
+    }
+    Ok(value)
+}
+
+/// Plain or opportunistic TLS (`prefer`, `allow`) is accepted only for a local
+/// database. A remote one needs `verify-full` (or `verify-ca`/`require`), or an
+/// explicit `disable` for a private container network.
+fn database(
+    get: &mut impl FnMut(&str) -> Option<OsString>,
+) -> Result<PgConnectOptions, ConfigError> {
+    let url = secret(get, "DATABASE_URL", "DATABASE_URL_FILE")?;
+    let options = PgConnectOptions::from_str(&url).map_err(|_| ConfigError("DATABASE_URL"))?;
+    let host = options
+        .get_host()
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    let local = options.get_socket().is_some()
+        || host.starts_with('/')
+        || host == "localhost"
+        || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback());
+    if !local && matches!(options.get_ssl_mode(), PgSslMode::Prefer | PgSslMode::Allow) {
+        return Err(ConfigError(
+            "DATABASE_URL (a remote database needs sslmode=verify-full, or sslmode=disable on a private container network)",
+        ));
+    }
+    Ok(options)
+}
+
+/// Administrative commands need only the database.
+pub(crate) fn database_from_env() -> Result<PgConnectOptions, ConfigError> {
+    database(&mut |key| std::env::var_os(key))
+}
+
 impl RuntimeConfig {
     pub fn from_env() -> Result<Self, ConfigError> {
         Self::parse(|key| std::env::var_os(key))
     }
 
     fn parse(mut value: impl FnMut(&str) -> Option<OsString>) -> Result<Self, ConfigError> {
-        fn required(
-            get: &mut impl FnMut(&str) -> Option<OsString>,
-            key: &'static str,
-        ) -> Result<String, ConfigError> {
-            let text = get(key)
-                .ok_or(ConfigError(key))?
-                .into_string()
-                .map_err(|_| ConfigError(key))?;
-            if text.is_empty() {
-                return Err(ConfigError(key));
-            }
-            Ok(text)
-        }
         let site_data_dir = required(&mut value, "SITE_DATA_DIR")?.into();
-        let url = required(&mut value, "DATABASE_URL")?;
-        let database = PgConnectOptions::from_str(&url).map_err(|_| ConfigError("DATABASE_URL"))?;
-        let jwt_secret = required(&mut value, "JWT_SECRET")?;
-        let plate_pepper = required(&mut value, "PLATE_SECRET_PEPPER")?;
+        let database = database(&mut value)?;
+        let jwt_secret = signing_secret(
+            &mut value,
+            "JWT_SECRET",
+            "JWT_SECRET_FILE",
+            "JWT_SECRET (at least 32 bytes)",
+        )?;
+        let plate_pepper = signing_secret(
+            &mut value,
+            "PLATE_SECRET_PEPPER",
+            "PLATE_SECRET_PEPPER_FILE",
+            "PLATE_SECRET_PEPPER (at least 32 bytes)",
+        )?;
         let personal_data_keys_file = required(&mut value, "PERSONAL_DATA_KEYS_FILE")?.into();
         let origins = required(&mut value, "WS_ALLOWED_ORIGINS")?;
         let ws_origins =
@@ -82,8 +158,11 @@ mod tests {
                 "DATABASE_URL",
                 "postgres://synthetic:password-not-for-logs@127.0.0.1/test",
             ),
-            ("JWT_SECRET", "jwt-not-for-logs"),
-            ("PLATE_SECRET_PEPPER", "pepper-not-for-logs"),
+            ("JWT_SECRET", "jwt-not-for-logs-0123456789abcdef"),
+            (
+                "PLATE_SECRET_PEPPER",
+                "pepper-not-for-logs-0123456789abcdef",
+            ),
             ("PERSONAL_DATA_KEYS_FILE", "/synthetic/personal-data.keys"),
             ("WS_ALLOWED_ORIGINS", "http://localhost"),
         ]
@@ -95,9 +174,9 @@ mod tests {
     #[test]
     fn parses_current_settings_without_changing_secrets_and_defaults_lpr_off() {
         let mut data = values();
-        data.insert("JWT_SECRET", "  significant secret spaces  ".into());
+        data.insert("JWT_SECRET", "  significant secret spaces kept  ".into());
         let parsed = RuntimeConfig::parse(|key| data.get(key).cloned()).unwrap();
-        assert_eq!(parsed.jwt_secret, "  significant secret spaces  ");
+        assert_eq!(parsed.jwt_secret, "  significant secret spaces kept  ");
         assert_eq!(
             parsed.site_data_dir,
             std::path::PathBuf::from("/synthetic/deployment")
@@ -168,6 +247,89 @@ mod tests {
                 .err()
                 .unwrap();
             assert!(!format!("{error:?} {error}").contains("do-not-echo"));
+        }
+    }
+
+    fn private_file(contents: &str, mode: u32) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let directory =
+            std::env::temp_dir().join(format!("runtime-config-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("secret");
+        std::fs::write(&path, contents).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        path
+    }
+
+    #[test]
+    fn signing_secrets_shorter_than_32_bytes_are_refused() {
+        for key in ["JWT_SECRET", "PLATE_SECRET_PEPPER"] {
+            let mut data = values();
+            data.insert(key, "s".repeat(31).into());
+            let error = RuntimeConfig::parse(|key| data.get(key).cloned())
+                .err()
+                .unwrap();
+            assert!(error.to_string().contains(key));
+            assert!(error.to_string().contains("32 bytes"));
+            assert!(!error.to_string().contains(&"s".repeat(31)));
+            data.insert(key, "s".repeat(32).into());
+            assert!(RuntimeConfig::parse(|key| data.get(key).cloned()).is_ok());
+        }
+    }
+
+    #[test]
+    fn secrets_can_come_from_private_files_but_not_from_both_sources() {
+        let jwt = private_file(&format!("{}\n", "f".repeat(40)), 0o600);
+        let url = private_file("postgres://synthetic:from-file@127.0.0.1/test\n", 0o600);
+        let mut data = values();
+        data.remove("JWT_SECRET");
+        data.remove("DATABASE_URL");
+        data.insert("JWT_SECRET_FILE", jwt.clone().into());
+        data.insert("DATABASE_URL_FILE", url.into());
+        let parsed = RuntimeConfig::parse(|key| data.get(key).cloned()).unwrap();
+        assert_eq!(parsed.jwt_secret, "f".repeat(40));
+        assert_eq!(parsed.database.get_username(), "synthetic");
+
+        data.insert("JWT_SECRET", "e".repeat(40).into());
+        let both = RuntimeConfig::parse(|key| data.get(key).cloned())
+            .err()
+            .unwrap();
+        assert!(both.to_string().contains("JWT_SECRET_FILE"));
+
+        data.remove("JWT_SECRET");
+        let shared = private_file(&"g".repeat(40), 0o644);
+        data.insert("JWT_SECRET_FILE", shared.into());
+        let error = RuntimeConfig::parse(|key| data.get(key).cloned())
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("JWT_SECRET_FILE"));
+        assert!(!error.to_string().contains(&"g".repeat(40)));
+    }
+
+    #[test]
+    fn remote_databases_need_explicit_tls_or_an_explicit_private_network() {
+        let accepts = |url: &str| {
+            let mut data = values();
+            data.insert("DATABASE_URL", url.into());
+            RuntimeConfig::parse(|key| data.get(key).cloned()).is_ok()
+        };
+        for url in [
+            "postgres://u:p@127.0.0.1/db",
+            "postgres://u:p@localhost/db",
+            "postgres://u:p@[::1]/db",
+            "postgres://u:p@localhost/db?host=/run/postgresql",
+            "postgres://u:p@db.internal/db?sslmode=verify-full",
+            "postgres://u:p@db.internal/db?sslmode=require",
+            "postgres://u:p@db/db?sslmode=disable",
+        ] {
+            assert!(accepts(url), "{url}");
+        }
+        for url in [
+            "postgres://u:p@db.internal/db",
+            "postgres://u:p@db.internal/db?sslmode=prefer",
+            "postgres://u:p@10.0.0.5/db?sslmode=allow",
+        ] {
+            assert!(!accepts(url), "{url}");
         }
     }
 }

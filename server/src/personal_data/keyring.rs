@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Guilherme Pedroza
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::BTreeMap, fmt, io::Read, path::Path};
+use std::{collections::BTreeMap, fmt, path::Path};
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ring::aead::{AES_256_GCM, LessSafeKey, UnboundKey};
@@ -47,14 +47,10 @@ impl Keyring {
         Self::parse(&format!("1:{}", super::fixture_key())).expect("fixture key")
     }
 
+    /// The file must be private to the server user, like any other secret file.
     pub fn load(path: &Path) -> Result<Self, KeyringError> {
-        let mut text = Zeroizing::new(String::new());
-        std::fs::File::open(path)
-            .and_then(|file| file.take(MAX_FILE_BYTES + 1).read_to_string(&mut text))
-            .map_err(|_| KeyringError::Unreadable)?;
-        if text.len() as u64 > MAX_FILE_BYTES {
-            return Err(KeyringError::Unreadable);
-        }
+        let text =
+            crate::secret_file::read(path, MAX_FILE_BYTES).map_err(|_| KeyringError::Unreadable)?;
         Self::parse(&text)
     }
 

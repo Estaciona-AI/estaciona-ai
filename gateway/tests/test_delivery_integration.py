@@ -105,13 +105,14 @@ class Server:
         self.personal_data_keys.write_text(
             "1:" + base64.b64encode(os.urandom(32)).decode() + "\n"
         )
+        self.personal_data_keys.chmod(0o600)
         self.environment = {
             **os.environ,
             "DATABASE_URL": db_url,
             "SITE_DATA_DIR": str(site),
-            "JWT_SECRET": "disposable-jwt",
+            "JWT_SECRET": "disposable-jwt-secret-for-integration",
             "LPR_ENABLED": "false",
-            "PLATE_SECRET_PEPPER": "disposable-pepper",
+            "PLATE_SECRET_PEPPER": "disposable-plate-pepper-for-integration",
             "PERSONAL_DATA_KEYS_FILE": str(self.personal_data_keys),
             "WS_ALLOWED_ORIGINS": "http://localhost",
         }
@@ -157,9 +158,9 @@ class Server:
                 "--env",
                 f"LPR_ENABLED={self.environment['LPR_ENABLED']}",
                 "--env",
-                "JWT_SECRET=disposable-jwt",
+                "JWT_SECRET=disposable-jwt-secret-for-integration",
                 "--env",
-                "PLATE_SECRET_PEPPER=disposable-pepper",
+                "PLATE_SECRET_PEPPER=disposable-plate-pepper-for-integration",
                 "--env",
                 f"WS_ALLOWED_ORIGINS={self.environment['WS_ALLOWED_ORIGINS']}",
                 "--entrypoint",

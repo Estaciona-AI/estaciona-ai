@@ -28,6 +28,7 @@ mod reservation_store;
 mod reservation_tests;
 mod reservations;
 mod runtime_config;
+mod secret_file;
 mod security;
 mod sessions;
 mod site_config;
@@ -119,13 +120,10 @@ async fn main() {
                 std::process::exit(2);
             }
         };
-        let database = match std::env::var("DATABASE_URL")
-            .ok()
-            .and_then(|value| value.parse::<sqlx::postgres::PgConnectOptions>().ok())
-        {
-            Some(value) => value,
-            None => {
-                eprintln!("DATABASE_URL is required and must be valid");
+        let database = match runtime_config::database_from_env() {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("{error}");
                 std::process::exit(1);
             }
         };

@@ -58,7 +58,9 @@ def token(server, user_id, role, expires_at):
             ),
         )
     )
-    signature = hmac.new(b"disposable-jwt", signed, hashlib.sha256).digest()
+    signature = hmac.new(
+        b"disposable-jwt-secret-for-integration", signed, hashlib.sha256
+    ).digest()
     return (signed + b"." + base64.urlsafe_b64encode(signature).rstrip(b"=")).decode()
 
 
@@ -650,7 +652,7 @@ def test_older_socket_does_not_remove_the_newer_private_channel(server, terminat
     # A known plate and reservation produce a private navigation result.
     # session-camera is authorized but absent from the graph.
     hashed_plate = hmac.new(
-        b"disposable-pepper", b"R03TEST", hashlib.sha256
+        b"disposable-plate-pepper-for-integration", b"R03TEST", hashlib.sha256
     ).hexdigest()
     user_id = insert_user(server, plate=hashed_plate)
 
