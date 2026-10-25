@@ -32,12 +32,6 @@
         "null"
       ]
     },
-    "plate": {
-      "type": [
-        "string",
-        "null"
-      ]
-    },
     "role": {
       "type": "string"
     }
@@ -48,7 +42,6 @@
     "email",
     "date_of_birth",
     "pcd_status",
-    "plate",
     "role",
     "created_at"
   ],

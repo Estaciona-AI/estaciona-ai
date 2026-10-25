@@ -95,10 +95,14 @@ mod tests {
             .bind(gateway).execute(&pool).await.unwrap();
         let principal = edge_auth::authenticate(&pool, &key).await.unwrap().unwrap();
         let user = Uuid::new_v4();
-        sqlx::query("INSERT INTO users (id,name,email,password_hash,plate) VALUES ($1,'fixture',$2,'unused',$3)")
-            .bind(user).bind(format!("{user}@example.invalid"))
-            .bind(crate::security::hash_plate("ABC1D23", "fixture-pepper"))
-            .execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO users (id,name,email,password_hash) VALUES ($1,'fixture',$2,'unused')",
+        )
+        .bind(user)
+        .bind(format!("{user}@example.invalid"))
+        .execute(&pool)
+        .await
+        .unwrap();
         let mut binding_tx = pool.begin().await.unwrap();
         let binding = crate::vehicles::request_binding(
             &mut binding_tx,

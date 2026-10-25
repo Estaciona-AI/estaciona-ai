@@ -73,9 +73,9 @@ def enable_lpr(server):
 def insert_user(server, role="user", plate=None):
     user_id = uuid4()
     server.query(
-        "INSERT INTO users (id, name, email, password_hash, role, plate) "
-        "VALUES (%s, 'Session fixture', %s, 'unused-test-hash', %s, %s)",
-        (str(user_id), f"{user_id}@example.invalid", role, plate),
+        "INSERT INTO users (id, name, email, password_hash, role) "
+        "VALUES (%s, 'Session fixture', %s, 'unused-test-hash', %s)",
+        (str(user_id), f"{user_id}@example.invalid", role),
     )
     if plate is not None:
         # This is an explicitly trusted fixture, never the public registration flow.

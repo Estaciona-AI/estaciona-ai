@@ -23,12 +23,6 @@
         "boolean",
         "null"
       ]
-    },
-    "plate": {
-      "type": [
-        "string",
-        "null"
-      ]
     }
   },
   "required": [

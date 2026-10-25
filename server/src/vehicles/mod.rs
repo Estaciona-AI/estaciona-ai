@@ -5,7 +5,9 @@ mod api;
 mod store;
 
 pub use api::routes;
-pub use store::{approved_user, request_binding};
+pub use store::approved_user;
+#[cfg(test)]
+pub use store::request_binding;
 
 #[cfg(test)]
 mod tests;

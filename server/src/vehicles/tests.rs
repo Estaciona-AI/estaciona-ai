@@ -222,7 +222,7 @@ async fn failed_audit_rolls_back_approval(pool: PgPool) {
 
 #[sqlx::test(migrations = "./migrations")]
 async fn legacy_declarations_upgrade_as_pending_and_downgrade_is_blocked(pool: PgPool) {
-    sqlx::raw_sql("DROP TABLE vehicle_binding_audit; DROP TABLE vehicle_bindings; DROP TABLE vehicles; ALTER TABLE users ADD CONSTRAINT users_plate_key UNIQUE(plate);").execute(&pool).await.unwrap();
+    sqlx::raw_sql("DROP TABLE vehicle_binding_audit; DROP TABLE vehicle_bindings; DROP TABLE vehicles; ALTER TABLE users ADD COLUMN plate TEXT; ALTER TABLE users ADD CONSTRAINT users_plate_key UNIQUE(plate);").execute(&pool).await.unwrap();
     let id = user(&pool).await;
     sqlx::query("UPDATE users SET plate='legacy-unverified' WHERE id=$1")
         .bind(id)
