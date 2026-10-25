@@ -310,13 +310,25 @@ def test_timeout_retry_preserves_uuid_and_payload(tmp_path):
             Cloud(),
             Cloud(lambda cloud, frame: cloud.ack(frame, duplicate=True)),
         )
+        receive_ack = gateway.receive_ack
+        timeout_injected = False
+
+        async def time_out_first_connection(connection, in_flight):
+            nonlocal timeout_injected
+            if connection is first:
+                # A 20 ms wall-clock budget also expires the retry's ACK when
+                # SQLite fsync in record_forwarding is slow on CI.
+                timeout_injected = True
+                raise TimeoutError("Simulated ACK timeout on the first connection")
+            return await receive_ack(connection, in_flight)
+
         with (
             patch(
                 "gateway.websockets.connect",
                 new_callable=AsyncMock,
                 side_effect=[first, second],
             ),
-            patch("gateway.ACK_TIMEOUT_SECONDS", 0.02),
+            patch("gateway.receive_ack", side_effect=time_out_first_connection),
             patch("gateway.RETRY_DELAY_SECONDS", 0),
         ):
             task = asyncio.create_task(
@@ -324,6 +336,7 @@ def test_timeout_retry_preserves_uuid_and_payload(tmp_path):
             )
             try:
                 await until(lambda: not gateway.pending_deliveries(db))
+                assert timeout_injected
             finally:
                 task.cancel()
                 with suppress(asyncio.CancelledError):
