@@ -281,3 +281,58 @@ async fn r02b_projection_storage_exists_and_enforces_single_forecast(pool: PgPoo
     .unwrap_err();
     assert_database_code(error, "23514");
 }
+
+#[sqlx::test(migrations = false)]
+async fn legacy_plate_receipts_are_redacted_and_other_events_kept(pool: PgPool) {
+    const RECEIPTS_REDACTED: i64 = 20261025000100;
+    let mut before = sqlx::migrate!();
+    before.migrations = before
+        .migrations
+        .iter()
+        .filter(|migration| migration.version < RECEIPTS_REDACTED)
+        .cloned()
+        .collect::<Vec<_>>()
+        .into();
+    before.run(&pool).await.unwrap();
+    let plate = serde_json::json!({"type":"CAR_DETECTED","plate":"ABC1D23","camera_id":"cam","timestamp":"2026-10-15T00:00:00Z"});
+    let spot = serde_json::json!({"type":"SPOT_UPDATE","spot_id":"A-01","status":"free"});
+    for payload in [
+        serde_json::json!({ "json": plate }),
+        serde_json::json!({ "json_text": plate.to_string() }),
+        serde_json::json!({ "sha256": [1, 2, 3] }),
+        serde_json::json!({ "json": spot }),
+    ] {
+        sqlx::query("INSERT INTO edge_event_receipts (event_id, payload, outcome) VALUES ($1, $2, 'applied')")
+            .bind(Uuid::new_v4())
+            .bind(sqlx::types::Json(payload))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    sqlx::migrate!().run(&pool).await.unwrap();
+
+    let receipts: Vec<(String, String)> = sqlx::query_as(
+        "SELECT payload::text, outcome FROM edge_event_receipts ORDER BY payload::text",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(receipts.len(), 4);
+    assert!(
+        receipts
+            .iter()
+            .all(|(payload, _)| !payload.contains("ABC1D23"))
+    );
+    assert!(receipts.iter().all(|(_, outcome)| outcome == "applied"));
+    let redacted = receipts
+        .iter()
+        .filter(|(payload, _)| payload == r#"{"redacted": "car_detected"}"#)
+        .count();
+    assert_eq!(redacted, 3);
+    assert!(
+        receipts
+            .iter()
+            .any(|(payload, _)| payload.contains("SPOT_UPDATE"))
+    );
+}
