@@ -72,7 +72,12 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
   `setuptools` advisories from the gateway lock.
 - Update the locked Rust TLS, runtime and cryptography dependencies, including
   `rustls`, `rustls-webpki`, `webpki-roots`, `tokio` and `ctutils`, and replace
-  yanked `chacha20` and `spin` releases.
+  yanked `chacha20` and `spin` releases. Update `cmov` to 0.5.4, which fixes
+  wrong results on aarch64.
+- Update the model export environment to `onnx` 1.22.0, `protobuf` 6.33.5,
+  `setuptools` 84.1.0 and `certifi` 2026.10.19. Paddle and Paddle2ONNX are
+  unchanged, and both RT-DETR exports stay byte-identical. The export
+  environment now resolves for Linux x86_64 only.
 - Add a RustSec audit gate for pull requests, pushes to `develop`/`main`, and a
   weekly schedule. Document the two unused asymmetric-cryptography advisory
   exceptions by ID in `server/deny.toml`.
