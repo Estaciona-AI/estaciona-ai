@@ -53,6 +53,8 @@ pub enum StoreError {
     MissingSchema,
     Unbound,
     Migration,
+    MigrationPending,
+    SchemaAhead,
     IdentityMismatch,
     ExistingData,
     DatabaseConfirmationMismatch,
@@ -68,6 +70,10 @@ impl fmt::Display for StoreError {
                 "Database is unbound; run --installation-init or --installation-adopt explicitly"
             }
             Self::Migration => "Installation database migrations failed",
+            Self::MigrationPending => {
+                "Database schema is behind this release; run --migrate with the owner role"
+            }
+            Self::SchemaAhead => "Database schema is newer than this release",
             Self::MissingSchema => "Installation binding migration required",
             Self::IdentityMismatch => "Database belongs to a different installation identity",
             Self::ExistingData => "Database contains application data; explicit adoption required",
@@ -307,6 +313,44 @@ pub async fn preflight(
         tx.rollback().await?;
         Ok(())
     }).await.map_err(|_| StoreError::Timeout)?
+}
+
+/// The runtime role cannot change the schema, so it only confirms that every
+/// migration of this binary was applied, unchanged, and that none is unknown.
+pub(crate) async fn require_migrated(pool: &PgPool) -> Result<(), StoreError> {
+    let exists: bool =
+        sqlx::query_scalar("SELECT to_regclass('public._sqlx_migrations') IS NOT NULL")
+            .fetch_one(pool)
+            .await?;
+    if !exists {
+        return Err(StoreError::MissingSchema);
+    }
+    let applied: Vec<(i64, Vec<u8>, bool)> =
+        sqlx::query_as("SELECT version, checksum, success FROM public._sqlx_migrations")
+            .fetch_all(pool)
+            .await?;
+    let migrator = sqlx::migrate!();
+    let expected: std::collections::HashMap<i64, &[u8]> = migrator
+        .iter()
+        .filter(|migration| migration.migration_type.is_up_migration())
+        .map(|migration| (migration.version, migration.checksum.as_ref()))
+        .collect();
+    if applied
+        .iter()
+        .any(|(version, _, _)| !expected.contains_key(version))
+    {
+        return Err(StoreError::SchemaAhead);
+    }
+    let current = expected.iter().all(|(version, checksum)| {
+        applied
+            .iter()
+            .any(|(applied, stored, success)| applied == version && stored == checksum && *success)
+    });
+    if current {
+        Ok(())
+    } else {
+        Err(StoreError::MigrationPending)
+    }
 }
 
 /// A cancelled migrator must not return a session advisory lock to the pool.

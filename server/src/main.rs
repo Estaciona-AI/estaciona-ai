@@ -101,8 +101,14 @@ async fn main() {
     if let Some(command) = installation_request {
         std::process::exit(installation::cli::run(command).await);
     }
-    let administrative =
-        admin_request.is_some() || args.get(1).is_some_and(|arg| arg.starts_with("--edge-"));
+    let migrate_request = args.get(1).is_some_and(|arg| arg == "--migrate");
+    if migrate_request && args.len() != 2 {
+        eprintln!("Usage: --migrate");
+        std::process::exit(2);
+    }
+    let administrative = migrate_request
+        || admin_request.is_some()
+        || args.get(1).is_some_and(|arg| arg.starts_with("--edge-"));
     let (identity, database, runtime) = if administrative {
         let site_data_dir = match std::env::var("SITE_DATA_DIR") {
             Ok(value) if !value.is_empty() => value,
@@ -176,6 +182,16 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    if migrate_request {
+        let result = installation::startup::migrate(&pool, &identity).await;
+        pool.close().await;
+        if let Err(error) = result {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        println!("Installation database migrated");
+        return;
+    }
     let verified = match installation::startup::prepare(pool.clone(), identity).await {
         Ok(verified) => verified,
         Err(error) => {

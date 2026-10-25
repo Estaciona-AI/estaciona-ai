@@ -433,6 +433,28 @@ def test_invalid_runtime_configuration_is_refused_before_migrations(
         assert probe.connect_ex((server.host, 8000)) != 0
 
 
+def test_startup_requires_an_explicit_migration_and_never_repairs_the_schema(
+    unstarted_server,
+):
+    server = unstarted_server
+    assert provision(server).returncode == 0
+    server.query("DROP TABLE physical_occupancy_hourly")
+    server.query("DELETE FROM _sqlx_migrations WHERE version=20261019000000")
+    refused = command(server)
+    assert refused.returncode == 1, refused.stdout + refused.stderr
+    assert "--migrate" in refused.stderr
+    assert server.query("SELECT to_regclass('public.physical_occupancy_hourly')") == [
+        (None,)
+    ]
+    assert command(server, "--migrate", "extra").returncode == 2
+    migrated = command(server, "--migrate")
+    assert migrated.returncode == 0, migrated.stdout + migrated.stderr
+    assert server.query("SELECT to_regclass('public.physical_occupancy_hourly')") == [
+        ("physical_occupancy_hourly",)
+    ]
+    server.start()
+
+
 def test_production_refuses_plate_recognition_before_migrations(unstarted_server):
     server = unstarted_server
     manifest = server.root / "site" / "installation.json"
