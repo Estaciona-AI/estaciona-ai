@@ -39,9 +39,30 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
   `SECRETS_DIR` (see the header of `infra/docker-compose.yml`). The server
   image runs as UID 10001: secret files and `SITE_DATA_DIR` must be owned by
   it.
+- **Accounts move to the identity provider.** `POST /login`, `POST /users`
+  and `--create-admin` are gone; the migration drops e-mail, password hash and
+  name from `users`, so existing local accounts cannot sign in again. Register
+  the installation with `tools/identity/provision.py installation-create`,
+  set `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET_FILE`,
+  `OIDC_REDIRECT_URL` and `APP_URL`, and invite people with `user-invite`.
+  Browser apps send people to `/auth/login?return_to=/path`, read the account
+  from `GET /api/v1/me`, and keep no token: the session is the
+  `__Host-estaciona_session` cookie. Writes with that cookie need an `Origin`
+  from `WS_ALLOWED_ORIGINS`, which now also drives CORS. `POST /auth/logout`
+  answers 200 with the provider's `end_session_url`. Contract 1.4.0 removes the
+  login and registration operations.
 
 ### Added
 
+- Sign-in through the central identity provider: OpenID Connect code flow with
+  PKCE as a confidential client (`openidconnect`), state bound to the browser
+  by a cookie, single-use attempts, nonce, and ID tokens accepted only when
+  signed with Ed25519. Each sign-in refreshes the generated username, the
+  encrypted display name and the role. Back-channel logout ends the named
+  provider session, or every session of the account. The server starts and
+  keeps serving existing sessions while the provider is unreachable; only
+  sign-in answers 503 until its metadata loads.
+- `GET /api/v1/me` and `PUT /api/v1/me/eligibility` for the signed-in account.
 - Central identity provider in `infra/identity/`: Keycloak 26.8 with its own
   PostgreSQL, a proxy that publishes only `/realms/` and `/resources/`, and
   the `estaciona` realm as code. Public sign-up is off, sign-in uses the
@@ -98,6 +119,9 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
 
 ### Removed
 
+- Local registration, password login and the `--create-admin` command, with
+  Argon2 and its admission limits. Accounts, passwords, e-mail verification
+  and brute-force protection belong to the identity provider.
 - Plate collection at registration. `POST /users` ignores a `plate` field and
   no longer declares a vehicle binding; `GET /users/{id}` no longer returns the
   plate digest. The dormant license plate module and its tables are kept for a
@@ -121,6 +145,12 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
 
 ### Security
 
+- No installation database stores e-mail addresses or password hashes any
+  more. Sessions are 8-hour host-only, HttpOnly cookies; cookie writes require
+  an allowed `Origin`, and CORS allows only the installation's apps, with
+  credentials, instead of any origin. Roles are limited to `user` and `admin`
+  by a constraint. Unknown command-line arguments stop the server instead of
+  being ignored.
 - The server runs with a database role that cannot change the schema, as UID
   10001 with a read-only root filesystem and no capabilities. The database
   container receives only its own account; the server receives its secrets as
