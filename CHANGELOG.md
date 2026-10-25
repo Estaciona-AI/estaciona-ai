@@ -20,12 +20,33 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
   installation refuses to start with `LPR_ENABLED=true`.
 - **Create the personal data keyring before upgrading.** The server refuses to
   start without `PERSONAL_DATA_KEYS_FILE` (Docker Compose:
-  `PERSONAL_DATA_KEYS_PATH` on the host). See `.env.example` for the format.
+  `SECRETS_DIR/personal_data_keys`). See `.env.example` for the format.
   Keep it outside database backups and back it up separately. The migration
   discards birth dates and disability declarations stored in clear.
+- **Migrations are an explicit step.** The server no longer migrates at
+  startup; it refuses a schema behind or ahead of its release. Run
+  `--migrate` with the owner role before starting a new release (Docker
+  Compose runs the one-shot `migrate` service). Then run
+  `infra/app-role.sql` as the owner, set the `estaciona_app` password, and
+  point the server's `DATABASE_URL` to that role.
+- **Secrets are checked at startup.** `JWT_SECRET` and `PLATE_SECRET_PEPPER`
+  need at least 32 bytes. Each secret, and `DATABASE_URL`, can come from a
+  private file (`NAME_FILE`). A remote database needs `sslmode=verify-full`
+  (or `require`/`verify-ca`); `prefer` and `allow` are refused, and `disable`
+  is accepted only when set explicitly.
+- **Docker Compose layout.** The database reads `infra/env/postgres.env`, the
+  server reads `infra/env/server.env` and its secrets from files in
+  `SECRETS_DIR` (see the header of `infra/docker-compose.yml`). The server
+  image runs as UID 10001: secret files and `SITE_DATA_DIR` must be owned by
+  it.
 
 ### Added
 
+- `--migrate` applies the migrations of this release with the owner role and
+  checks the installation binding before and after.
+- `infra/app-role.sql` creates `estaciona_app`, the server's runtime role:
+  row access only, no schema changes, and no writes to the migration history
+  or the installation binding.
 - Encryption of personal fields at rest. The server seals each value with
   AES-256-GCM (`ring`), bound to the installation, column and row, under keys
   read from a file the database never sees. Envelopes carry a key ID, so a new
@@ -50,6 +71,10 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
 
 ### Changed
 
+- The server image builds and runs on Debian trixie, pinned by digest. The
+  builder already used trixie while the runtime used bookworm, so the binary
+  could need a newer glibc than the runtime had. The unused OpenSSL and
+  `libpq` packages are gone: TLS is rustls. `cargo build` uses `--locked`.
 - The forecast predicts the occupancy rate with a calendar-aware LightGBM
   model instead of the attention model. Training pools simulated campuses with
   the real history, weighting real hours more. With four weeks of real
@@ -86,6 +111,10 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
 
 ### Security
 
+- The server runs with a database role that cannot change the schema, as UID
+  10001 with a read-only root filesystem and no capabilities. The database
+  container receives only its own account; the server receives its secrets as
+  files mounted into it alone and refuses secret files that others can read.
 - Birth date and disability status are stored only as encrypted envelopes
   (`date_of_birth_enc`, `pcd_status_enc`). Undeclared values are encrypted too,
   so a row does not show what was declared. Priority recommendations decrypt
