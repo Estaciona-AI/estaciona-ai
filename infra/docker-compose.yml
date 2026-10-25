@@ -8,6 +8,7 @@
 #   jwt_secret              at least 32 random bytes
 #   plate_pepper            at least 32 random bytes
 #   personal_data_keys      see .env.example; back it up apart from the database
+#   oidc_client_secret      written by tools/identity/provision.py --secret-out
 # The server image runs as UID 10001 and refuses secret files others can read:
 #   chown 10001 "$SECRETS_DIR"/* && chmod 600 "$SECRETS_DIR"/*
 x-server: &server
@@ -78,11 +79,13 @@ services:
       JWT_SECRET_FILE: /run/secrets/jwt_secret
       PLATE_SECRET_PEPPER_FILE: /run/secrets/plate_pepper
       PERSONAL_DATA_KEYS_FILE: /run/secrets/personal_data_keys
+      OIDC_CLIENT_SECRET_FILE: /run/secrets/oidc_client_secret
     secrets:
       - database_url
       - jwt_secret
       - plate_pepper
       - personal_data_keys
+      - oidc_client_secret
     tmpfs:
       - /tmp
     volumes:
@@ -124,6 +127,8 @@ secrets:
     file: ${SECRETS_DIR:?Set SECRETS_DIR to the absolute directory with the server secret files}/plate_pepper
   personal_data_keys:
     file: ${SECRETS_DIR:?Set SECRETS_DIR to the absolute directory with the server secret files}/personal_data_keys
+  oidc_client_secret:
+    file: ${SECRETS_DIR:?Set SECRETS_DIR to the absolute directory with the server secret files}/oidc_client_secret
 
 volumes:
   postgres_data:
