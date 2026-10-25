@@ -42,6 +42,16 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
 
 ### Added
 
+- Central identity provider in `infra/identity/`: Keycloak 26.8 with its own
+  PostgreSQL, a proxy that publishes only `/realms/` and `/resources/`, and
+  the `estaciona` realm as code. Public sign-up is off, sign-in uses the
+  e-mail, passwords use Argon2 with a 12-character minimum, brute force
+  detection is on and tokens are signed with Ed25519 only.
+- `tools/identity/provision.py` registers an installation as a confidential
+  OIDC client (code flow with PKCE only, exact callback, back-channel logout,
+  its own roles in the ID token, no e-mail claim) and invites accounts with a
+  generated username such as `ea-7k3m9qx2vd`. Revoking access also ends the
+  account's sessions. Secrets travel only through private files.
 - `--migrate` applies the migrations of this release with the owner role and
   checks the installation binding before and after.
 - `infra/app-role.sql` creates `estaciona_app`, the server's runtime role:
