@@ -561,6 +561,7 @@ version = "0.9.0"
 dependencies = [
  "argon2",
  "axum",
+ "base64",
  "chrono",
  "dashmap",
  "dotenvy",
@@ -568,6 +569,7 @@ dependencies = [
  "hmac 0.13.0",
  "jsonwebtoken",
  "rand_core 0.6.4",
+ "ring",
  "schemars",
  "serde",
  "serde_json",
@@ -578,6 +580,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

@@ -474,6 +474,7 @@ mod origin_handshake_tests {
             crate::installation::test_support::provision(&pool).await,
             "r14-test-jwt".into(),
             "r14-test-pepper".into(),
+            crate::personal_data::Keyring::for_unit_test(),
             crate::installation::test_support::package(SiteConfig {
                 directory: std::env::temp_dir(),
                 parkings: vec![ParkingLotConfig {

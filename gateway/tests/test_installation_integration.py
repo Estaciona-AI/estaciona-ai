@@ -338,6 +338,7 @@ def test_bound_administration_does_not_require_map_files(unstarted_server):
     for name in (
         "JWT_SECRET",
         "PLATE_SECRET_PEPPER",
+        "PERSONAL_DATA_KEYS_FILE",
         "WS_ALLOWED_ORIGINS",
         "LPR_ENABLED",
     ):
@@ -390,6 +391,7 @@ def test_unbound_startup_does_not_create_schema(unstarted_server):
         "reservation_policy.json",
         "JWT_SECRET",
         "PLATE_SECRET_PEPPER",
+        "PERSONAL_DATA_KEYS_FILE",
         "WS_ALLOWED_ORIGINS",
         "LPR_ENABLED",
         "DATABASE_URL",
@@ -409,6 +411,7 @@ def test_invalid_runtime_configuration_is_refused_before_migrations(
         env[setting] = {
             "JWT_SECRET": "",
             "PLATE_SECRET_PEPPER": "",
+            "PERSONAL_DATA_KEYS_FILE": "/do-not-echo-this-input/personal-data.keys",
             "WS_ALLOWED_ORIGINS": "https://do-not-echo.example/path",
             "LPR_ENABLED": "do-not-echo-this-input",
             "DATABASE_URL": "postgres://synthetic:do-not-echo-this-input@127.0.0.1:bad/test",
@@ -467,6 +470,8 @@ def test_offline_package_validation_is_read_only_and_does_not_require_runtime(
             "SITE_DATA_DIR",
             "JWT_SECRET",
             "PLATE_SECRET_PEPPER",
+            "PERSONAL_DATA_KEYS_FILE",
+            "PERSONAL_DATA_KEYS_FILE",
             "WS_ALLOWED_ORIGINS",
             "LPR_ENABLED",
         )
@@ -529,6 +534,8 @@ def test_offline_package_validation_refuses_invalid_input_without_writes(
             "SITE_DATA_DIR",
             "JWT_SECRET",
             "PLATE_SECRET_PEPPER",
+            "PERSONAL_DATA_KEYS_FILE",
+            "PERSONAL_DATA_KEYS_FILE",
             "WS_ALLOWED_ORIGINS",
             "LPR_ENABLED",
         )

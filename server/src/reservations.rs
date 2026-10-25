@@ -7,10 +7,11 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::personal_data::Field;
 use crate::reservation_store::{self, CreateError, FinishReason};
 use crate::state::SharedState;
 use crate::ws::messages::ServerToAppMsg;
@@ -362,6 +363,70 @@ impl RecommendationQueryError {
     }
 }
 
+const PCD_SPOTS: [&str; 2] = ["A-01", "A-02"];
+const ELDERLY_SPOTS: [&str; 2] = ["A-03", "A-04"];
+const ELDERLY_AGE: i32 = 60;
+
+/// Completed years, as PostgreSQL `age()` counts them (29 February included).
+fn completed_years(born: NaiveDate, today: NaiveDate) -> i32 {
+    let birthday_pending = (today.month(), today.day()) < (born.month(), born.day());
+    today.year() - born.year() - i32::from(birthday_pending)
+}
+
+/// Reserved spots the user is eligible for. Eligibility is decrypted in the
+/// server, so the database never compares the clear values.
+async fn priority_spots(
+    state: &SharedState,
+    user_id: Uuid,
+) -> Result<Vec<&'static str>, (StatusCode, String)> {
+    let row = sqlx::query!(
+        "SELECT date_of_birth_enc, pcd_status_enc FROM users WHERE id = $1",
+        user_id
+    )
+    .fetch_optional(state.installation.pool())
+    .await
+    .map_err(|source| {
+        RecommendationQueryError {
+            query: "priority",
+            source,
+        }
+        .into_http_error()
+    })?;
+    let Some(row) = row else {
+        return Ok(Vec::new());
+    };
+    let cipher = &state.personal_data;
+    let eligibility = cipher
+        .decrypt_optional::<NaiveDate>(
+            Field::UserDateOfBirth,
+            user_id,
+            row.date_of_birth_enc.as_deref(),
+        )
+        .and_then(|born| {
+            let pcd = cipher.decrypt_optional::<bool>(
+                Field::UserPcdStatus,
+                user_id,
+                row.pcd_status_enc.as_deref(),
+            )?;
+            Ok((born, pcd))
+        });
+    let (born, pcd) = eligibility.map_err(|error| {
+        tracing::error!(%error, "Recommendation eligibility cannot be decrypted");
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Recommendation temporarily unavailable".to_owned(),
+        )
+    })?;
+    let mut spots = Vec::new();
+    if pcd == Some(true) {
+        spots.extend(PCD_SPOTS);
+    }
+    if born.is_some_and(|born| completed_years(born, Utc::now().date_naive()) >= ELDERLY_AGE) {
+        spots.extend(ELDERLY_SPOTS);
+    }
+    Ok(spots)
+}
+
 pub async fn recommend_spot(
     State(state): State<SharedState>,
     headers: HeaderMap,
@@ -373,42 +438,31 @@ pub async fn recommend_spot(
     if requester != query.user_id {
         return Err((StatusCode::FORBIDDEN, "User access denied".to_string()));
     }
-    let priority_spot = sqlx::query!(
-        r#"
-        WITH user_data AS (
-            SELECT pcd_status, EXTRACT(YEAR FROM age(CURRENT_DATE, date_of_birth)) as age 
-            FROM users WHERE id = $1
+    let priority_spot = match priority_spots(&state, query.user_id).await? {
+        spots if spots.is_empty() => None,
+        spots => sqlx::query_scalar!(
+            "SELECT id FROM spots WHERE status = 'free' AND is_active AND id = ANY($1) \
+             ORDER BY id LIMIT 1",
+            &spots as &[&str]
         )
-        SELECT s.id 
-        FROM spots s, user_data u
-        WHERE s.status = 'free' AND s.is_active
-          AND (
-              (u.pcd_status = true AND s.id IN ('A-01', 'A-02'))
-              OR 
-              (u.age >= 60 AND s.id IN ('A-03', 'A-04'))
-          )
-        ORDER BY s.id
-        LIMIT 1
-        "#,
-        query.user_id
-    )
-    .fetch_optional(state.installation.pool())
-    .await
-    .map_err(|source| {
-        RecommendationQueryError {
-            query: "priority",
-            source,
-        }
-        .into_http_error()
-    })?;
+        .fetch_optional(state.installation.pool())
+        .await
+        .map_err(|source| {
+            RecommendationQueryError {
+                query: "priority",
+                source,
+            }
+            .into_http_error()
+        })?,
+    };
 
     if let Some(priority) = priority_spot {
         let graph = state.installation.graph.read().await;
-        let route = graph.calculate_route("cam-01", &priority.id);
+        let route = graph.calculate_route("cam-01", &priority);
         return Ok((
             StatusCode::OK,
             Json(serde_json::json!({
-                "recommended_spot": priority.id,
+                "recommended_spot": priority,
                 "route": route
             })),
         ));
@@ -545,6 +599,17 @@ mod tests {
         let json_data = r#"{"status": "occupied"}"#;
         let parsed: UpdateSpotStatus = serde_json::from_str(json_data).unwrap();
         assert_eq!(parsed.status, "occupied");
+    }
+
+    #[test]
+    fn completed_years_match_postgres_age_including_leap_birthdays() {
+        let date = |y, m, d| NaiveDate::from_ymd_opt(y, m, d).unwrap();
+        assert_eq!(completed_years(date(1966, 10, 25), date(2026, 10, 25)), 60);
+        assert_eq!(completed_years(date(1966, 10, 26), date(2026, 10, 25)), 59);
+        assert_eq!(completed_years(date(1966, 2, 28), date(2026, 2, 28)), 60);
+        assert_eq!(completed_years(date(1964, 2, 29), date(2024, 2, 28)), 59);
+        assert_eq!(completed_years(date(1964, 2, 29), date(2024, 2, 29)), 60);
+        assert_eq!(completed_years(date(1964, 2, 29), date(2025, 2, 28)), 60);
     }
 
     #[test]

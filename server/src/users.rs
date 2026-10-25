@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::auth::AuthError;
+use crate::personal_data::Field;
 use crate::security::hash_password_async;
 use crate::state::SharedState;
 
@@ -70,17 +71,30 @@ pub async fn create_user(
 
     let hashed_password = hash_password_async(&state.auth_limits, payload.password).await?;
     let new_id = Uuid::new_v4();
+    // Undeclared values are encrypted too, so the row does not reveal what was declared.
+    let encrypted = state
+        .personal_data
+        .encrypt(Field::UserDateOfBirth, new_id, &payload.date_of_birth)
+        .and_then(|born| {
+            let pcd =
+                state
+                    .personal_data
+                    .encrypt(Field::UserPcdStatus, new_id, &payload.pcd_status)?;
+            Ok((born, pcd))
+        });
+    let (date_of_birth_enc, pcd_status_enc) = encrypted.map_err(|error| {
+        tracing::error!(%error, "Registration encryption failed");
+        AuthError::Status(StatusCode::INTERNAL_SERVER_ERROR, "Failed to create user")
+    })?;
 
     let record = sqlx::query!(
         r#"
-        INSERT INTO users (id, name, email, password_hash, date_of_birth, pcd_status)
+        INSERT INTO users (id, name, email, password_hash, date_of_birth_enc, pcd_status_enc)
         VALUES ($1, $2, $3, $4, $5, $6)
         RETURNING
         id,
         name as "name!",
         email as "email!",
-        date_of_birth,
-        pcd_status,
         role as "role!",
         created_at as "created_at?"
         "#,
@@ -88,8 +102,8 @@ pub async fn create_user(
         payload.name,
         payload.email,
         hashed_password,
-        payload.date_of_birth,
-        payload.pcd_status,
+        date_of_birth_enc,
+        pcd_status_enc,
     )
     .fetch_one(state.installation.pool())
     .await
@@ -108,8 +122,8 @@ pub async fn create_user(
         id: record.id,
         name: record.name,
         email: record.email,
-        date_of_birth: record.date_of_birth,
-        pcd_status: record.pcd_status,
+        date_of_birth: payload.date_of_birth,
+        pcd_status: payload.pcd_status,
         role: record.role,
         created_at: record.created_at,
     };
@@ -131,15 +145,20 @@ pub async fn get_user(
     if requester.role != "admin" && requester.user_id != id {
         return Err((StatusCode::FORBIDDEN, "User access denied".to_string()));
     }
-    let record = sqlx::query_as!(
-        UserResponse,
+    let failed = || {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to fetch user".to_string(),
+        )
+    };
+    let record = sqlx::query!(
         r#"
-        SELECT 
+        SELECT
         id,
         name as "name!",
         email as "email!",
-        date_of_birth,
-        pcd_status,
+        date_of_birth_enc,
+        pcd_status_enc,
         role as "role!",
         created_at as "created_at?"
         FROM users
@@ -151,16 +170,41 @@ pub async fn get_user(
     .await
     .map_err(|e| {
         tracing::error!("Database error: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to fetch user".to_string(),
-        )
-    })?;
+        failed()
+    })?
+    .ok_or_else(|| (StatusCode::NOT_FOUND, "User not found".to_string()))?;
 
-    match record {
-        Some(user) => Ok((StatusCode::OK, Json(user))),
-        None => Err((StatusCode::NOT_FOUND, "User not found".to_string())),
-    }
+    let cipher = &state.personal_data;
+    let declared = cipher
+        .decrypt_optional(
+            Field::UserDateOfBirth,
+            record.id,
+            record.date_of_birth_enc.as_deref(),
+        )
+        .and_then(|born| {
+            let pcd = cipher.decrypt_optional(
+                Field::UserPcdStatus,
+                record.id,
+                record.pcd_status_enc.as_deref(),
+            )?;
+            Ok((born, pcd))
+        });
+    let (date_of_birth, pcd_status) = declared.map_err(|error| {
+        tracing::error!(%error, "Stored personal data cannot be decrypted");
+        failed()
+    })?;
+    Ok((
+        StatusCode::OK,
+        Json(UserResponse {
+            id: record.id,
+            name: record.name,
+            email: record.email,
+            date_of_birth,
+            pcd_status,
+            role: record.role,
+            created_at: record.created_at,
+        }),
+    ))
 }
 
 #[cfg(test)]

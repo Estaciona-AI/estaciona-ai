@@ -158,6 +158,7 @@ mod tests {
             verified,
             "session-test-secret".into(),
             "test-pepper".into(),
+            crate::personal_data::Keyring::for_unit_test(),
             crate::installation::test_support::package(SiteConfig {
                 directory: std::env::temp_dir(),
                 spots: vec![],

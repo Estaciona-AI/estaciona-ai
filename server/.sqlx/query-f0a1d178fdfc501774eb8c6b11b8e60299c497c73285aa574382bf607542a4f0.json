@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT \n        id,\n        name as \"name!\",\n        email as \"email!\",\n        date_of_birth,\n        pcd_status,\n        role as \"role!\",\n        created_at as \"created_at?\"\n        FROM users\n        WHERE id = $1\n        ",
+  "query": "\n        INSERT INTO users (id, name, email, password_hash, date_of_birth_enc, pcd_status_enc)\n        VALUES ($1, $2, $3, $4, $5, $6)\n        RETURNING\n        id,\n        name as \"name!\",\n        email as \"email!\",\n        role as \"role!\",\n        created_at as \"created_at?\"\n        ",
   "describe": {
     "columns": [
       {
@@ -38,28 +38,6 @@
       },
       {
         "ordinal": 3,
-        "name": "date_of_birth",
-        "type_info": "Date",
-        "origin": {
-          "Table": {
-            "table": "users",
-            "name": "date_of_birth"
-          }
-        }
-      },
-      {
-        "ordinal": 4,
-        "name": "pcd_status",
-        "type_info": "Bool",
-        "origin": {
-          "Table": {
-            "table": "users",
-            "name": "pcd_status"
-          }
-        }
-      },
-      {
-        "ordinal": 5,
         "name": "role!",
         "type_info": "Varchar",
         "origin": {
@@ -70,7 +48,7 @@
         }
       },
       {
-        "ordinal": 6,
+        "ordinal": 4,
         "name": "created_at?",
         "type_info": "Timestamptz",
         "origin": {
@@ -83,18 +61,21 @@
     ],
     "parameters": {
       "Left": [
-        "Uuid"
+        "Uuid",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Bytea",
+        "Bytea"
       ]
     },
     "nullable": [
       false,
       true,
       true,
-      true,
-      true,
       false,
       true
     ]
   },
-  "hash": "0c0a699c16a133358afd2c2859ae2c4eb6e0c27b756d63f05e676c5c66929c28"
+  "hash": "f0a1d178fdfc501774eb8c6b11b8e60299c497c73285aa574382bf607542a4f0"
 }

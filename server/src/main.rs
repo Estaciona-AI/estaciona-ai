@@ -17,6 +17,7 @@ mod edge_state;
 pub mod installation;
 mod lpr;
 mod pathfinding;
+mod personal_data;
 #[cfg(test)]
 mod postgres_tests;
 #[cfg(test)]
@@ -137,6 +138,14 @@ async fn main() {
                 std::process::exit(2);
             }
         };
+        let personal_data_keys = match personal_data::Keyring::load(&config.personal_data_keys_file)
+        {
+            Ok(keys) => keys,
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(2);
+            }
+        };
         let package = match installation::InstallationPackage::load(&config.site_data_dir) {
             Ok(package) => package,
             Err(error) => {
@@ -154,7 +163,7 @@ async fn main() {
         (
             package.identity(),
             config.database.clone(),
-            Some((config, package)),
+            Some((config, package, personal_data_keys)),
         )
     };
     let pool = match PgPoolOptions::new()
@@ -195,7 +204,7 @@ async fn main() {
         return;
     }
 
-    let (config, package) =
+    let (config, package, personal_data_keys) =
         runtime.expect("administrative commands return before runtime initialization");
     let ws_origin_policy = config.ws_origins;
     let lpr_mode = config.lpr_mode;
@@ -203,6 +212,7 @@ async fn main() {
         verified,
         config.jwt_secret,
         config.plate_pepper,
+        personal_data_keys,
         package,
         lpr_mode,
     )

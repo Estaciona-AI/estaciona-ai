@@ -151,6 +151,7 @@ async fn package_identity_mismatch_has_no_reconciliation_effect(pool: PgPool) {
         verified,
         "jwt".into(),
         "pepper".into(),
+        crate::personal_data::Keyring::for_unit_test(),
         package,
         Default::default(),
     )
@@ -188,6 +189,7 @@ async fn context_consumes_validated_policy_without_reading_the_file_again(pool: 
         verified,
         "jwt".into(),
         "pepper".into(),
+        crate::personal_data::Keyring::for_unit_test(),
         package,
         Default::default(),
     )
@@ -200,6 +202,7 @@ async fn context_consumes_validated_policy_without_reading_the_file_again(pool: 
         verified,
         "jwt".into(),
         "pepper".into(),
+        crate::personal_data::Keyring::for_unit_test(),
         package,
         Default::default(),
     )

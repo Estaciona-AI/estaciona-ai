@@ -141,6 +141,7 @@ mod tests {
             auth_limits: AuthLimits::default(),
             jwt_secret: "unused".into(),
             plate_pepper: "fixture-pepper".into(),
+            personal_data: crate::personal_data::PersonalDataCipher::for_unit_test(),
         });
         Fixture {
             state,

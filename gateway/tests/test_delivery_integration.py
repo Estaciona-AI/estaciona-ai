@@ -7,6 +7,7 @@ from functools import lru_cache
 """Opt-in integration against the built Rust server and a disposable PostgreSQL DB."""
 
 import asyncio
+import base64
 from contextlib import closing, suppress
 import hashlib
 import json
@@ -100,6 +101,10 @@ class Server:
                 }
             )
         )
+        self.personal_data_keys = root / "personal-data.keys"
+        self.personal_data_keys.write_text(
+            "1:" + base64.b64encode(os.urandom(32)).decode() + "\n"
+        )
         self.environment = {
             **os.environ,
             "DATABASE_URL": db_url,
@@ -107,6 +112,7 @@ class Server:
             "JWT_SECRET": "disposable-jwt",
             "LPR_ENABLED": "false",
             "PLATE_SECRET_PEPPER": "disposable-pepper",
+            "PERSONAL_DATA_KEYS_FILE": str(self.personal_data_keys),
             "WS_ALLOWED_ORIGINS": "http://localhost",
         }
         self.environment.pop("EDGE_API_KEY", None)
@@ -140,6 +146,10 @@ class Server:
                 f"type=bind,source={self.binary},target=/app/server,readonly",
                 "--mount",
                 f"type=bind,source={self.root / 'site'},target=/site,readonly",
+                "--mount",
+                f"type=bind,source={self.personal_data_keys},target=/run/secrets/personal-data.keys,readonly",
+                "--env",
+                "PERSONAL_DATA_KEYS_FILE=/run/secrets/personal-data.keys",
                 "--env",
                 f"DATABASE_URL={database_url}",
                 "--env",

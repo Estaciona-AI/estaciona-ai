@@ -42,6 +42,7 @@ fn fixture(pool: PgPool) -> SharedState {
         ),
         jwt_secret: "r04-disposable-jwt-secret".to_owned(),
         plate_pepper: "r04-disposable-plate-pepper".to_owned(),
+        personal_data: crate::personal_data::PersonalDataCipher::for_unit_test(),
         auth_limits: Default::default(),
     })
 }
@@ -640,4 +641,64 @@ async fn registration_never_declares_or_stores_a_plate(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!((vehicles, bindings, plate_columns), (0, 0, 0));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn eligibility_is_stored_encrypted_and_read_back_by_its_owner(pool: PgPool) {
+    let state = fixture(pool.clone());
+    let mut ids = Vec::new();
+    for email in ["elder@example.invalid", "other@example.invalid"] {
+        let mut payload = registration();
+        payload.email = email.into();
+        payload.date_of_birth = chrono::NaiveDate::from_ymd_opt(1950, 1, 2);
+        payload.pcd_status = Some(true);
+        let response = users::create_user(State(state.clone()), Json(payload))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = json_body(response).await;
+        assert_eq!(body["date_of_birth"], "1950-01-02");
+        ids.push(Uuid::parse_str(body["id"].as_str().unwrap()).unwrap());
+    }
+    let raw: String = sqlx::query_scalar("SELECT row_to_json(u)::text FROM users u WHERE id = $1")
+        .bind(ids[0])
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(!raw.contains("1950-01-02"));
+    assert!(!raw.contains(r#""date_of_birth_enc":null"#));
+    assert!(!raw.contains(r#""pcd_status_enc":null"#));
+
+    let token = crate::sessions::issue(&pool, ids[0], "user", &state.jwt_secret)
+        .await
+        .unwrap();
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        header::AUTHORIZATION,
+        format!("Bearer {token}").parse().unwrap(),
+    );
+    let response = users::get_user(
+        State(state.clone()),
+        axum::extract::Path(ids[0]),
+        headers.clone(),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(
+        (body["date_of_birth"].clone(), body["pcd_status"].clone()),
+        (serde_json::json!("1950-01-02"), serde_json::json!(true))
+    );
+
+    sqlx::query("UPDATE users SET date_of_birth_enc = (SELECT date_of_birth_enc FROM users WHERE id = $2) WHERE id = $1")
+        .bind(ids[0])
+        .bind(ids[1])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let response = users::get_user(State(state), axum::extract::Path(ids[0]), headers)
+        .await
+        .into_response();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 }

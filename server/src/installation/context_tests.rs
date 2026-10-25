@@ -37,6 +37,7 @@ async fn verified_identity_reaches_runtime_and_uses_its_database(pool: PgPool) {
         verified,
         "test-jwt".into(),
         "test-pepper".into(),
+        crate::personal_data::Keyring::for_unit_test(),
         crate::installation::test_support::package(site),
         Default::default(),
     )
@@ -159,6 +160,7 @@ impl SiteFixture {
             verified,
             "synthetic-jwt".into(),
             "synthetic-pepper".into(),
+            crate::personal_data::Keyring::for_unit_test(),
             super::InstallationPackage::load(&self.directory).unwrap(),
             Default::default(),
         )

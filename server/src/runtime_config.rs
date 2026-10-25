@@ -11,6 +11,7 @@ pub(crate) struct RuntimeConfig {
     pub database: PgConnectOptions,
     pub jwt_secret: String,
     pub plate_pepper: String,
+    pub personal_data_keys_file: PathBuf,
     pub ws_origins: WsOriginPolicy,
     pub lpr_mode: LprMode,
 }
@@ -48,6 +49,7 @@ impl RuntimeConfig {
         let database = PgConnectOptions::from_str(&url).map_err(|_| ConfigError("DATABASE_URL"))?;
         let jwt_secret = required(&mut value, "JWT_SECRET")?;
         let plate_pepper = required(&mut value, "PLATE_SECRET_PEPPER")?;
+        let personal_data_keys_file = required(&mut value, "PERSONAL_DATA_KEYS_FILE")?.into();
         let origins = required(&mut value, "WS_ALLOWED_ORIGINS")?;
         let ws_origins =
             WsOriginPolicy::parse(&origins).map_err(|_| ConfigError("WS_ALLOWED_ORIGINS"))?;
@@ -61,6 +63,7 @@ impl RuntimeConfig {
             database,
             jwt_secret,
             plate_pepper,
+            personal_data_keys_file,
             ws_origins,
             lpr_mode,
         })
@@ -81,6 +84,7 @@ mod tests {
             ),
             ("JWT_SECRET", "jwt-not-for-logs"),
             ("PLATE_SECRET_PEPPER", "pepper-not-for-logs"),
+            ("PERSONAL_DATA_KEYS_FILE", "/synthetic/personal-data.keys"),
             ("WS_ALLOWED_ORIGINS", "http://localhost"),
         ]
         .into_iter()
@@ -116,6 +120,7 @@ mod tests {
             "DATABASE_URL",
             "JWT_SECRET",
             "PLATE_SECRET_PEPPER",
+            "PERSONAL_DATA_KEYS_FILE",
             "WS_ALLOWED_ORIGINS",
         ] {
             for value in [
