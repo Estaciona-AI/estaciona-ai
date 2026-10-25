@@ -36,6 +36,13 @@ pytestmark = pytest.mark.skipif(
 )
 KEY = "11" * 32
 APP_ROLE_SCRIPT = Path(__file__).parents[2] / "infra" / "app-role.sql"
+IDENTITY = {
+    "OIDC_ISSUER_URL": "http://127.0.0.1:9/realms/integration",
+    "OIDC_CLIENT_ID": "integration",
+    "OIDC_CLIENT_SECRET": "integration-client-secret",
+    "OIDC_REDIRECT_URL": "http://localhost:8000/auth/callback",
+    "APP_URL": "http://localhost",
+}
 IMAGE = (
     "postgres@sha256:bbbf67eadd2381a2738a4a2e36d4c3936c36edd82d80e7ef00411194385d3829"
 )
@@ -115,6 +122,9 @@ class Server:
             "LPR_ENABLED": "false",
             "PLATE_SECRET_PEPPER": "disposable-plate-pepper-for-integration",
             "PERSONAL_DATA_KEYS_FILE": str(self.personal_data_keys),
+            # Sign-in is covered by the Rust tests; here the provider stays
+            # unreachable, as during an outage: everything else keeps working.
+            **IDENTITY,
             "WS_ALLOWED_ORIGINS": "http://localhost",
         }
         self.environment.pop("EDGE_API_KEY", None)
@@ -174,6 +184,11 @@ class Server:
                 "JWT_SECRET=disposable-jwt-secret-for-integration",
                 "--env",
                 "PLATE_SECRET_PEPPER=disposable-plate-pepper-for-integration",
+                *[
+                    argument
+                    for key in IDENTITY
+                    for argument in ("--env", f"{key}={self.environment[key]}")
+                ],
                 "--env",
                 f"WS_ALLOWED_ORIGINS={self.environment['WS_ALLOWED_ORIGINS']}",
                 "--entrypoint",
@@ -551,18 +566,12 @@ def test_durable_projection_ack_survives_real_server_restart(server, kind):
         (frame["event_id"],),
     ) == [(1,)]
     if kind.startswith("TREND_PREDICTION"):
-        from test_ws_tickets_integration import http, issue, ws_url
+        from test_session_integration import insert_user, token
+        from test_ws_tickets_integration import issue, ws_url
 
-        email = f"{uuid4()}@example.invalid"
-        credentials = {"email": email, "password": "disposable-r02b-password"}
-        status, user, _ = http(
-            server, "/users", payload={"name": "R02b", **credentials}
-        )
-        assert status == 201, user
-        server.query("UPDATE users SET role='admin' WHERE email=%s", (email,))
-        status, login, _ = http(server, "/login", payload=credentials)
-        assert status == 200, login
-        status, ticket, _ = issue(server, login["token"], "dashboard")
+        admin = insert_user(server, role="admin")
+        signed = token(server, admin, "admin", int(time.time()) + 3600)
+        status, ticket, _ = issue(server, signed, "dashboard")
         assert status == 201, ticket
 
         async def read_restored_forecast():

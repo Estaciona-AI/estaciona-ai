@@ -32,6 +32,7 @@ async fn moved_spot_coordinates_follow_the_applied_map(pool: PgPool) {
         "test".into(),
         "test".into(),
         crate::personal_data::Keyring::for_unit_test(),
+        crate::identity::IdentityProvider::for_unit_test(),
         crate::installation::test_support::package(site(&[("R07-A", 2.0)])),
         Default::default(),
     )
@@ -42,6 +43,7 @@ async fn moved_spot_coordinates_follow_the_applied_map(pool: PgPool) {
         "test".into(),
         "test".into(),
         crate::personal_data::Keyring::for_unit_test(),
+        crate::identity::IdentityProvider::for_unit_test(),
         crate::installation::test_support::package(site(&[("R07-A", 8.0)])),
         Default::default(),
     )
@@ -56,9 +58,8 @@ async fn moved_spot_coordinates_follow_the_applied_map(pool: PgPool) {
 
 async fn user(pool: &PgPool) -> uuid::Uuid {
     let id = uuid::Uuid::new_v4();
-    sqlx::query("INSERT INTO users (id,name,email,password_hash) VALUES ($1,'R07',$2,'unused')")
+    sqlx::query("INSERT INTO users (id) VALUES ($1)")
         .bind(id)
-        .bind(format!("{id}@example.invalid"))
         .execute(pool)
         .await
         .unwrap();
@@ -359,6 +360,7 @@ async fn r11_navigation_collision_does_not_reconcile_any_database_changes(pool: 
         "test".into(),
         "test".into(),
         crate::personal_data::Keyring::for_unit_test(),
+        crate::identity::IdentityProvider::for_unit_test(),
         crate::installation::test_support::package(site(&[("R11-A", 2.0)])),
         Default::default(),
     )
@@ -379,6 +381,7 @@ async fn r11_navigation_collision_does_not_reconcile_any_database_changes(pool: 
             "test".into(),
             "test".into(),
             crate::personal_data::Keyring::for_unit_test(),
+            crate::identity::IdentityProvider::for_unit_test(),
             crate::installation::test_support::package(site(&[
                 ("R11-A", 9.0),
                 (collision, 3.0),

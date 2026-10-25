@@ -1,19 +1,17 @@
 // SPDX-FileCopyrightText: 2026 Guilherme Pedroza
 // SPDX-License-Identifier: Apache-2.0
 
-mod admin_cli;
 mod api_contract;
-mod auth;
 mod auth_limits;
-#[cfg(test)]
-mod auth_resource_tests;
 mod config_store;
 mod contracts;
+mod csrf;
 mod edge_auth;
 mod edge_cli;
 mod edge_delivery;
 mod edge_operations;
 mod edge_state;
+mod identity;
 pub mod installation;
 mod lpr;
 mod pathfinding;
@@ -45,16 +43,15 @@ mod ws_tickets;
 
 use axum::{
     Router,
-    extract::{DefaultBodyLimit, State},
-    http::{HeaderMap, StatusCode},
+    extract::State,
+    http::{HeaderMap, Method, StatusCode, header},
     routing::{get, post, put},
 };
 use sqlx::postgres::PgPoolOptions;
 use state::{SharedState, init_state};
 use tokio::net::TcpListener;
 use tower_http::{
-    cors::{Any, CorsLayer},
-    limit::RequestBodyLimitLayer,
+    cors::{AllowOrigin, CorsLayer},
     trace::TraceLayer,
 };
 
@@ -83,13 +80,6 @@ async fn main() {
             std::process::exit(2);
         }
     };
-    let admin_request = match admin_cli::parse(&args) {
-        Ok(request) => request,
-        Err(usage) => {
-            eprintln!("{usage}");
-            std::process::exit(2);
-        }
-    };
     // File-only validation does not capture environment settings or load dotenv.
     let installation_request = match installation_request {
         Some(command @ installation::cli::Command::Validate { .. }) => {
@@ -106,9 +96,21 @@ async fn main() {
         eprintln!("Usage: --migrate");
         std::process::exit(2);
     }
-    let administrative = migrate_request
-        || admin_request.is_some()
-        || args.get(1).is_some_and(|arg| arg.starts_with("--edge-"));
+    let administrative =
+        migrate_request || args.get(1).is_some_and(|arg| arg.starts_with("--edge-"));
+    // Unknown arguments must not start the server as if they were absent.
+    if args.len() > 1 && !administrative {
+        if args[1] == "--create-admin" {
+            eprintln!(
+                "Administrators are a role at the identity provider: use tools/identity/provision.py"
+            );
+        } else {
+            eprintln!(
+                "Unknown arguments; see --migrate, --edge-*, --installation-* and --export-contracts"
+            );
+        }
+        std::process::exit(2);
+    }
     let (identity, database, runtime) = if administrative {
         let site_data_dir = match std::env::var("SITE_DATA_DIR") {
             Ok(value) if !value.is_empty() => value,
@@ -209,24 +211,25 @@ async fn main() {
             std::process::exit(1);
         }
     }
-    if let Some(request) = admin_request {
-        if let Err(error) = admin_cli::create(verified.pool(), request).await {
-            tracing::error!(%error, "Administrator provisioning failed");
-            std::process::exit(1);
-        }
-        tracing::info!("Administrator created");
-        return;
-    }
-
     let (config, package, personal_data_keys) =
         runtime.expect("administrative commands return before runtime initialization");
     let ws_origin_policy = config.ws_origins;
     let lpr_mode = config.lpr_mode;
+    // Accounts are created and signed in at the identity provider only. Its
+    // metadata loads in the background: an outage there blocks sign-in only.
+    let identity = match identity::IdentityProvider::new(config.identity) {
+        Ok(identity) => identity,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+    };
     let parking_state: SharedState = init_state(
         verified,
         config.jwt_secret,
         config.plate_pepper,
         personal_data_keys,
+        identity,
         package,
         lpr_mode,
     )
@@ -238,10 +241,12 @@ async fn main() {
         environment = ?parking_state.installation.identity().environment(),
         "Installation runtime ready");
 
+    // Credentials travel in a cookie, so only this installation's apps get CORS.
     let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any)
+        .allow_origin(AllowOrigin::list(ws_origin_policy.header_values()))
+        .allow_credentials(true)
+        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
+        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
         .expose_headers([
             axum::http::HeaderName::from_static("x-request-id"),
             axum::http::HeaderName::from_static("x-estaciona-api-version"),
@@ -267,10 +272,12 @@ async fn main() {
         )
         .route("/reservations/recommend", get(reservations::recommend_spot))
         .route("/spots/{id}/status", put(reservations::update_spot_status))
-        .merge(auth_routes(parking_state.clone()))
+        .route("/auth/logout", post(sessions::logout))
         .merge(ws_tickets::routes())
         .merge(vehicles::routes(lpr_mode))
         .route("/users/{id}", get(users::get_user))
+        .route("/me", get(users::me))
+        .route("/me/eligibility", put(users::update_eligibility))
         .route("/config", post(save_config));
     let versioned = api
         .clone()
@@ -285,7 +292,13 @@ async fn main() {
         .route("/ws/dashboard", get(ws_tickets::dashboard_handler))
         .nest("/api/v1", versioned)
         .merge(api)
+        // Browser navigation and the provider's back-channel, outside the API.
+        .merge(identity::routes(parking_state.clone()))
         .with_state(parking_state.clone())
+        .layer(axum::middleware::from_fn_with_state(
+            ws_origin_policy.clone(),
+            csrf::guard,
+        ))
         .layer(axum::extract::Extension(ws_origin_policy))
         .layer(cors)
         .layer(TraceLayer::new_for_http().make_span_with(
@@ -302,6 +315,8 @@ async fn main() {
     tracing::info!("Server listening on {}", listener.local_addr().unwrap());
 
     ws_tickets::spawn_cleanup(parking_state.installation.pool().clone());
+    let discovery = parking_state.clone();
+    tokio::spawn(async move { discovery.identity.discover_until_ready().await });
     let state_for_bg_task = parking_state;
 
     tokio::spawn(async move {
@@ -364,31 +379,6 @@ async fn main() {
 
 fn request_path_for_trace(uri: &axum::http::Uri) -> &str {
     uri.path()
-}
-
-fn auth_routes(state: SharedState) -> Router<SharedState> {
-    Router::new()
-        .route("/auth/logout", post(sessions::logout))
-        .route(
-            "/login",
-            post(auth::login_dashboard)
-                .route_layer(DefaultBodyLimit::max(auth_limits::AUTH_BODY_LIMIT))
-                .route_layer(RequestBodyLimitLayer::new(auth_limits::AUTH_BODY_LIMIT))
-                .route_layer(axum::middleware::from_fn_with_state(
-                    state.clone(),
-                    auth_limits::guard_login,
-                )),
-        )
-        .route(
-            "/users",
-            post(users::create_user)
-                .route_layer(DefaultBodyLimit::max(auth_limits::AUTH_BODY_LIMIT))
-                .route_layer(RequestBodyLimitLayer::new(auth_limits::AUTH_BODY_LIMIT))
-                .route_layer(axum::middleware::from_fn_with_state(
-                    state,
-                    auth_limits::guard_register,
-                )),
-        )
 }
 
 async fn health_check() -> &'static str {

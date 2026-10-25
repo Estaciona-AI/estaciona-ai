@@ -95,14 +95,11 @@ mod tests {
             .bind(gateway).execute(&pool).await.unwrap();
         let principal = edge_auth::authenticate(&pool, &key).await.unwrap().unwrap();
         let user = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO users (id,name,email,password_hash) VALUES ($1,'fixture',$2,'unused')",
-        )
-        .bind(user)
-        .bind(format!("{user}@example.invalid"))
-        .execute(&pool)
-        .await
-        .unwrap();
+        sqlx::query("INSERT INTO users (id) VALUES ($1)")
+            .bind(user)
+            .execute(&pool)
+            .await
+            .unwrap();
         let mut binding_tx = pool.begin().await.unwrap();
         let binding = crate::vehicles::request_binding(
             &mut binding_tx,
@@ -142,6 +139,7 @@ mod tests {
             jwt_secret: "unused".into(),
             plate_pepper: "fixture-pepper".into(),
             personal_data: crate::personal_data::PersonalDataCipher::for_unit_test(),
+            identity: crate::identity::IdentityProvider::for_unit_test(),
         });
         Fixture {
             state,

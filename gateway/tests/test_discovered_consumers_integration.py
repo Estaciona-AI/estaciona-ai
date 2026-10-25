@@ -113,22 +113,14 @@ class Consumer:
         ticket = json.loads(raw)["ticket"]
         return f"ws://{self.server.host}:8000{socket['path']}?{urlencode({'ticket': ticket})}"
 
-    def register_and_login(self):
-        credentials = {
-            "email": f"{uuid4()}@example.invalid",
-            "password": "disposable-consumer-password",
-        }
-        status, _, raw = self.request(
-            "register", payload={"name": "Synthetic consumer", **credentials}
-        )
-        assert status == 201, raw
-        user = json.loads(raw)
-        status, headers, raw = self.request("login", payload=credentials)
+    def signed_in(self):
+        """An account provisioned at the identity provider, after its sign-in."""
+        user_id = insert_user(self.server)
+        bearer = token(self.server, user_id, "user", int(time.time()) + 3600)
+        status, _, raw = self.request("current_user", bearer=bearer)
         assert status == 200, raw
-        login = json.loads(raw)
-        assert user["id"] == login["id"]
-        assert "HttpOnly" in headers["Set-Cookie"]
-        return user["id"], login["token"]
+        assert json.loads(raw)["id"] == str(user_id)
+        return str(user_id), bearer
 
 
 @pytest.fixture
@@ -176,7 +168,7 @@ def test_consumer_resolves_all_advertised_schemas_from_live_server(consumer):
         assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
         assert schema["x-contract-version"] == consumer.manifest["version"]
     assert len(paths) >= 15
-    assert consumer.capabilities["authentication"]["sso"] is False
+    assert consumer.capabilities["authentication"]["sso"] is True
 
 
 def test_catalog_protected_operations_reject_anonymous_consumers(consumer):
@@ -190,6 +182,7 @@ def test_catalog_protected_operations_reject_anonymous_consumers(consumer):
             "websocket_ticket": {"destination": "app"},
             "create_reservation": {"spot_id": "R02-A"},
             "update_spot_status": {"status": "free"},
+            "update_eligibility": {"date_of_birth": None, "pcd_status": None},
             "save_config": [],
         }.get(name)
         result = consumer.request(
@@ -212,8 +205,8 @@ def test_catalog_protected_operations_reject_anonymous_consumers(consumer):
 
 
 def test_browser_consumer_login_reservation_ownership_and_logout(consumer):
-    user_id, bearer = consumer.register_and_login()
-    _, other_bearer = consumer.register_and_login()
+    user_id, bearer = consumer.signed_in()
+    _, other_bearer = consumer.signed_in()
     status, _, raw = consumer.request(
         "create_reservation", payload={"spot_id": "R02-A"}, bearer=bearer
     )
@@ -244,7 +237,7 @@ def test_browser_consumer_login_reservation_ownership_and_logout(consumer):
         "SELECT status FROM reservations WHERE id=%s", (reservation["id"],)
     ) == [("cancelled",)]
     status, _, raw = consumer.request("logout", bearer=bearer)
-    assert status == 204 and raw == b""
+    assert status == 200 and json.loads(raw) == {"end_session_url": None}
     assert_error(
         *consumer.request("get_user", bearer=bearer, parameters={"id": user_id}),
         401,
@@ -255,7 +248,7 @@ def test_browser_consumer_login_reservation_ownership_and_logout(consumer):
 def test_browser_consumer_ticket_is_single_use_and_commands_use_session_identity(
     consumer,
 ):
-    user_id, bearer = consumer.register_and_login()
+    user_id, bearer = consumer.signed_in()
     assert_error(
         *consumer.request(
             "websocket_ticket", payload={"destination": "dashboard"}, bearer=bearer
@@ -432,18 +425,12 @@ def test_edge_and_dashboard_consumers_observe_committed_occupancy_and_forecast(
 
 
 def test_http_consumer_rejects_a_response_incompatible_with_advertised_schema(consumer):
-    consumer.operations["register"]["responses"]["201"]["schema"] = (
+    _, bearer = consumer.signed_in()
+    consumer.operations["current_user"]["responses"]["200"]["schema"] = (
         "v1/rest-issued-ws-ticket.schema.json"
     )
     with pytest.raises(ValidationError):
-        consumer.request(
-            "register",
-            payload={
-                "name": "Schema regression",
-                "email": f"{uuid4()}@example.invalid",
-                "password": "disposable-schema-password",
-            },
-        )
+        consumer.request("current_user", bearer=bearer)
 
 
 def test_http_consumer_rejects_an_error_incompatible_with_advertised_schema(consumer):
@@ -455,7 +442,7 @@ def test_http_consumer_rejects_an_error_incompatible_with_advertised_schema(cons
 
 
 def test_http_consumer_validates_nonempty_collections_and_their_items(consumer):
-    _, bearer = consumer.register_and_login()
+    _, bearer = consumer.signed_in()
     assert (
         consumer.request(
             "create_reservation", payload={"spot_id": "R02-A"}, bearer=bearer
@@ -477,7 +464,7 @@ def test_http_consumer_validates_nonempty_collections_and_their_items(consumer):
 def test_websocket_consumer_checks_every_frame_against_advertised_schema(
     consumer, kind
 ):
-    _, bearer = consumer.register_and_login()
+    _, bearer = consumer.signed_in()
     url = consumer.ticket_url("app", bearer)
     consumer.sockets["app"]["send"]["schema"] = "v1/gateway-to-vision.schema.json"
 

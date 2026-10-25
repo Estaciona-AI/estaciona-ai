@@ -1,9 +1,12 @@
 // SPDX-FileCopyrightText: 2026 Guilherme Pedroza
 // SPDX-License-Identifier: Apache-2.0
 
+//! Admission for the unauthenticated sign-in endpoints. Each request writes a
+//! row or calls the identity provider, so the process caps both rate and
+//! concurrency. Password guessing is the identity provider's to stop.
 use axum::{
     extract::{Request, State},
-    http::{Method, StatusCode, header},
+    http::{StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -13,8 +16,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::state::SharedState;
 
-pub const AUTH_BODY_LIMIT: usize = 16 * 1024;
-const AUTH_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const SIGN_IN_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthLimitError {
@@ -40,7 +42,7 @@ impl IntoResponse for AuthLimitError {
                 .into_response(),
             Self::Internal => (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Authentication worker failed",
+                "Authentication admission failed",
             )
                 .into_response(),
         }
@@ -48,61 +50,27 @@ impl IntoResponse for AuthLimitError {
 }
 
 pub struct AuthLimits {
-    hash_slots: Arc<Semaphore>,
     request_slots: Arc<Semaphore>,
-    login: Mutex<TokenBucket>,
-    register: Mutex<TokenBucket>,
+    sign_in: Mutex<TokenBucket>,
 }
 
 impl Default for AuthLimits {
     fn default() -> Self {
-        let now = Instant::now();
         Self {
-            hash_slots: Arc::new(Semaphore::new(1)),
-            request_slots: Arc::new(Semaphore::new(8)),
-            login: Mutex::new(TokenBucket::new(Duration::from_millis(200), 10, now)),
-            register: Mutex::new(TokenBucket::new(Duration::from_secs(1), 2, now)),
+            request_slots: Arc::new(Semaphore::new(16)),
+            // 20 per second with a burst of 40: a class arriving together, not a flood.
+            sign_in: Mutex::new(TokenBucket::new(
+                Duration::from_millis(50),
+                40,
+                Instant::now(),
+            )),
         }
     }
 }
 
-#[derive(Clone, Copy)]
-enum AuthEndpoint {
-    Login,
-    Register,
-}
-
 impl AuthLimits {
-    pub async fn run_blocking<T, F>(&self, work: F) -> Result<T, AuthLimitError>
-    where
-        F: FnOnce() -> T + Send + 'static,
-        T: Send + 'static,
-    {
-        let permit = self
-            .hash_slots
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| AuthLimitError::Unavailable)?;
-
-        tokio::task::spawn_blocking(move || {
-            let output = work();
-            // The closure owns the permit even if its HTTP caller is cancelled.
-            drop(permit);
-            output
-        })
-        .await
-        .map_err(|error| {
-            tracing::error!(panic = error.is_panic(), "Authentication worker failed");
-            AuthLimitError::Internal
-        })
-    }
-
-    fn take_rate_at(&self, endpoint: AuthEndpoint, now: Instant) -> Result<(), AuthLimitError> {
-        let bucket = match endpoint {
-            AuthEndpoint::Login => &self.login,
-            AuthEndpoint::Register => &self.register,
-        };
-        let mut bucket = bucket.lock().map_err(|_| AuthLimitError::Internal)?;
+    fn take_rate_at(&self, now: Instant) -> Result<(), AuthLimitError> {
+        let mut bucket = self.sign_in.lock().map_err(|_| AuthLimitError::Internal)?;
         if bucket.try_take_at(now) {
             Ok(())
         } else {
@@ -110,11 +78,8 @@ impl AuthLimits {
         }
     }
 
-    fn admit_request(
-        &self,
-        endpoint: AuthEndpoint,
-    ) -> Result<OwnedSemaphorePermit, AuthLimitError> {
-        self.take_rate_at(endpoint, Instant::now())?;
+    fn admit_request(&self) -> Result<OwnedSemaphorePermit, AuthLimitError> {
+        self.take_rate_at(Instant::now())?;
         self.request_slots
             .clone()
             .try_acquire_owned()
@@ -153,31 +118,14 @@ impl TokenBucket {
     }
 }
 
-pub async fn guard_login(
+pub async fn guard_sign_in(
     State(state): State<SharedState>,
     request: Request,
     next: Next,
 ) -> Response {
-    let method = request.method().clone();
     guard_future(
         &state.auth_limits,
-        AuthEndpoint::Login,
-        method,
-        next.run(request),
-    )
-    .await
-}
-
-pub async fn guard_register(
-    State(state): State<SharedState>,
-    request: Request,
-    next: Next,
-) -> Response {
-    let method = request.method().clone();
-    guard_future(
-        &state.auth_limits,
-        AuthEndpoint::Register,
-        method,
+        SIGN_IN_REQUEST_TIMEOUT,
         next.run(request),
     )
     .await
@@ -185,18 +133,14 @@ pub async fn guard_register(
 
 async fn guard_future(
     limits: &AuthLimits,
-    endpoint: AuthEndpoint,
-    method: Method,
+    deadline: Duration,
     work: impl std::future::Future<Output = Response>,
 ) -> Response {
-    if method != Method::POST {
-        return work.await;
-    }
-    let permit = match limits.admit_request(endpoint) {
+    let permit = match limits.admit_request() {
         Ok(permit) => permit,
         Err(error) => return error.into_response(),
     };
-    let response = tokio::time::timeout(AUTH_REQUEST_TIMEOUT, work)
+    let response = tokio::time::timeout(deadline, work)
         .await
         .unwrap_or_else(|_| AuthLimitError::Unavailable.into_response());
     drop(permit);
@@ -207,8 +151,6 @@ async fn guard_future(
 mod tests {
     use super::*;
     use axum::body::to_bytes;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use tokio::sync::oneshot;
 
     #[test]
     fn bucket_rejects_exhausted_burst_and_refills_fractional_credit() {
@@ -226,25 +168,6 @@ mod tests {
             assert!(bucket.try_take_at(now + Duration::from_secs(60)));
         }
         assert!(!bucket.try_take_at(now + Duration::from_secs(60)));
-    }
-
-    #[tokio::test]
-    async fn blocking_job_returns_its_value_and_releases_the_slot() {
-        let limits = AuthLimits::default();
-        assert_eq!(limits.run_blocking(|| 42).await, Ok(42));
-        assert_eq!(limits.run_blocking(|| 7).await, Ok(7));
-    }
-
-    #[tokio::test]
-    async fn work_error_is_preserved_and_releases_the_slot() {
-        let limits = AuthLimits::default();
-        assert_eq!(
-            limits
-                .run_blocking(|| Err::<(), _>("synthetic work error"))
-                .await,
-            Ok(Err("synthetic work error"))
-        );
-        assert_eq!(limits.run_blocking(|| 17).await, Ok(17));
     }
 
     #[tokio::test]
@@ -285,50 +208,17 @@ mod tests {
     }
 
     #[test]
-    fn request_admission_rejects_ninth_without_queueing() {
+    fn request_admission_rejects_the_seventeenth_without_queueing() {
         let limits = AuthLimits::default();
-        let permits = (0..8)
-            .map(|_| limits.admit_request(AuthEndpoint::Login).unwrap())
+        let permits = (0..16)
+            .map(|_| limits.admit_request().unwrap())
             .collect::<Vec<_>>();
-        assert!(matches!(
-            limits.admit_request(AuthEndpoint::Login),
-            Err(AuthLimitError::Unavailable)
-        ));
+        assert_eq!(
+            limits.admit_request().err(),
+            Some(AuthLimitError::Unavailable)
+        );
         drop(permits);
-        assert!(limits.admit_request(AuthEndpoint::Login).is_ok());
-    }
-
-    #[test]
-    fn login_and_registration_buckets_are_separate() {
-        let limits = AuthLimits::default();
-        let now = Instant::now();
-        for _ in 0..10 {
-            assert!(limits.take_rate_at(AuthEndpoint::Login, now).is_ok());
-        }
-        assert_eq!(
-            limits.take_rate_at(AuthEndpoint::Login, now),
-            Err(AuthLimitError::RateLimited)
-        );
-        assert!(limits.take_rate_at(AuthEndpoint::Register, now).is_ok());
-        assert!(limits.take_rate_at(AuthEndpoint::Register, now).is_ok());
-        assert_eq!(
-            limits.take_rate_at(AuthEndpoint::Register, now),
-            Err(AuthLimitError::RateLimited)
-        );
-        assert!(
-            limits
-                .take_rate_at(AuthEndpoint::Login, now + Duration::from_millis(200))
-                .is_ok()
-        );
-        assert_eq!(
-            limits.take_rate_at(AuthEndpoint::Register, now + Duration::from_millis(200)),
-            Err(AuthLimitError::RateLimited)
-        );
-        assert!(
-            limits
-                .take_rate_at(AuthEndpoint::Register, now + Duration::from_secs(1))
-                .is_ok()
-        );
+        assert!(limits.admit_request().is_ok());
     }
 
     #[test]
@@ -336,171 +226,44 @@ mod tests {
         let limits = AuthLimits::default();
         let now = Instant::now();
         let accepted = std::thread::scope(|scope| {
-            let callers = (0..32)
-                .map(|_| scope.spawn(|| limits.take_rate_at(AuthEndpoint::Login, now).is_ok()))
+            let callers = (0..64)
+                .map(|_| scope.spawn(|| limits.take_rate_at(now).is_ok()))
                 .collect::<Vec<_>>();
             callers
                 .into_iter()
                 .map(|caller| usize::from(caller.join().unwrap()))
                 .sum::<usize>()
         });
-        assert_eq!(accepted, 10);
+        assert_eq!(accepted, 40);
     }
 
     #[tokio::test]
     async fn successful_guard_preserves_the_handler_response() {
         let limits = AuthLimits::default();
-        let response = guard_future(&limits, AuthEndpoint::Login, Method::POST, async {
-            (StatusCode::ACCEPTED, "accepted handler body").into_response()
+        let response = guard_future(&limits, SIGN_IN_REQUEST_TIMEOUT, async {
+            (StatusCode::SEE_OTHER, "redirect body").into_response()
         })
         .await;
-        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
         assert_eq!(
             to_bytes(response.into_body(), 1024).await.unwrap().as_ref(),
-            b"accepted handler body"
+            b"redirect body"
         );
     }
 
     #[tokio::test]
-    async fn deadline_releases_request_capacity_but_keeps_running_hash_bounded() {
-        let limits = Arc::new(AuthLimits::default());
-        let (started_tx, started_rx) = oneshot::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let request_limits = limits.clone();
-        let start = Instant::now();
-        let request = tokio::spawn(async move {
-            guard_future(&request_limits, AuthEndpoint::Login, Method::POST, async {
-                let _ = request_limits
-                    .run_blocking(move || {
-                        let _ = started_tx.send(());
-                        let _ = release_rx.recv_timeout(Duration::from_secs(10));
-                    })
-                    .await;
-                StatusCode::OK.into_response()
-            })
-            .await
-        });
-        tokio::time::timeout(Duration::from_secs(2), started_rx)
-            .await
-            .unwrap()
-            .unwrap();
-        let response = tokio::time::timeout(Duration::from_secs(8), request)
-            .await
-            .unwrap()
-            .unwrap();
+    async fn a_stalled_sign_in_times_out_and_releases_its_slot() {
+        let limits = AuthLimits::default();
+        let response = guard_future(
+            &limits,
+            Duration::from_millis(20),
+            std::future::pending::<Response>(),
+        )
+        .await;
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(response.headers()[header::RETRY_AFTER], "1");
-        assert!(start.elapsed() >= Duration::from_secs(4));
-        let permits = (0..8)
-            .map(|_| limits.admit_request(AuthEndpoint::Login).unwrap())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            limits.run_blocking(|| ()).await,
-            Err(AuthLimitError::Unavailable)
-        );
-        release_tx.send(()).unwrap();
-        drop(permits);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn running_job_stays_bounded_after_its_caller_is_cancelled() {
-        let limits = Arc::new(AuthLimits::default());
-        let (started_tx, started_rx) = oneshot::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let worker_limits = limits.clone();
-        let caller = tokio::spawn(async move {
-            worker_limits
-                .run_blocking(move || {
-                    let _ = started_tx.send(());
-                    let _ = release_rx.recv_timeout(Duration::from_secs(3));
-                })
-                .await
-        });
-        tokio::time::timeout(Duration::from_secs(2), started_rx)
-            .await
-            .unwrap()
-            .unwrap();
-        let rejected_work_started = Arc::new(AtomicBool::new(false));
-        let observed = rejected_work_started.clone();
-        assert_eq!(
-            limits
-                .run_blocking(move || observed.store(true, Ordering::SeqCst))
-                .await,
-            Err(AuthLimitError::Unavailable)
-        );
-        assert!(!rejected_work_started.load(Ordering::SeqCst));
-        // This task runs on the only async worker while the blocking closure waits.
-        assert_eq!(tokio::spawn(async { 9 }).await.unwrap(), 9);
-        caller.abort();
-        assert!(caller.await.unwrap_err().is_cancelled());
-        assert_eq!(
-            limits.run_blocking(|| ()).await,
-            Err(AuthLimitError::Unavailable)
-        );
-        release_tx.send(()).unwrap();
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                match limits.run_blocking(|| 11).await {
-                    Ok(value) => break assert_eq!(value, 11),
-                    Err(AuthLimitError::Unavailable) => tokio::task::yield_now().await,
-                    Err(error) => panic!("unexpected worker error: {error:?}"),
-                }
-            }
-        })
-        .await
-        .unwrap();
-    }
-
-    #[tokio::test]
-    async fn panic_returns_internal_error_and_releases_the_slot() {
-        let limits = AuthLimits::default();
-        assert_eq!(
-            limits
-                .run_blocking::<(), _>(|| panic!("synthetic worker panic"))
-                .await,
-            Err(AuthLimitError::Internal)
-        );
-        assert_eq!(limits.run_blocking(|| 13).await, Ok(13));
-    }
-
-    #[tokio::test]
-    async fn closed_budget_rejects_work_without_running_it() {
-        let limits = AuthLimits::default();
-        assert_eq!(limits.run_blocking(|| 19).await, Ok(19));
-        limits.hash_slots.close();
-        let ran = Arc::new(AtomicBool::new(false));
-        let observed = ran.clone();
-        assert_eq!(
-            limits
-                .run_blocking(move || observed.store(true, Ordering::SeqCst))
-                .await,
-            Err(AuthLimitError::Unavailable)
-        );
-        assert!(!ran.load(Ordering::SeqCst));
-    }
-
-    #[tokio::test]
-    async fn other_methods_preserve_405_without_consuming_authentication_burst() {
-        let limits = AuthLimits::default();
-        for (endpoint, method, burst) in [
-            (AuthEndpoint::Login, Method::GET, 10),
-            (AuthEndpoint::Register, Method::OPTIONS, 2),
-        ] {
-            for _ in 0..12 {
-                let response = guard_future(&limits, endpoint, method.clone(), async {
-                    StatusCode::METHOD_NOT_ALLOWED.into_response()
-                })
-                .await;
-                assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
-            }
-            let now = Instant::now();
-            for _ in 0..burst {
-                assert!(limits.take_rate_at(endpoint, now).is_ok());
-            }
-            assert_eq!(
-                limits.take_rate_at(endpoint, now),
-                Err(AuthLimitError::RateLimited)
-            );
-        }
+        let permits: Vec<_> = (0..16)
+            .map(|_| limits.request_slots.clone().try_acquire_owned().unwrap())
+            .collect();
+        assert_eq!(permits.len(), 16);
     }
 }

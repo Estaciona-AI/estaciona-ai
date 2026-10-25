@@ -10,7 +10,7 @@ import os
 import time
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import pytest
 import websockets
@@ -51,7 +51,8 @@ def test_discovery_exposes_actual_capabilities_and_immutable_schemas(server):
     assert status == 200
     capabilities = json.loads(body)
     assert capabilities["tenancy_mode"] == "single_installation"
-    assert capabilities["authentication"]["sso"] is False
+    assert capabilities["authentication"]["sso"] is True
+    assert capabilities["paths"]["sign_in"] == "/auth/login"
     assert capabilities["authentication"]["browser_websocket"] == "single_use_ticket"
     assert headers["X-Estaciona-Api-Version"] == "1"
     UUID(headers["X-Request-ID"])
@@ -83,42 +84,25 @@ def test_versioned_errors_preserve_legacy_responses_and_method_headers(server):
     assert headers["Content-Type"].startswith("text/plain")
     for path, method, expected in [
         ("/api/v1/missing", "GET", "NOT_FOUND"),
-        ("/api/v1/login", "GET", "METHOD_NOT_ALLOWED"),
+        ("/api/v1/me", "POST", "METHOD_NOT_ALLOWED"),
     ]:
         status, headers, body = call(server, path, method)
         assert json.loads(body)["code"] == expected
         if status == 405:
-            assert "POST" in headers["Allow"]
+            assert "GET" in headers["Allow"]
 
 
-def test_versioned_registration_login_reservation_and_logout_share_state(server):
-    email = f"{uuid4()}@example.invalid"
-    status, _, body = call(
-        server,
-        "/api/v1/users",
-        "POST",
-        {
-            "name": "Contract fixture",
-            "email": email,
-            "password": "disposable-password",
-        },
-    )
-    assert status in (200, 201), body
-    user = json.loads(body)
-    status, headers, body = call(
-        server,
-        "/api/v1/login",
-        "POST",
-        {
-            "email": email,
-            "password": "disposable-password",
-        },
-    )
+def test_versioned_session_reservation_and_logout_share_state(server):
+    # Accounts come from the identity provider: no local registration or login.
+    for path in ["/api/v1/login", "/api/v1/users", "/login", "/users"]:
+        assert call(server, path, "POST", {})[0] in (404, 405), path
+    user_id = insert_user(server)
+    bearer = token(server, user_id, "user", int(time.time()) + 3600)
+    status, _, body = call(server, "/api/v1/me", bearer=bearer)
     assert status == 200, body
-    login = json.loads(body)
-    assert login["id"] == user["id"]
-    assert "HttpOnly" in headers["Set-Cookie"]
-    bearer = login["token"]
+    user = json.loads(body)
+    assert user["id"] == str(user_id)
+    assert "email" not in user
     status, _, body = call(
         server, "/api/v1/reservations", "POST", {"spot_id": "R02-A"}, bearer
     )
@@ -137,7 +121,7 @@ def test_versioned_registration_login_reservation_and_logout_share_state(server)
         == user["id"]
     )
     assert call(server, f"/users/{user['id']}", bearer=bearer)[0] == 200
-    assert call(server, "/api/v1/auth/logout", "POST", bearer=bearer)[0] in (200, 204)
+    assert call(server, "/api/v1/auth/logout", "POST", bearer=bearer)[0] == 200
     for path in ["/reservations", "/api/v1/reservations"]:
         assert call(server, path, bearer=bearer)[0] == 401
 
@@ -175,25 +159,22 @@ def test_versioned_ticket_uses_existing_websocket_and_role_checks(server):
     asyncio.run(connect())
 
 
-def test_auth_rate_budget_is_shared_between_versioned_and_legacy_routes(server):
-    # Malformed but bounded inputs consume the same login bucket, without hashing.
+def test_sign_in_is_rate_limited_and_unavailable_without_the_provider(server):
+    # The harness provider is unreachable: sign-in fails closed, nothing else does.
     statuses = []
-    for index in range(16):
-        path = "/login" if index % 2 else "/api/v1/login"
-        status, headers, body = call(
-            server, path, "POST", {"email": "", "password": ""}
-        )
+    for _ in range(60):
+        status, headers, _ = call(server, "/auth/login")
         statuses.append(status)
         if status == 429:
             assert headers["Retry-After"] == "1"
-            if path.startswith("/api/v1"):
-                assert json.loads(body)["code"] == "TOO_MANY_REQUESTS"
-    assert 429 in statuses
+    assert set(statuses) <= {429, 503}
+    assert 503 in statuses and 429 in statuses
+    assert call(server, "/health")[0] == 200
 
 
 def test_versioned_extractors_limits_and_cors_use_the_public_error_contract(server):
     for path, payload, expected in [
-        ("/api/v1/login", {"email": "x", "password": "a" * 17000}, 413),
+        ("/api/v1/auth/ws-ticket", {"destination": "app", "padding": "a" * 2048}, 413),
         ("/api/v1/reservations", {"spot_id": "R02-A", "expires_at": "tomorrow"}, 422),
     ]:
         status, headers, body = call(

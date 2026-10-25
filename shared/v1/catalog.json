@@ -1,11 +1,8 @@
 {
   "authentication": {
-    "human_bearer": {
-      "credential": "authorization_bearer",
-      "validation": "registered_current_database_session"
-    },
     "human_session": {
-      "credential": "bearer_or_estaciona_token_cookie",
+      "cookie_writes": "require_allowed_origin",
+      "credential": "bearer_or_host_only_session_cookie",
       "validation": "registered_current_database_session"
     },
     "individual_gateway_bearer": {
@@ -27,36 +24,36 @@
   },
   "http": [
     {
-      "authentication": "public",
-      "authorization": "public",
+      "authentication": "human_session",
+      "authorization": "authenticated_user",
       "availability": "always",
       "error_schema": "v1/rest-api-error.schema.json",
-      "id": "login",
-      "legacy_path": "/login",
-      "method": "POST",
-      "path": "/api/v1/login",
-      "request_encoding": "json",
-      "request_schema": "v1/rest-login-request.schema.json",
+      "id": "current_user",
+      "legacy_path": "/me",
+      "method": "GET",
+      "path": "/api/v1/me",
+      "request_encoding": "none",
+      "request_schema": null,
       "responses": {
         "200": {
           "encoding": "json",
-          "schema": "v1/rest-login-response.schema.json"
+          "schema": "v1/rest-user-response.schema.json"
         }
       }
     },
     {
-      "authentication": "public",
-      "authorization": "public",
+      "authentication": "human_session",
+      "authorization": "authenticated_user",
       "availability": "always",
       "error_schema": "v1/rest-api-error.schema.json",
-      "id": "register",
-      "legacy_path": "/users",
-      "method": "POST",
-      "path": "/api/v1/users",
+      "id": "update_eligibility",
+      "legacy_path": "/me/eligibility",
+      "method": "PUT",
+      "path": "/api/v1/me/eligibility",
       "request_encoding": "json",
-      "request_schema": "v1/rest-create-user.schema.json",
+      "request_schema": "v1/rest-update-eligibility.schema.json",
       "responses": {
-        "201": {
+        "200": {
           "encoding": "json",
           "schema": "v1/rest-user-response.schema.json"
         }
@@ -81,7 +78,7 @@
       }
     },
     {
-      "authentication": "human_bearer",
+      "authentication": "human_session",
       "authorization": "current_session",
       "availability": "always",
       "error_schema": "v1/rest-api-error.schema.json",
@@ -92,14 +89,14 @@
       "request_encoding": "none",
       "request_schema": null,
       "responses": {
-        "204": {
-          "encoding": "empty",
-          "schema": null
+        "200": {
+          "encoding": "json",
+          "schema": "v1/rest-logout-response.schema.json"
         }
       }
     },
     {
-      "authentication": "human_bearer",
+      "authentication": "human_session",
       "authorization": "dashboard_requires_admin",
       "availability": "always",
       "effect": "single_use_destination_bound_ticket",
@@ -407,7 +404,7 @@
     ],
     "public_endpoint": null,
     "scope_from_client_payload": false,
-    "secrets_source": "process_environment",
+    "secrets_source": "process_environment_or_private_files",
     "source": "operator_package"
   },
   "local_transport": {
@@ -429,7 +426,17 @@
   },
   "schema_null_meaning": "no_exported_dto_schema",
   "scope": "single_installation_per_process_and_database",
-  "version": "1.3.0",
+  "sign_in": {
+    "accounts": "provisioned_at_identity_provider",
+    "backchannel_logout": "/auth/backchannel-logout",
+    "callback": "/auth/callback",
+    "identity_provider": "central_keycloak_realm",
+    "local_credentials": false,
+    "protocol": "openid_connect_authorization_code_with_pkce",
+    "session": "host_only_http_only_cookie",
+    "start": "/auth/login"
+  },
+  "version": "1.4.0",
   "websockets": [
     {
       "authentication": "single_use_ticket",
