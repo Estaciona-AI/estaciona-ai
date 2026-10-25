@@ -161,8 +161,9 @@ class Server:
                 "--cap-drop=ALL",
                 "--security-opt",
                 "no-new-privileges",
+                # The owner of the private fixture files, as SECRETS_DIR in production.
                 "--user",
-                "1000:1000",
+                f"{os.getuid()}:{os.getgid()}",
                 "--network",
                 f"container:{self.postgres_container}",
                 "--mount",
