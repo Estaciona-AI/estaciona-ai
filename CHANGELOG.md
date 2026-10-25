@@ -12,6 +12,80 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
 
 ## [Unreleased]
 
+### Added
+
+- Forecast site profile (`FORECAST_PROFILE`, optional JSON) with the local
+  timezone, expected cars per shift, academic periods and local holidays.
+  Brazilian national holidays, including the Easter-based ones, are computed
+  for any year.
+- Campus occupancy simulator used only as a training prior. It samples
+  plausible campuses around the profile, censors demand at capacity and adds
+  detection noise and camera outages. Simulated data is never stored or
+  reported as an observation.
+- Offline forecast acceptance check: `python -m ml.backtest` in `gateway/`.
+- Forecast worker, `python -m ml.worker` in `gateway/`, meant to run next to
+  the server. It forecasts each hour at five past, retrains daily at 03:30
+  site time, and trains on start when no valid artifact exists. It publishes
+  `TREND_PREDICTION_V2` through `/ws/edge` with its own edge credential
+  (`FORECAST_EDGE_API_KEY`, granted only `trend_prediction`) and the same
+  durable outbox as the gateway.
+- `infra/forecast-reader.sql` creates the worker's read-only database role,
+  limited to `spots` and `physical_occupancy_hourly`.
+
+### Changed
+
+- The forecast predicts the occupancy rate with a calendar-aware LightGBM
+  model instead of the attention model. Training pools simulated campuses with
+  the real history, weighting real hours more. With four weeks of real
+  history, a backtest decides whether the model or a naive baseline is served.
+  The model is saved in LightGBM's text format with a manifest (hash, features,
+  data window, real hours, source, backtest), and inference refuses mismatched
+  artifacts. The payload stays `TREND_PREDICTION_V2`.
+- The gateway no longer runs the forecast and no longer needs
+  `ML_DATABASE_URL`. `ML_DATABASE_URL` is now required by the worker and must
+  name the read-only role; it no longer falls back to `DATABASE_URL`.
+
+### Removed
+
+- The attention forecast model, its checkpoint and `torch`. Without a LightGBM
+  artifact, the worker trains the simulated prior instead.
+- The stay-duration model, which read users' disability status and age, and
+  `scikit-learn`. The forecast already reported stay duration as unavailable.
+- `gateway/ml/generate_data.py`, which replaced `user_occupancy_history` with
+  synthetic users without any environment check. The simulator covers demos and
+  tests without writing to the database.
+
+### Fixed
+
+- Forecast timestamps were one hour late: the first point is now the current
+  hour, the first one not yet observed. Predicted counts are rounded instead of
+  truncated.
+- One silent spot no longer discards a whole hour of history, and registering a
+  new spot no longer discards earlier hours. An hour counts when at least 90% of
+  the spots monitored so far reported.
+
+### Security
+
+- The edge gateway no longer holds a database credential for the forecast. The
+  worker refuses to start if its role can insert, update, delete or truncate
+  any table. Removing `torch` also drops its `filelock`, `fsspec` and
+  `setuptools` advisories from the gateway lock.
+- Update the locked Rust TLS, runtime and cryptography dependencies, including
+  `rustls`, `rustls-webpki`, `webpki-roots`, `tokio` and `ctutils`, and replace
+  yanked `chacha20` and `spin` releases.
+- Add a RustSec audit gate for pull requests, pushes to `develop`/`main`, and a
+  weekly schedule. Document the two unused asymmetric-cryptography advisory
+  exceptions by ID in `server/deny.toml`.
+- Pin CI Actions to commit SHAs, restrict workflow token permissions to read-only,
+  and configure weekly Action updates plus security-only Cargo/uv updates.
+  Dependabot security updates still require enabling the repository setting.
+- Add a private vulnerability reporting policy and define the maintained core
+  release line. GitHub security settings and deployment hardening are separate
+  controls; this policy does not enable them automatically.
+- Python dependency audit automation remains a separate draft while known
+  gateway and model-export advisories are unresolved. No Python/CUDA dependency
+  upgrades or advisory suppressions are included in this security batch.
+
 ## [0.9.0] - 2026-10-23
 
 **Release stage: pilot.** This is the first build that is not a pre-release.

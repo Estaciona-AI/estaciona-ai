@@ -1,0 +1,33 @@
+name: Rust dependency security
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+  schedule:
+    - cron: '23 8 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust-advisories:
+    name: RustSec advisories
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Audit locked Rust dependencies
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1 (cargo-deny 0.20.2)
+        with:
+          manifest-path: server/Cargo.toml
+          rust-version: '1.99.1'
+          arguments: --locked --all-features --config server/deny.toml
+          command: check advisories

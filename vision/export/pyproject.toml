@@ -8,5 +8,5 @@ dependencies = [
   "numpy==1.26.4", "protobuf==3.20.2", "opencv-python-headless==4.10.0.84",
   "pyyaml==6.0.2", "scipy==1.14.1", "pycocotools==2.0.8", "tqdm==4.67.1",
   "typeguard==2.13.3", "visualdl==2.5.3", "terminaltables==3.1.10",
-  "shapely==2.0.7", "setuptools==75.8.0",
+  "shapely==2.0.7", "setuptools==84.1.0",
 ]
