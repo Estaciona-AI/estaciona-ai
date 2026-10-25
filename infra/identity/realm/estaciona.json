@@ -56,7 +56,9 @@
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": false,
       "frontchannelLogout": false,
-      "fullScopeAllowed": true,
+      "fullScopeAllowed": false,
+      "defaultClientScopes": ["basic"],
+      "optionalClientScopes": [],
       "redirectUris": ["${HUB_REDIRECT_URI}"],
       "webOrigins": ["${HUB_ORIGIN}"],
       "attributes": {
@@ -93,9 +95,24 @@
       "implicitFlowEnabled": false,
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": true,
-      "fullScopeAllowed": true
+      "fullScopeAllowed": false
     }
   ],
+  "clientScopeMappings": {
+    "realm-management": [
+      {
+        "client": "provisioner",
+        "roles": [
+          "manage-clients",
+          "view-clients",
+          "query-clients",
+          "manage-users",
+          "view-users",
+          "query-users"
+        ]
+      }
+    ]
+  },
   "users": [
     {
       "username": "service-account-provisioner",

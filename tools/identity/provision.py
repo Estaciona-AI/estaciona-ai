@@ -29,6 +29,7 @@ USERNAME_PREFIX = "ea-"
 USERNAME_ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz"
 USERNAME_LENGTH = 10  # 50 random bits
 ROLES = ("user", "admin")
+HUB_CLIENT = "hub"
 CLIENT_ID = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 RESERVED_CLIENTS = {
     "account",
@@ -260,12 +261,13 @@ def create_installation(kc: Keycloak, args) -> dict:
     try:
         for name in ROLES:
             kc.call("POST", f"/clients/{uuid}/roles", body={"name": name})
-        # With fullScopeAllowed off, only roles in the client's scope reach its tokens.
-        kc.call(
-            "POST",
-            f"/clients/{uuid}/scope-mappings/clients/{uuid}",
-            body=kc.roles(uuid, ROLES),
-        )
+        # With fullScopeAllowed off, only roles in a client's scope reach its
+        # tokens: the installation sees its own roles, and the hub learns which
+        # installations an account may enter.
+        roles = kc.roles(uuid, ROLES)
+        kc.call("POST", f"/clients/{uuid}/scope-mappings/clients/{uuid}", body=roles)
+        hub = kc.client_uuid(HUB_CLIENT)
+        kc.call("POST", f"/clients/{hub}/scope-mappings/clients/{uuid}", body=roles)
         secret = kc.call("GET", f"/clients/{uuid}/client-secret")["value"]
         write_private_file(args.secret_out, secret)
     except ProvisionError:

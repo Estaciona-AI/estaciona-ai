@@ -27,7 +27,7 @@ ADMIN = "/admin/realms/estaciona"
 class FakeKeycloak:
     def __init__(self):
         self.requests = []
-        self.clients = {}
+        self.clients = {"hub-uuid": {"clientId": "hub"}}
         self.users = {}
         self.username_conflicts = 0
         self.fail = set()
@@ -195,7 +195,7 @@ class ProvisionTest(unittest.TestCase):
         code, output, _ = self.create(out)
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(output)["installation_client"], "uniube-centro")
-        (client,) = self.fake.clients.values()
+        (client,) = [c for c in self.fake.clients.values() if c["clientId"] != "hub"]
         self.assertFalse(client["publicClient"])
         self.assertTrue(client["standardFlowEnabled"])
         self.assertFalse(client["implicitFlowEnabled"])
@@ -221,8 +221,11 @@ class ProvisionTest(unittest.TestCase):
         )
         self.assertEqual(out.read_text(), CLIENT_SECRET + "\n")
         self.assertEqual(stat.S_IMODE(os.stat(out).st_mode), 0o600)
-        scope = [r for r in self.fake.requests if "scope-mappings" in r[1]]
-        self.assertEqual([role["name"] for role in scope[0][3]], ["user", "admin"])
+        scope = {r[1]: r[3] for r in self.fake.requests if "scope-mappings" in r[1]}
+        own = f"{ADMIN}/clients/client-1/scope-mappings/clients/client-1"
+        hub = f"{ADMIN}/clients/hub-uuid/scope-mappings/clients/client-1"
+        for path in (own, hub):
+            self.assertEqual([role["name"] for role in scope[path]], ["user", "admin"])
 
     def test_an_existing_secret_file_is_never_overwritten_or_reached(self):
         out = private(self.directory, "client.secret", "previous")
@@ -230,16 +233,16 @@ class ProvisionTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("already exists", errors)
         self.assertEqual(out.read_text(), "previous")
-        self.assertEqual(self.fake.clients, {})
+        self.assertEqual(list(self.fake.clients), ["hub-uuid"])
 
     def test_a_failed_registration_removes_the_new_client(self):
         self.fake.fail.add(
-            ("POST", "/clients/client-0/scope-mappings/clients/client-0")
+            ("POST", "/clients/hub-uuid/scope-mappings/clients/client-1")
         )
         out = Path(self.directory) / "client.secret"
         code, _, _ = self.create(out)
         self.assertEqual(code, 1)
-        self.assertEqual(self.fake.clients, {})
+        self.assertEqual(list(self.fake.clients), ["hub-uuid"])
         self.assertFalse(out.exists())
 
     def invite(self, *extra):

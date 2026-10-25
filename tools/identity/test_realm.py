@@ -41,9 +41,18 @@ class RealmTest(unittest.TestCase):
             self.assertFalse(client["implicitFlowEnabled"], client["clientId"])
             self.assertFalse(client["directAccessGrantsEnabled"], client["clientId"])
 
+    def test_no_client_relies_on_the_deprecated_full_scope(self):
+        for client in self.realm["clients"]:
+            self.assertFalse(client["fullScopeAllowed"], client["clientId"])
+        (mapping,) = self.realm["clientScopeMappings"]["realm-management"]
+        self.assertEqual(mapping["client"], "provisioner")
+        account = self.realm["users"][0]["clientRoles"]["realm-management"]
+        self.assertEqual(set(mapping["roles"]), set(account))
+
     def test_hub_is_a_public_pkce_client_with_exact_redirects(self):
         hub = self.clients["hub"]
         self.assertTrue(hub["publicClient"])
+        self.assertEqual(hub["defaultClientScopes"], ["basic"])
         self.assertEqual(hub["attributes"]["pkce.code.challenge.method"], "S256")
         self.assertEqual(hub["redirectUris"], ["${HUB_REDIRECT_URI}"])
         self.assertFalse(hub["serviceAccountsEnabled"])
