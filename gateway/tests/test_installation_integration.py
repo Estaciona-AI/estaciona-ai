@@ -430,6 +430,22 @@ def test_invalid_runtime_configuration_is_refused_before_migrations(
         assert probe.connect_ex((server.host, 8000)) != 0
 
 
+def test_production_refuses_plate_recognition_before_migrations(unstarted_server):
+    server = unstarted_server
+    manifest = server.root / "site" / "installation.json"
+    value = json.loads(manifest.read_text())
+    value["environment"] = "production"
+    manifest.write_text(json.dumps(value))
+    assert provision(server).returncode == 0
+    server.query("DROP TABLE physical_occupancy_hourly")
+    server.query("DELETE FROM _sqlx_migrations WHERE version=20261019000000")
+    before = database_snapshot(server)
+    result = command(server, environment={**server.environment, "LPR_ENABLED": "true"})
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "LPR_ENABLED=true is refused in production" in result.stderr
+    assert database_snapshot(server) == before
+
+
 @pytest.mark.parametrize("relative", [False, True])
 @pytest.mark.parametrize("database_setting", [None, "do-not-echo-invalid-database-url"])
 def test_offline_package_validation_is_read_only_and_does_not_require_runtime(
