@@ -29,6 +29,7 @@
 # Build/Docker
 infra/data/
 infra/env/
+infra/identity/env/
 
 # Model artifacts are provisioned separately with their own provenance/license.
 **/models/
