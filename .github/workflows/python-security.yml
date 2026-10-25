@@ -24,6 +24,15 @@ jobs:
       fail-fast: false
       matrix:
         project: [gateway, vision, vision/export, shared]
+        include:
+          # Reviewed 2026-10-25; review again by 2026-11-24 or before changing
+          # Paddle or the RT-DETR revision. Only Paddle 3.0 fixes these Paddle
+          # 2.6.2 command injections: CVE-2024-0817 in IrGraph.draw and
+          # CVE-2024-0815 in paddle.utils.download._wget_download. The offline
+          # export never calls IrGraph.draw, and the RT-DETR backbones download
+          # nothing through Paddle (other ppdet backbones would use "get").
+          - project: vision/export
+            ignored: PYSEC-2026-1754 PYSEC-2026-1756
     defaults:
       run:
         working-directory: ${{ matrix.project }}
@@ -40,11 +49,16 @@ jobs:
           uv export --frozen --all-groups --all-extras --no-emit-project
           --no-header --no-annotate --output-file "$RUNNER_TEMP/requirements.txt"
       - name: Audit every pinned dependency without resolving or installing it
-        run: >-
-          uv tool run --python "$(uv python find)" --from pip-audit==2.10.1 pip-audit
-          --require-hashes --no-deps --disable-pip --strict --progress-spinner off
-          --requirement "$RUNNER_TEMP/requirements.txt"
-          --format json --output "$RUNNER_TEMP/audit.json"
+        env:
+          IGNORED: ${{ matrix.ignored }}
+        run: |
+          ignore=()
+          for id in $IGNORED; do ignore+=(--ignore-vuln "$id"); done
+          uv tool run --python "$(uv python find)" --from pip-audit==2.10.1 pip-audit \
+            --require-hashes --no-deps --disable-pip --strict --progress-spinner off \
+            "${ignore[@]}" \
+            --requirement "$RUNNER_TEMP/requirements.txt" \
+            --format json --output "$RUNNER_TEMP/audit.json"
       - name: Upload audit evidence even when vulnerabilities are found
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
