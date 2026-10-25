@@ -87,9 +87,10 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
 - Add a private vulnerability reporting policy and define the maintained core
   release line. GitHub security settings and deployment hardening are separate
   controls; this policy does not enable them automatically.
-- Python dependency audit automation remains a separate draft while known
-  gateway and model-export advisories are unresolved. No Python/CUDA dependency
-  upgrades or advisory suppressions are included in this security batch.
+- Add a Python advisory audit (`pip-audit`) of the frozen gateway, vision,
+  model export and shared locks for pull requests, pushes to `develop`/`main`
+  and a weekly schedule. Two Paddle 2.6.2 advisories that the model export does
+  not reach are accepted by ID, for `vision/export` only, until Paddle 3.0.
 
 ## [0.9.0] - 2026-10-23
 
