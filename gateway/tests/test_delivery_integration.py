@@ -35,6 +35,7 @@ pytestmark = pytest.mark.skipif(
     reason="set ESTACIONA_TEST_SERVER and DATABASE_URL to run real Rust integration",
 )
 KEY = "11" * 32
+APP_ROLE_SCRIPT = Path(__file__).parents[2] / "infra" / "app-role.sql"
 IMAGE = (
     "postgres@sha256:bbbf67eadd2381a2738a4a2e36d4c3936c36edd82d80e7ef00411194385d3829"
 )
@@ -118,6 +119,17 @@ class Server:
         }
         self.environment.pop("EDGE_API_KEY", None)
 
+    def use_runtime_role(self):
+        """Serve with the DML-only role of infra/app-role.sql, as in production."""
+        password = uuid4().hex
+        with closing(psycopg2.connect(self.db_url)) as conn, conn:
+            with conn.cursor() as cursor:
+                cursor.execute(APP_ROLE_SCRIPT.read_text())
+                cursor.execute("ALTER ROLE estaciona_app PASSWORD %s", (password,))
+        parsed = urlsplit(self.db_url)
+        netloc = f"estaciona_app:{password}@{parsed.hostname}:{parsed.port or 5432}"
+        self.environment["DATABASE_URL"] = urlunsplit(parsed._replace(netloc=netloc))
+
     def query(self, statement, arguments=()):
         with closing(psycopg2.connect(self.db_url)) as conn, conn:
             with conn.cursor() as cursor:
@@ -126,7 +138,7 @@ class Server:
 
     def start(self):
         if self.postgres_container:
-            parsed = urlsplit(self.db_url)
+            parsed = urlsplit(self.environment["DATABASE_URL"])
             netloc = (
                 parsed.netloc.rsplit("@", 1)[0] + f"@127.0.0.1:{parsed.port or 5432}"
             )
@@ -248,6 +260,7 @@ def server(tmp_path):
             timeout=15,
         )
         assert initialized.returncode == 0, initialized.stdout + initialized.stderr
+        instance.use_runtime_role()
         instance.start()
         instance.query(
             "INSERT INTO edge_gateways (id, name, credential_digest) VALUES (%s, %s, %s)",
