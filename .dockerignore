@@ -1,5 +1,5 @@
 # Rust
-target/
+**/target/
 **/*.rs.bk
 
 # Python
@@ -28,6 +28,7 @@ target/
 
 # Build/Docker
 infra/data/
+infra/env/
 
 # Model artifacts are provisioned separately with their own provenance/license.
 **/models/
