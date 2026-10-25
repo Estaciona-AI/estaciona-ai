@@ -30,6 +30,9 @@ services:
     environment:
       RUST_LOG: info
       SITE_DATA_DIR: /deployment
+      PERSONAL_DATA_KEYS_FILE: /run/secrets/personal_data_keys
+    secrets:
+      - personal_data_keys
     volumes:
       - type: bind
         source: ${SITE_DATA_DIR:?Set SITE_DATA_DIR to an absolute installation maps directory}
@@ -59,6 +62,11 @@ services:
       - estaciona_ai
     depends_on:
       - server
+
+# Mounted only into the server; the database container never sees it.
+secrets:
+  personal_data_keys:
+    file: ${PERSONAL_DATA_KEYS_PATH:?Set PERSONAL_DATA_KEYS_PATH to the host file with the personal data keys}
 
 volumes:
   postgres_data:
