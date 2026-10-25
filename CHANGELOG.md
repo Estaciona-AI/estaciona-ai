@@ -18,9 +18,18 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
   `users.plate` and redacts stored `CAR_DETECTED` receipts that still held a
   plate; neither can be restored by the down migration. A `production`
   installation refuses to start with `LPR_ENABLED=true`.
+- **Create the personal data keyring before upgrading.** The server refuses to
+  start without `PERSONAL_DATA_KEYS_FILE` (Docker Compose:
+  `PERSONAL_DATA_KEYS_PATH` on the host). See `.env.example` for the format.
+  Keep it outside database backups and back it up separately. The migration
+  discards birth dates and disability declarations stored in clear.
 
 ### Added
 
+- Encryption of personal fields at rest. The server seals each value with
+  AES-256-GCM (`ring`), bound to the installation, column and row, under keys
+  read from a file the database never sees. Envelopes carry a key ID, so a new
+  key can be added while older rows still open.
 - Forecast site profile (`FORECAST_PROFILE`, optional JSON) with the local
   timezone, expected cars per shift, academic periods and local holidays.
   Brazilian national holidays, including the Easter-based ones, are computed
@@ -77,6 +86,10 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
 
 ### Security
 
+- Birth date and disability status are stored only as encrypted envelopes
+  (`date_of_birth_enc`, `pcd_status_enc`). Undeclared values are encrypted too,
+  so a row does not show what was declared. Priority recommendations decrypt
+  them in the server instead of comparing clear values in SQL.
 - Receipts of `CAR_DETECTED` events written before the keyed fingerprint kept
   the raw plate or an unkeyed SHA-256 of the event. A migration redacts them
   and keeps their outcome; replaying one of those events is answered as an
