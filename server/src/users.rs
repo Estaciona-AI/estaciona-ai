@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::auth::AuthError;
-use crate::security::{hash_password_async, hash_plate};
+use crate::security::hash_password_async;
 use crate::state::SharedState;
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -22,7 +22,6 @@ pub struct CreateUser {
     pub password: String,
     pub date_of_birth: Option<NaiveDate>,
     pub pcd_status: Option<bool>,
-    pub plate: Option<String>,
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -32,7 +31,6 @@ pub struct UserResponse {
     pub email: String,
     pub date_of_birth: Option<NaiveDate>,
     pub pcd_status: Option<bool>,
-    pub plate: Option<String>,
     pub role: String,
     pub created_at: Option<DateTime<Utc>>,
 }
@@ -47,21 +45,12 @@ pub async fn create_user(
         || payload.email.chars().count() > 255
         || payload.password.is_empty()
         || payload.password.len() > 1024
-        || payload
-            .plate
-            .as_ref()
-            .is_some_and(|plate| plate.is_empty() || plate.len() > 32)
     {
         return Err(AuthError::Status(
             StatusCode::BAD_REQUEST,
             "Invalid registration input",
         ));
     }
-
-    let hashed_plate = payload
-        .plate
-        .as_deref()
-        .map(|p| hash_plate(p, &state.plate_pepper));
 
     let duplicate =
         sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM users WHERE email = $1)")
@@ -82,22 +71,16 @@ pub async fn create_user(
     let hashed_password = hash_password_async(&state.auth_limits, payload.password).await?;
     let new_id = Uuid::new_v4();
 
-    let requested_plate = hashed_plate.clone();
-    let mut tx = state.installation.pool().begin().await.map_err(|error| {
-        tracing::error!(%error, "Registration transaction unavailable");
-        AuthError::Status(StatusCode::INTERNAL_SERVER_ERROR, "Failed to create user")
-    })?;
     let record = sqlx::query!(
         r#"
-        INSERT INTO users (id, name, email, password_hash, date_of_birth, pcd_status, plate)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        INSERT INTO users (id, name, email, password_hash, date_of_birth, pcd_status)
+        VALUES ($1, $2, $3, $4, $5, $6)
         RETURNING
         id,
         name as "name!",
         email as "email!",
         date_of_birth,
         pcd_status,
-        plate,
         role as "role!",
         created_at as "created_at?"
         "#,
@@ -107,9 +90,8 @@ pub async fn create_user(
         hashed_password,
         payload.date_of_birth,
         payload.pcd_status,
-        hashed_plate,
     )
-    .fetch_one(&mut *tx)
+    .fetch_one(state.installation.pool())
     .await
     .map_err(|e| {
         tracing::error!("Database error: {}", e);
@@ -122,26 +104,12 @@ pub async fn create_user(
         }
     })?;
 
-    if let Some(hash) = requested_plate.as_deref() {
-        crate::vehicles::request_binding(&mut tx, record.id, hash, None)
-            .await
-            .map_err(|error| {
-                tracing::error!(%error, "Failed to persist declared vehicle binding");
-                AuthError::Status(StatusCode::INTERNAL_SERVER_ERROR, "Failed to create user")
-            })?;
-    }
-    tx.commit().await.map_err(|error| {
-        tracing::error!(%error, "Registration commit failed");
-        AuthError::Status(StatusCode::INTERNAL_SERVER_ERROR, "Failed to create user")
-    })?;
-
     let response = UserResponse {
         id: record.id,
         name: record.name,
         email: record.email,
         date_of_birth: record.date_of_birth,
         pcd_status: record.pcd_status,
-        plate: record.plate,
         role: record.role,
         created_at: record.created_at,
     };
@@ -172,7 +140,6 @@ pub async fn get_user(
         email as "email!",
         date_of_birth,
         pcd_status,
-        plate,
         role as "role!",
         created_at as "created_at?"
         FROM users
@@ -207,8 +174,7 @@ mod tests {
             "email": "test@example.com",
             "password": "secure123",
             "date_of_birth": "1990-01-01",
-            "pcd_status": true,
-            "plate": "ABC-1234"
+            "pcd_status": true
         }"#;
 
         let parsed: CreateUser = serde_json::from_str(json_data).unwrap();
@@ -220,7 +186,24 @@ mod tests {
             NaiveDate::from_ymd_opt(1990, 1, 1).unwrap()
         );
         assert_eq!(parsed.pcd_status, Some(true));
-        assert_eq!(parsed.plate, Some("ABC-1234".to_string()));
+    }
+
+    #[test]
+    fn legacy_plate_field_is_ignored_and_never_echoed() {
+        let parsed: CreateUser = serde_json::from_str(
+            r#"{"name":"Legacy","email":"legacy@example.com","password":"x","plate":"ABC-1234"}"#,
+        )
+        .unwrap();
+        let response = UserResponse {
+            id: Uuid::nil(),
+            name: parsed.name,
+            email: parsed.email,
+            date_of_birth: parsed.date_of_birth,
+            pcd_status: parsed.pcd_status,
+            role: "user".to_string(),
+            created_at: None,
+        };
+        assert!(!serde_json::to_string(&response).unwrap().contains("plate"));
     }
 
     #[test]
@@ -235,7 +218,6 @@ mod tests {
         assert_eq!(parsed.name, "Minimal User");
         assert!(parsed.date_of_birth.is_none());
         assert!(parsed.pcd_status.is_none());
-        assert!(parsed.plate.is_none());
     }
 
     #[test]
@@ -246,7 +228,6 @@ mod tests {
             email: "admin@example.com".to_string(),
             date_of_birth: None,
             pcd_status: None,
-            plate: None,
             role: "admin".to_string(),
             created_at: None,
         };

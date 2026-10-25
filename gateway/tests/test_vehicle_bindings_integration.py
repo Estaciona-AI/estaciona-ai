@@ -223,7 +223,7 @@ def test_admin_approval_recovery_revocation_and_bounded_routes(server):
     )
 
 
-def test_public_plate_declarations_do_not_authorize_future_arrivals(server):
+def test_public_registration_never_declares_or_authorizes_a_plate(server):
     enable_lpr(server)
     for email in [
         f"first-{uuid4()}@example.invalid",
@@ -241,18 +241,9 @@ def test_public_plate_declarations_do_not_authorize_future_arrivals(server):
             },
         )
         assert status == 201, value
-    assert (
-        server.query("SELECT COUNT(*) FROM vehicle_bindings WHERE status='pending'")[0][
-            0
-        ]
-        == 2
-    )
-    assert (
-        server.query("SELECT COUNT(*) FROM vehicle_bindings WHERE status='approved'")[
-            0
-        ][0]
-        == 0
-    )
+        assert "plate" not in value
+    assert server.query("SELECT COUNT(*) FROM vehicle_bindings")[0][0] == 0
+    assert server.query("SELECT COUNT(*) FROM vehicles")[0][0] == 0
     server.query(
         "INSERT INTO edge_camera_grants (gateway_id,camera_id,car_detected) VALUES (%s,'cam-01',TRUE)",
         (server.gateway_id,),

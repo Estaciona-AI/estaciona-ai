@@ -61,7 +61,6 @@ fn registration() -> CreateUser {
         password: "fixture-password".to_owned(),
         date_of_birth: None,
         pcd_status: None,
-        plate: None,
     }
 }
 
@@ -94,16 +93,12 @@ async fn invalid_registration_inputs_are_rejected_before_database_access() {
         ("password", "".to_owned()),
         ("password", "a".repeat(1025)),
         ("password", "é".repeat(513)),
-        ("plate", "".to_owned()),
-        ("plate", "a".repeat(33)),
-        ("plate", "é".repeat(17)),
     ] {
         let mut payload = registration();
         match field {
             "name" => payload.name = value,
             "email" => payload.email = value,
             "password" => payload.password = value,
-            "plate" => payload.plate = Some(value),
             _ => unreachable!("fixture field"),
         }
         let response = users::create_user(State(state.clone()), Json(payload))
@@ -146,16 +141,10 @@ async fn registration_boundaries_preserve_hash_login_and_cookie_contracts(
         } else {
             "p".to_owned()
         };
-        payload.plate = Some(if upper_boundary {
-            "á".repeat(16)
-        } else {
-            "X".to_owned()
-        });
-        let (name, email, password, plate) = (
+        let (name, email, password) = (
             payload.name.clone(),
             payload.email.clone(),
             payload.password.clone(),
-            payload.plate.clone().expect("plate fixture"),
         );
         let response = users::create_user(State(state.clone()), Json(payload))
             .await
@@ -169,17 +158,15 @@ async fn registration_boundaries_preserve_hash_login_and_cookie_contracts(
         assert_eq!(body["role"], "user");
         assert!(body.get("password_hash").is_none());
 
-        let (hash, stored_plate): (String, String) =
-            sqlx::query_as("SELECT password_hash, plate FROM users WHERE id = $1")
-                .bind(id)
-                .fetch_one(&pool)
-                .await?;
+        let hash: String = sqlx::query_scalar("SELECT password_hash FROM users WHERE id = $1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await?;
         assert!(hash.starts_with("$argon2id$"));
         let parsed = PasswordHash::new(&hash).expect("stored Argon2 PHC string");
         Argon2::default()
             .verify_password(password.as_bytes(), &parsed)
             .expect("stored hash must verify independently of the login handler");
-        assert_ne!(stored_plate, plate);
 
         if !upper_boundary {
             continue;
@@ -277,21 +264,18 @@ impl HeldKdf {
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn known_email_conflicts_bypass_kdf_while_plate_claims_obey_capacity(
+async fn known_email_conflicts_bypass_kdf_while_new_accounts_obey_capacity(
     pool: PgPool,
 ) -> Result<(), sqlx::Error> {
     let state = fixture(pool.clone());
     let held = HeldKdf::start(state.clone()).await;
-    sqlx::query("INSERT INTO users (id, name, email, password_hash, plate) VALUES ($1, 'Existing', $2, 'unused-fixture-hash', $3)")
+    sqlx::query("INSERT INTO users (id, name, email, password_hash) VALUES ($1, 'Existing', $2, 'unused-fixture-hash')")
         .bind(Uuid::new_v4())
         .bind("existing@example.invalid")
-        .bind(security::hash_plate("ABC1234", &state.plate_pepper))
         .execute(&pool).await?;
-    for duplicate_plate in [false, true] {
+    for new_account in [false, true] {
         let mut payload = registration();
-        if duplicate_plate {
-            payload.plate = Some("ABC1234".to_owned());
-        } else {
+        if !new_account {
             payload.email = "existing@example.invalid".to_owned();
         }
         let response = tokio::time::timeout(
@@ -303,7 +287,7 @@ async fn known_email_conflicts_bypass_kdf_while_plate_claims_obey_capacity(
         .into_response();
         assert_eq!(
             response.status(),
-            if duplicate_plate {
+            if new_account {
                 StatusCode::SERVICE_UNAVAILABLE
             } else {
                 StatusCode::CONFLICT
@@ -323,20 +307,15 @@ impl<T> Drop for AbortTask<T> {
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn concurrent_email_conflicts_are_preserved_and_plate_claims_are_nonexclusive(
+async fn concurrent_email_conflicts_are_preserved_and_distinct_emails_both_register(
     pool: PgPool,
 ) -> Result<(), sqlx::Error> {
     let state = fixture(pool.clone());
-    for duplicate_plate in [false, true] {
+    for distinct_email in [false, true] {
         let suffix = Uuid::new_v4();
         let mut payload = registration();
         payload.email = format!("contender-{suffix}@example.invalid");
-        payload.plate = duplicate_plate.then(|| "RAC1234".to_owned());
         let email = payload.email.clone();
-        let plate = payload
-            .plate
-            .as_deref()
-            .map(|value| security::hash_plate(value, &state.plate_pepper));
         let mut locker = pool.begin().await?;
         sqlx::query("LOCK TABLE users IN SHARE MODE")
             .execute(&mut *locker)
@@ -356,13 +335,13 @@ async fn concurrent_email_conflicts_are_preserved_and_plate_claims_are_nonexclus
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         }).await.expect("registration must pass preflight and reach blocked INSERT")?;
-        let winner_email = if duplicate_plate {
+        let winner_email = if distinct_email {
             format!("winner-{suffix}@example.invalid")
         } else {
             email
         };
-        sqlx::query("INSERT INTO users (id, name, email, password_hash, plate) VALUES ($1, 'Race Winner', $2, 'unused-fixture-hash', $3)")
-            .bind(Uuid::new_v4()).bind(winner_email).bind(plate)
+        sqlx::query("INSERT INTO users (id, name, email, password_hash) VALUES ($1, 'Race Winner', $2, 'unused-fixture-hash')")
+            .bind(Uuid::new_v4()).bind(winner_email)
             .execute(&mut *locker).await?;
         locker.commit().await?;
         let response = tokio::time::timeout(Duration::from_secs(2), &mut contender.0)
@@ -371,7 +350,7 @@ async fn concurrent_email_conflicts_are_preserved_and_plate_claims_are_nonexclus
             .expect("registration worker");
         assert_eq!(
             response.status(),
-            if duplicate_plate {
+            if distinct_email {
                 StatusCode::CREATED
             } else {
                 StatusCode::CONFLICT
@@ -639,43 +618,26 @@ async fn cancelled_kdf_caller_keeps_auth_bounded_while_edge_delivery_progresses(
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn r12_unverified_plate_does_not_block_another_registration(pool: PgPool) {
-    let state = fixture(pool);
-    for email in ["first-claim@example.invalid", "legitimate@example.invalid"] {
-        let mut payload = registration();
-        payload.email = email.into();
-        payload.plate = Some("ABC1D23".into());
-        let response = users::create_user(State(state.clone()), Json(payload))
-            .await
-            .into_response();
-        assert_eq!(response.status(), StatusCode::CREATED);
-    }
-}
-
-#[sqlx::test(migrations = "./migrations")]
-async fn r12_failed_declaration_rolls_back_registration(pool: PgPool) {
+async fn registration_never_declares_or_stores_a_plate(pool: PgPool) {
     let state = fixture(pool.clone());
-    sqlx::raw_sql("CREATE FUNCTION reject_vehicle_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'audit unavailable'; END $$; CREATE TRIGGER reject_vehicle_audit BEFORE INSERT ON vehicle_binding_audit FOR EACH ROW EXECUTE FUNCTION reject_vehicle_audit();")
-        .execute(&pool).await.unwrap();
-    let mut payload = registration();
-    payload.plate = Some("ABC1D23".into());
-    let email = payload.email.clone();
+    let payload: CreateUser = serde_json::from_value(serde_json::json!({
+        "name": "Legacy client",
+        "email": "legacy-client@example.invalid",
+        "password": "fixture-password",
+        "plate": "ABC1D23",
+    }))
+    .expect("legacy plate field is ignored");
     let response = users::create_user(State(state), Json(payload))
         .await
         .into_response();
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    let users: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE email=$1")
-        .bind(email)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    let vehicles: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM vehicles")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(
-        (users, vehicles),
-        (0, 0),
-        "the account and declaration must commit together"
-    );
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert!(json_body(response).await.get("plate").is_none());
+    let (vehicles, bindings, plate_columns): (i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM vehicles), (SELECT COUNT(*) FROM vehicle_bindings), \
+         (SELECT COUNT(*) FROM information_schema.columns WHERE table_name = 'users' AND column_name = 'plate')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((vehicles, bindings, plate_columns), (0, 0, 0));
 }

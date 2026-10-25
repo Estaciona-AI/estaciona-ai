@@ -144,6 +144,13 @@ async fn main() {
                 std::process::exit(2);
             }
         };
+        if let Err(message) = config
+            .lpr_mode
+            .ensure_allowed(package.identity().environment())
+        {
+            eprintln!("{message}");
+            std::process::exit(2);
+        }
         (
             package.identity(),
             config.database.clone(),

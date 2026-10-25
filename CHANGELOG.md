@@ -12,6 +12,13 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- **Vehicle plates are no longer collected.** The migration drops
+  `users.plate` and redacts stored `CAR_DETECTED` receipts that still held a
+  plate; neither can be restored by the down migration. A `production`
+  installation refuses to start with `LPR_ENABLED=true`.
+
 ### Added
 
 - Forecast site profile (`FORECAST_PROFILE`, optional JSON) with the local
@@ -47,6 +54,10 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
 
 ### Removed
 
+- Plate collection at registration. `POST /users` ignores a `plate` field and
+  no longer declares a vehicle binding; `GET /users/{id}` no longer returns the
+  plate digest. The dormant license plate module and its tables are kept for a
+  later release.
 - The attention forecast model, its checkpoint and `torch`. Without a LightGBM
   artifact, the worker trains the simulated prior instead.
 - The stay-duration model, which read users' disability status and age, and
@@ -66,6 +77,10 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
 
 ### Security
 
+- Receipts of `CAR_DETECTED` events written before the keyed fingerprint kept
+  the raw plate or an unkeyed SHA-256 of the event. A migration redacts them
+  and keeps their outcome; replaying one of those events is answered as an
+  event ID conflict. The legacy replay upgrade path is removed.
 - The edge gateway no longer holds a database credential for the forecast. The
   worker refuses to start if its role can insert, update, delete or truncate
   any table. Removing `torch` also drops its `filelock`, `fsspec` and

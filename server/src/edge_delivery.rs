@@ -219,12 +219,6 @@ async fn apply_inner(
     // Inactive LPR must not turn the receipt ledger into a raw-plate archive.
     // A fingerprint still detects UUID/payload conflicts without retaining the plate.
     let is_plate = payload.get("type").and_then(Value::as_str) == Some("CAR_DETECTED");
-    let legacy_receipt_payload = if is_plate {
-        use sha2::{Digest, Sha256};
-        Some(serde_json::json!({"sha256": Sha256::digest(payload.to_string().as_bytes()).to_vec()}))
-    } else {
-        None
-    };
     let receipt_payload = if is_plate {
         let key = match state {
             Some(state) => state.plate_pepper.as_bytes(),
@@ -253,25 +247,15 @@ async fn apply_inner(
     .await?;
     if inserted.rows_affected() == 0 {
         let (same_payload, outcome, reason): (bool, String, Option<String>) = sqlx::query_as(
-            "SELECT (payload = $3 OR COALESCE(payload = $4,false)), outcome, reason FROM edge_event_receipts \
+            "SELECT payload = $3, outcome, reason FROM edge_event_receipts \
              WHERE gateway_id = $1 AND event_id = $2",
         )
         .bind(principal.gateway_id)
         .bind(event_id)
         .bind(sqlx::types::Json(&receipt_payload))
-        .bind(legacy_receipt_payload.as_ref().map(sqlx::types::Json))
         .fetch_one(&mut *tx)
         .await?;
-        if same_payload && outcome != "pending" && legacy_receipt_payload.is_some() {
-            sqlx::query("UPDATE edge_event_receipts SET payload=$3 WHERE gateway_id=$1 AND event_id=$2 AND payload=$4")
-                .bind(principal.gateway_id).bind(event_id)
-                .bind(sqlx::types::Json(&receipt_payload))
-                .bind(legacy_receipt_payload.as_ref().map(sqlx::types::Json))
-                .execute(&mut *tx).await?;
-            tx.commit().await?;
-        } else {
-            tx.rollback().await?;
-        }
+        tx.rollback().await?;
         let outcome = if same_payload {
             match outcome.as_str() {
                 "applied" => Outcome::Applied,
@@ -547,7 +531,7 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "./migrations")]
-    async fn keyed_plate_receipts_preserve_legacy_replay(pool: PgPool) -> TestResult {
+    async fn keyed_plate_receipts_detect_replays_without_the_plate(pool: PgPool) -> TestResult {
         let principal = principal(&pool).await?;
         let payload = json!({"type":"CAR_DETECTED","plate":"ABC1234","camera_id":"cam","timestamp":Utc::now()});
         let event = Uuid::new_v4();
@@ -560,26 +544,10 @@ mod tests {
         .fetch_one(&pool)
         .await?;
         assert!(stored.0.get("hmac_sha256_v1").is_some());
-        let legacy = json!({"sha256":Sha256::digest(payload.to_string().as_bytes()).to_vec()});
-        sqlx::query(
-            "UPDATE edge_event_receipts SET payload=$3 WHERE gateway_id=$1 AND event_id=$2",
-        )
-        .bind(principal.gateway_id)
-        .bind(event)
-        .bind(sqlx::types::Json(legacy))
-        .execute(&pool)
-        .await?;
+        assert!(!stored.0.to_string().contains("ABC1234"));
         let replay = apply(&pool, &principal, event, payload.clone()).await?;
         assert!(replay.ack.duplicate);
         assert_eq!(first.ack.outcome, replay.ack.outcome);
-        let upgraded: sqlx::types::Json<Value> = sqlx::query_scalar(
-            "SELECT payload FROM edge_event_receipts WHERE gateway_id=$1 AND event_id=$2",
-        )
-        .bind(principal.gateway_id)
-        .bind(event)
-        .fetch_one(&pool)
-        .await?;
-        assert_eq!(stored.0, upgraded.0);
         let mut changed = payload;
         changed["plate"] = json!("XYZ9876");
         let conflict = apply(&pool, &principal, event, changed).await?;
