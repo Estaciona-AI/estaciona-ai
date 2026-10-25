@@ -192,6 +192,10 @@ async fn main() {
         runtime.expect("administrative commands return before runtime initialization");
     let ws_origin_policy = config.ws_origins;
     let lpr_mode = config.lpr_mode;
+    if let Err(message) = lpr_mode.ensure_allowed(package.identity().environment()) {
+        eprintln!("{message}");
+        std::process::exit(2);
+    }
     let parking_state: SharedState = init_state(
         verified,
         config.jwt_secret,
