@@ -16,7 +16,7 @@ import psycopg2
 from psycopg2 import sql
 import pytest
 
-from test_delivery_integration import Server, server as delivery_server
+from test_delivery_integration import IDENTITY, Server, server as delivery_server
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("ESTACIONA_TEST_SERVER"),
@@ -143,7 +143,7 @@ def test_adopt_requires_confirmation_and_preserves_current_business_data(
     assert provision(server).returncode == 0
     server.query("DELETE FROM installation_binding")
     server.query(
-        "INSERT INTO users (id,email,password_hash) VALUES (%s,'synthetic@example.invalid','preserved')",
+        "INSERT INTO users (id,username) VALUES (%s,'preserved')",
         (str(uuid4()),),
     )
     assert provision(server).returncode == 1
@@ -155,10 +155,10 @@ def test_adopt_requires_confirmation_and_preserves_current_business_data(
     for _ in range(2):
         result = provision(server, "adopt", "--confirm-database", database)
         assert result.returncode == 0, result.stderr
-    assert server.query("SELECT password_hash FROM users") == [("preserved",)]
+    assert server.query("SELECT username FROM users") == [("preserved",)]
 
 
-def test_contract_export_and_legacy_password_rejection_need_no_database(
+def test_contract_export_needs_no_database_and_local_admins_are_gone(
     unstarted_server,
 ):
     server = unstarted_server
@@ -171,36 +171,34 @@ def test_contract_export_and_legacy_password_rejection_need_no_database(
         server, "--export-contracts", server.root / "contracts", environment=env
     )
     assert result.returncode == 0, result.stderr
+    # Administrators are a role at the identity provider; the flag is refused.
     result = command(
         server,
         "--create-admin",
         "synthetic@example.invalid",
         "password-not-for-logs",
-        environment=env,
+        environment={**server.environment},
     )
     assert result.returncode == 2
+    assert "identity provider" in result.stderr
     assert "password-not-for-logs" not in result.stdout + result.stderr
+    assert server.query("SELECT to_regclass('public._sqlx_migrations')")[0][0] is None
 
 
-def test_mismatched_identity_cannot_create_administrator(unstarted_server):
+def test_mismatched_identity_cannot_create_gateway_credentials(unstarted_server):
     server = unstarted_server
     assert provision(server).returncode == 0
     manifest = server.root / "site" / "installation.json"
     value = json.loads(manifest.read_text())
     value["installation"]["id"] = str(uuid4())
     manifest.write_text(json.dumps(value))
-    password = server.root / "password"
-    password.write_text("synthetic-password\n")
-    password.chmod(0o600)
+    secret = server.root / "credential"
     result = command(
-        server,
-        "--create-admin",
-        "synthetic-admin@example.invalid",
-        "--password-file",
-        password,
+        server, "--edge-create", "synthetic-gateway", "--secret-file", secret
     )
     assert result.returncode == 1, result.stdout + result.stderr
-    assert server.query("SELECT count(*) FROM users")[0][0] == 0
+    assert not secret.exists()
+    assert server.query("SELECT count(*) FROM edge_gateways")[0][0] == 0
 
 
 def database_snapshot(server):
@@ -240,7 +238,7 @@ def test_startup_and_all_administration_refuse_wrong_binding_without_writes(
     server.stop()
     owner = str(uuid4())
     server.query(
-        "INSERT INTO users(id,email,password_hash) VALUES (%s,'owner@example.invalid','preserved')",
+        "INSERT INTO users(id,username) VALUES (%s,'preserved')",
         (owner,),
     )
     server.query(
@@ -270,9 +268,6 @@ def test_startup_and_all_administration_refuse_wrong_binding_without_writes(
     (server.root / "site" / "spots_3d.json").write_text(
         json.dumps([{"id": "WRONG-SITE", "center3D": {"x": 9, "y": 0, "z": 9}}])
     )
-    password = server.root / "password"
-    password.write_text("synthetic-password\n")
-    password.chmod(0o600)
     policy = server.root / "policy.json"
     policy.write_text(
         json.dumps({"path_update": False, "trend_prediction": False, "cameras": []})
@@ -287,7 +282,6 @@ def test_startup_and_all_administration_refuse_wrong_binding_without_writes(
     }
     operations = [
         (),
-        ("--create-admin", "new-admin@example.invalid", "--password-file", password),
         ("--edge-create", "wrong-installation", "--secret-file", secret),
         ("--edge-rotate", server.gateway_id, "--secret-file", secret),
         ("--edge-revoke", server.gateway_id),
@@ -341,27 +335,17 @@ def test_bound_administration_does_not_require_map_files(unstarted_server):
         "PERSONAL_DATA_KEYS_FILE",
         "WS_ALLOWED_ORIGINS",
         "LPR_ENABLED",
+        *IDENTITY,
     ):
         server.environment.pop(name, None)
 
-    password = server.root / "password"
-    password.write_text("synthetic-password\n")
-    password.chmod(0o600)
-    result = command(
-        server,
-        "--create-admin",
-        "new-admin@example.invalid",
-        "--password-file",
-        password,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
     secret = server.root / "credential"
     result = command(
         server, "--edge-create", "synthetic-gateway", "--secret-file", secret
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert secret.exists()
-    assert server.query("SELECT role FROM users") == [("admin",)]
+    assert server.query("SELECT name FROM edge_gateways") == [("synthetic-gateway",)]
 
 
 def test_startup_database_failure_does_not_echo_credentials(unstarted_server):

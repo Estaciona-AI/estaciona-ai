@@ -20,11 +20,6 @@ pub(crate) async fn provision(pool: &PgPool) -> VerifiedInstallation {
     startup::prepare(pool.clone(), expected).await.unwrap()
 }
 
-/// Only for unit tests requiring an offline/closed pool or artificial runtime state.
-pub(crate) fn unverified_for_unit_test(pool: &PgPool) -> VerifiedInstallation {
-    VerifiedInstallation::new(pool.clone(), identity(2, "test"))
-}
-
 /// Typed synthetic package for tests that deliberately build maps in memory.
 pub(crate) fn package(site: crate::site_config::SiteConfig) -> super::InstallationPackage {
     let policy = crate::reservation_policy::ReservationPolicy::load(&site.directory).unwrap();

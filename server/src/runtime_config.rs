@@ -16,6 +16,7 @@ pub(crate) struct RuntimeConfig {
     pub jwt_secret: String,
     pub plate_pepper: String,
     pub personal_data_keys_file: PathBuf,
+    pub identity: crate::identity::IdentityConfig,
     pub ws_origins: WsOriginPolicy,
     pub lpr_mode: LprMode,
 }
@@ -126,6 +127,19 @@ impl RuntimeConfig {
             "PLATE_SECRET_PEPPER (at least 32 bytes)",
         )?;
         let personal_data_keys_file = required(&mut value, "PERSONAL_DATA_KEYS_FILE")?.into();
+        let issuer = required(&mut value, "OIDC_ISSUER_URL")?;
+        let client_id = required(&mut value, "OIDC_CLIENT_ID")?;
+        let client_secret = secret(&mut value, "OIDC_CLIENT_SECRET", "OIDC_CLIENT_SECRET_FILE")?;
+        let redirect = required(&mut value, "OIDC_REDIRECT_URL")?;
+        let app_url = required(&mut value, "APP_URL")?;
+        let identity = crate::identity::IdentityConfig::new(
+            &issuer,
+            &client_id,
+            client_secret,
+            &redirect,
+            &app_url,
+        )
+        .map_err(ConfigError)?;
         let origins = required(&mut value, "WS_ALLOWED_ORIGINS")?;
         let ws_origins =
             WsOriginPolicy::parse(&origins).map_err(|_| ConfigError("WS_ALLOWED_ORIGINS"))?;
@@ -140,6 +154,7 @@ impl RuntimeConfig {
             jwt_secret,
             plate_pepper,
             personal_data_keys_file,
+            identity,
             ws_origins,
             lpr_mode,
         })
@@ -164,6 +179,17 @@ mod tests {
                 "pepper-not-for-logs-0123456789abcdef",
             ),
             ("PERSONAL_DATA_KEYS_FILE", "/synthetic/personal-data.keys"),
+            (
+                "OIDC_ISSUER_URL",
+                "https://auth.example.invalid/realms/estaciona",
+            ),
+            ("OIDC_CLIENT_ID", "synthetic-campus"),
+            ("OIDC_CLIENT_SECRET", "oidc-secret-not-for-logs"),
+            (
+                "OIDC_REDIRECT_URL",
+                "https://api.example.invalid/auth/callback",
+            ),
+            ("APP_URL", "https://app.example.invalid"),
             ("WS_ALLOWED_ORIGINS", "http://localhost"),
         ]
         .into_iter()
@@ -200,6 +226,11 @@ mod tests {
             "JWT_SECRET",
             "PLATE_SECRET_PEPPER",
             "PERSONAL_DATA_KEYS_FILE",
+            "OIDC_ISSUER_URL",
+            "OIDC_CLIENT_ID",
+            "OIDC_CLIENT_SECRET",
+            "OIDC_REDIRECT_URL",
+            "APP_URL",
             "WS_ALLOWED_ORIGINS",
         ] {
             for value in [
@@ -220,6 +251,7 @@ mod tests {
                     "jwt-not-for-logs",
                     "password-not-for-logs",
                     "pepper-not-for-logs",
+                    "oidc-secret-not-for-logs",
                 ] {
                     assert!(!format!("{error:?} {error}").contains(secret));
                 }
@@ -330,6 +362,26 @@ mod tests {
             "postgres://u:p@10.0.0.5/db?sslmode=allow",
         ] {
             assert!(!accepts(url), "{url}");
+        }
+    }
+
+    #[test]
+    fn identity_urls_need_https_except_on_this_machine() {
+        let accepts = |key: &'static str, url: &str| {
+            let mut data = values();
+            data.insert(key, url.into());
+            RuntimeConfig::parse(|key| data.get(key).cloned()).is_ok()
+        };
+        for key in ["OIDC_ISSUER_URL", "OIDC_REDIRECT_URL", "APP_URL"] {
+            assert!(accepts(key, "http://localhost:8081/x"), "{key}");
+            for url in [
+                "http://auth.example.invalid/x",
+                "https://auth.example.invalid/x?next=evil",
+                "https://user:pass@auth.example.invalid/x",
+                "not a url",
+            ] {
+                assert!(!accepts(key, url), "{key} {url}");
+            }
         }
     }
 }

@@ -24,10 +24,13 @@ const HEADER_BYTES: usize = 1 + 4 + NONCE_LEN;
 const TAG_BYTES: usize = 16;
 
 /// Each value is bound to its column so an envelope cannot be moved elsewhere.
+/// Variants name the table and the column, like their AAD labels.
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field {
     UserDateOfBirth,
     UserPcdStatus,
+    UserDisplayName,
 }
 
 impl Field {
@@ -35,6 +38,7 @@ impl Field {
         match self {
             Self::UserDateOfBirth => b"users.date_of_birth",
             Self::UserPcdStatus => b"users.pcd_status",
+            Self::UserDisplayName => b"users.display_name",
         }
     }
 }

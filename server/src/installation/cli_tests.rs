@@ -153,7 +153,7 @@ async fn mismatch_and_wrong_confirmation_do_not_apply_pending_migrations(pool: P
 
 #[sqlx::test(migrations = "./migrations")]
 async fn adopts_existing_data_with_confirmation_and_preserves_it(pool: PgPool) {
-    sqlx::query("INSERT INTO users(id,email,password_hash) VALUES ('00000000-0000-4000-8000-000000000099','synthetic@example.invalid','preserved')").execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO users (id,username) VALUES ('00000000-0000-4000-8000-000000000099','preserved')").execute(&pool).await.unwrap();
     let database: String = sqlx::query_scalar("SELECT current_database()")
         .fetch_one(&pool)
         .await
@@ -169,7 +169,7 @@ async fn adopts_existing_data_with_confirmation_and_preserves_it(pool: PgPool) {
             BindingStatus::Matching
         );
     }
-    let hash: String = sqlx::query_scalar("SELECT password_hash FROM users")
+    let hash: String = sqlx::query_scalar("SELECT username FROM users")
         .fetch_one(&pool)
         .await
         .unwrap();

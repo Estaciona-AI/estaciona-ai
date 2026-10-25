@@ -35,15 +35,11 @@ impl Fixture {
         let other = Uuid::new_v4();
         let admin = Uuid::new_v4();
         for (id, role) in [(owner, "user"), (other, "user"), (admin, "admin")] {
-            sqlx::query(
-                "INSERT INTO users (id, name, email, password_hash, role) \
-                 VALUES ($1, 'Reservation Fixture', $2, 'unused-test-hash', $3)",
-            )
-            .bind(id)
-            .bind(format!("{id}@example.invalid"))
-            .bind(role)
-            .execute(&pool)
-            .await?;
+            sqlx::query("INSERT INTO users (id, role) VALUES ($1, $2)")
+                .bind(id)
+                .bind(role)
+                .execute(&pool)
+                .await?;
         }
 
         let spot_id = "R01-01".to_owned();
@@ -62,6 +58,7 @@ impl Fixture {
             jwt_secret: "r01-disposable-jwt-secret".to_owned(),
             plate_pepper: "r01-disposable-plate-pepper".to_owned(),
             personal_data: crate::personal_data::PersonalDataCipher::for_unit_test(),
+            identity: crate::identity::IdentityProvider::for_unit_test(),
         });
 
         Ok(Self {

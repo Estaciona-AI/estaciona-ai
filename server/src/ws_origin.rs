@@ -53,6 +53,14 @@ impl WsOriginPolicy {
         Ok(Self { allowed })
     }
 
+    /// The same list answers CORS for the browser apps of this installation.
+    pub fn header_values(&self) -> Vec<axum::http::HeaderValue> {
+        self.allowed
+            .iter()
+            .filter_map(|origin| axum::http::HeaderValue::from_str(origin).ok())
+            .collect()
+    }
+
     pub fn authorize(&self, headers: &HeaderMap) -> Result<(), (StatusCode, &'static str)> {
         let mut origins = headers.get_all(header::ORIGIN).iter();
         let Some(origin) = origins.next() else {

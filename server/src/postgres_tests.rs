@@ -12,13 +12,10 @@ async fn migrations_persist_a_reservation_with_user_and_spot(
     let reservation_id = Uuid::new_v4();
     let spot_id = "migration-test-spot";
 
-    sqlx::query(
-        "INSERT INTO users (id, name, email, password_hash) \
-         VALUES ($1, 'Migration Fixture', 'migration@example.invalid', 'unused-test-hash')",
-    )
-    .bind(user_id)
-    .execute(&pool)
-    .await?;
+    sqlx::query("INSERT INTO users (id) VALUES ($1)")
+        .bind(user_id)
+        .execute(&pool)
+        .await?;
 
     sqlx::query("INSERT INTO spots (id, status, x, y) VALUES ($1, 'free', 0, 0)")
         .bind(spot_id)

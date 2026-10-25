@@ -10,6 +10,7 @@ pub struct AppState {
     pub jwt_secret: String,
     pub plate_pepper: String,
     pub personal_data: crate::personal_data::PersonalDataCipher,
+    pub identity: crate::identity::IdentityProvider,
 }
 
 pub type SharedState = Arc<AppState>;
@@ -19,6 +20,7 @@ pub async fn init_state(
     jwt_secret: String,
     plate_pepper: String,
     personal_data_keys: crate::personal_data::Keyring,
+    identity: crate::identity::IdentityProvider,
     package: InstallationPackage,
     lpr_mode: crate::lpr::LprMode,
 ) -> Result<SharedState, crate::site_reconciliation::ReconcileError> {
@@ -33,5 +35,6 @@ pub async fn init_state(
         jwt_secret,
         plate_pepper,
         personal_data,
+        identity,
     }))
 }
