@@ -1,0 +1,71 @@
+name: Python dependency security
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+  schedule:
+    - cron: '43 8 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: python-security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python-advisories:
+    name: Python advisories (${{ matrix.project }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [gateway, vision, vision/export, shared]
+        include:
+          # Reviewed 2026-10-25; review again by 2026-11-24 or before changing
+          # Paddle or the RT-DETR revision. Only Paddle 3.0 fixes these Paddle
+          # 2.6.2 command injections: CVE-2024-0817 in IrGraph.draw and
+          # CVE-2024-0815 in paddle.utils.download._wget_download. The offline
+          # export never calls IrGraph.draw, and the RT-DETR backbones download
+          # nothing through Paddle (other ppdet backbones would use "get").
+          - project: vision/export
+            ignored: PYSEC-2026-1754 PYSEC-2026-1756
+    defaults:
+      run:
+        working-directory: ${{ matrix.project }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      - name: Select the project's Python
+        run: uv python install
+      - name: Export frozen dependencies without installing the project
+        run: >-
+          uv export --frozen --all-groups --all-extras --no-emit-project
+          --no-header --no-annotate --output-file "$RUNNER_TEMP/requirements.txt"
+      - name: Audit every pinned dependency without resolving or installing it
+        env:
+          IGNORED: ${{ matrix.ignored }}
+        run: |
+          ignore=()
+          for id in $IGNORED; do ignore+=(--ignore-vuln "$id"); done
+          uv tool run --python "$(uv python find)" --from pip-audit==2.10.1 pip-audit \
+            --require-hashes --no-deps --disable-pip --strict --progress-spinner off \
+            "${ignore[@]}" \
+            --requirement "$RUNNER_TEMP/requirements.txt" \
+            --format json --output "$RUNNER_TEMP/audit.json"
+      - name: Upload audit evidence even when vulnerabilities are found
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: python-audit-${{ strategy.job-index }}
+          path: |
+            ${{ runner.temp }}/requirements.txt
+            ${{ runner.temp }}/audit.json
+          if-no-files-found: warn
+          retention-days: 14
