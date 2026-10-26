@@ -209,25 +209,10 @@ async fn finish(
     let Some(role) = local_role(&signed_in.roles) else {
         return failed(StatusCode::FORBIDDEN);
     };
-    let user = match upsert_account(&state, &signed_in, role).await {
-        Ok(user) => user,
-        Err(error) => {
-            tracing::error!(%error, "Account could not be stored");
-            return failed(StatusCode::SERVICE_UNAVAILABLE);
-        }
-    };
-    let token = match crate::sessions::issue_for_provider_session(
-        state.installation.pool(),
-        user,
-        role,
-        &state.jwt_secret,
-        signed_in.provider_session.as_deref(),
-    )
-    .await
-    {
+    let token = match sign_in_account(&state, &signed_in, role).await {
         Ok(token) => token,
         Err(error) => {
-            tracing::error!(%error, "Session creation failed");
+            tracing::error!(%error, "Account sign-in could not be stored");
             return failed(StatusCode::SERVICE_UNAVAILABLE);
         }
     };
@@ -253,12 +238,15 @@ impl std::fmt::Display for AccountError {
 }
 
 /// The provider is the authority for username, name and role; each sign-in
-/// refreshes them. A role change also invalidates sessions with the old role.
-async fn upsert_account(
+/// refreshes them and returns a new session token. Sessions with any other
+/// role are revoked, and the new one issued, under the account row lock: two
+/// concurrent sign-ins with different roles cannot leave a stale session that
+/// a later role change would revive.
+async fn sign_in_account(
     state: &SharedState,
     signed_in: &SignedIn,
     role: &str,
-) -> Result<Uuid, AccountError> {
+) -> Result<String, AccountError> {
     // Two first sign-ins of one account race on the unique subject: retry once.
     for attempt in 0..2 {
         let mut tx = state
@@ -306,8 +294,22 @@ async fn upsert_account(
         };
         match written {
             Ok(_) => {
+                if existing.is_some() {
+                    crate::sessions::revoke_other_roles(&mut tx, id, role)
+                        .await
+                        .map_err(AccountError::Database)?;
+                }
+                let token = crate::sessions::issue_for_provider_session(
+                    &mut *tx,
+                    id,
+                    role,
+                    &state.jwt_secret,
+                    signed_in.provider_session.as_deref(),
+                )
+                .await
+                .map_err(AccountError::Database)?;
                 tx.commit().await.map_err(AccountError::Database)?;
-                return Ok(id);
+                return Ok(token);
             }
             Err(error)
                 if attempt == 0
