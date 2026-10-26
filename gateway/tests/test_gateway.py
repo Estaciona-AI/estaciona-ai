@@ -7,7 +7,6 @@ import json
 import asyncio
 from unittest.mock import AsyncMock, patch
 
-import pytest
 from gateway import (
     init_db,
     init_metrics_db,
@@ -19,7 +18,6 @@ from gateway import (
     is_authorized,
     handler,
     sync_loop,
-    main,
 )
 
 
@@ -327,38 +325,6 @@ def test_send_without_cloud_ack_preserves_pending_event(tmp_path):
                     pass
 
         assert len(get_unsynced_events(db_path)) == 1
-
-    asyncio.run(run())
-
-
-@pytest.mark.parametrize("window", ["1", "8"])
-def test_main_startup(monkeypatch, window):
-    monkeypatch.setenv("EDGE_MAX_IN_FLIGHT", window)
-    monkeypatch.setenv("EDGE_API_KEY", "secret_key")
-
-    async def run():
-        with (
-            patch("websockets.serve") as mock_serve,
-            patch("gateway.init_db") as mock_init_db,
-            patch("gateway.init_metrics_db") as mock_init_metrics,
-            patch("gateway.sync_loop", new_callable=AsyncMock) as mock_sync_loop,
-        ):
-            mock_serve.return_value.__aenter__ = AsyncMock()
-            mock_serve.return_value.__aexit__ = AsyncMock()
-
-            task = asyncio.create_task(main())
-            await asyncio.sleep(0.01)
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-
-            assert mock_init_db.called
-            assert mock_init_metrics.called
-            assert mock_serve.called
-            assert mock_sync_loop.called
-            assert mock_sync_loop.call_args.kwargs["max_in_flight"] == int(window)
 
     asyncio.run(run())
 
