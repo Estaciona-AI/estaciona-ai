@@ -7,14 +7,11 @@ use uuid::Uuid;
 
 async fn user(pool: &PgPool) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query(
-        "INSERT INTO users (id,name,email,password_hash) VALUES ($1,'Vehicle fixture',$2,'unused')",
-    )
-    .bind(id)
-    .bind(format!("{id}@example.invalid"))
-    .execute(pool)
-    .await
-    .unwrap();
+    sqlx::query("INSERT INTO users (id) VALUES ($1)")
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
     id
 }
 async fn request(pool: &PgPool, id: Uuid) -> store::Binding {

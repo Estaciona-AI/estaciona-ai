@@ -432,14 +432,10 @@ mod tests {
 
     async fn user(pool: &PgPool) -> Result<Uuid, sqlx::Error> {
         let id = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO users (id, name, email, password_hash) \
-             VALUES ($1, 'Delivery Fixture', $2, 'unused-test-hash')",
-        )
-        .bind(id)
-        .bind(format!("{id}@example.invalid"))
-        .execute(pool)
-        .await?;
+        sqlx::query("INSERT INTO users (id) VALUES ($1)")
+            .bind(id)
+            .execute(pool)
+            .await?;
         Ok(id)
     }
 

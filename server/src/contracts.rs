@@ -19,7 +19,7 @@ use crate::ws::messages::{
 
 mod catalog;
 
-pub const VERSION: &str = "1.3.0";
+pub const VERSION: &str = "1.4.0";
 
 pub fn physical_state_schema(_: &mut SchemaGenerator) -> Schema {
     json_schema!({"type":"string","enum":["free","occupied"]})
@@ -99,10 +99,17 @@ pub fn rest_schemas() -> BTreeMap<&'static str, Value> {
         };
     }
     BTreeMap::from([
-        rest!("login-request", crate::auth::LoginRequest, Deserialize),
-        rest!("login-response", crate::auth::LoginResponse, Serialize),
-        rest!("create-user", crate::users::CreateUser, Deserialize),
         rest!("user-response", crate::users::UserResponse, Serialize),
+        rest!(
+            "update-eligibility",
+            crate::users::UpdateEligibility,
+            Deserialize
+        ),
+        rest!(
+            "logout-response",
+            crate::sessions::LogoutResponse,
+            Serialize
+        ),
         rest!(
             "create-reservation",
             crate::reservations::CreateReservation,

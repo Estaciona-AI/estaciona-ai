@@ -18,9 +18,70 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
   `users.plate` and redacts stored `CAR_DETECTED` receipts that still held a
   plate; neither can be restored by the down migration. A `production`
   installation refuses to start with `LPR_ENABLED=true`.
+- **Create the personal data keyring before upgrading.** The server refuses to
+  start without `PERSONAL_DATA_KEYS_FILE` (Docker Compose:
+  `SECRETS_DIR/personal_data_keys`). See `.env.example` for the format.
+  Keep it outside database backups and back it up separately. The migration
+  discards birth dates and disability declarations stored in clear.
+- **Migrations are an explicit step.** The server no longer migrates at
+  startup; it refuses a schema behind or ahead of its release. Run
+  `--migrate` with the owner role before starting a new release (Docker
+  Compose runs the one-shot `migrate` service). Then run
+  `infra/app-role.sql` as the owner, set the `estaciona_app` password, and
+  point the server's `DATABASE_URL` to that role.
+- **Secrets are checked at startup.** `JWT_SECRET` and `PLATE_SECRET_PEPPER`
+  need at least 32 bytes. Each secret, and `DATABASE_URL`, can come from a
+  private file (`NAME_FILE`). A remote database needs `sslmode=verify-full`
+  (or `require`/`verify-ca`); `prefer` and `allow` are refused, and `disable`
+  is accepted only when set explicitly.
+- **Docker Compose layout.** The database reads `infra/env/postgres.env`, the
+  server reads `infra/env/server.env` and its secrets from files in
+  `SECRETS_DIR` (see the header of `infra/docker-compose.yml`). The server
+  image runs as UID 10001: secret files and `SITE_DATA_DIR` must be owned by
+  it.
+- **Accounts move to the identity provider.** `POST /login`, `POST /users`
+  and `--create-admin` are gone; the migration drops e-mail, password hash and
+  name from `users`, so existing local accounts cannot sign in again. Register
+  the installation with `tools/identity/provision.py installation-create`,
+  set `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET_FILE`,
+  `OIDC_REDIRECT_URL` and `APP_URL`, and invite people with `user-invite`.
+  Browser apps send people to `/auth/login?return_to=/path`, read the account
+  from `GET /api/v1/me`, and keep no token: the session is the
+  `__Host-estaciona_session` cookie. Writes with that cookie need an `Origin`
+  from `WS_ALLOWED_ORIGINS`, which now also drives CORS. `POST /auth/logout`
+  answers 200 with the provider's `end_session_url`. Contract 1.4.0 removes the
+  login and registration operations.
 
 ### Added
 
+- Sign-in through the central identity provider: OpenID Connect code flow with
+  PKCE as a confidential client (`openidconnect`), state bound to the browser
+  by a cookie, single-use attempts, nonce, and ID tokens accepted only when
+  signed with Ed25519. Each sign-in refreshes the generated username, the
+  encrypted display name and the role. Back-channel logout ends the named
+  provider session, or every session of the account. The server starts and
+  keeps serving existing sessions while the provider is unreachable; only
+  sign-in answers 503 until its metadata loads.
+- `GET /api/v1/me` and `PUT /api/v1/me/eligibility` for the signed-in account.
+- Central identity provider in `infra/identity/`: Keycloak 26.8 with its own
+  PostgreSQL, a proxy that publishes only `/realms/` and `/resources/`, and
+  the `estaciona` realm as code. Public sign-up is off, sign-in uses the
+  e-mail, passwords use Argon2 with a 12-character minimum, brute force
+  detection is on and tokens are signed with Ed25519 only.
+- `tools/identity/provision.py` registers an installation as a confidential
+  OIDC client (code flow with PKCE only, exact callback, back-channel logout,
+  its own roles in the ID token, no e-mail claim) and invites accounts with a
+  generated username such as `ea-7k3m9qx2vd`. Revoking access also ends the
+  account's sessions. Secrets travel only through private files.
+- `--migrate` applies the migrations of this release with the owner role and
+  checks the installation binding before and after.
+- `infra/app-role.sql` creates `estaciona_app`, the server's runtime role:
+  row access only, no schema changes, and no writes to the migration history
+  or the installation binding.
+- Encryption of personal fields at rest. The server seals each value with
+  AES-256-GCM (`ring`), bound to the installation, column and row, under keys
+  read from a file the database never sees. Envelopes carry a key ID, so a new
+  key can be added while older rows still open.
 - Forecast site profile (`FORECAST_PROFILE`, optional JSON) with the local
   timezone, expected cars per shift, academic periods and local holidays.
   Brazilian national holidays, including the Easter-based ones, are computed
@@ -41,6 +102,10 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
 
 ### Changed
 
+- The server image builds and runs on Debian trixie, pinned by digest. The
+  builder already used trixie while the runtime used bookworm, so the binary
+  could need a newer glibc than the runtime had. The unused OpenSSL and
+  `libpq` packages are gone: TLS is rustls. `cargo build` uses `--locked`.
 - The forecast predicts the occupancy rate with a calendar-aware LightGBM
   model instead of the attention model. Training pools simulated campuses with
   the real history, weighting real hours more. With four weeks of real
@@ -54,6 +119,9 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
 
 ### Removed
 
+- Local registration, password login and the `--create-admin` command, with
+  Argon2 and its admission limits. Accounts, passwords, e-mail verification
+  and brute-force protection belong to the identity provider.
 - Plate collection at registration. `POST /users` ignores a `plate` field and
   no longer declares a vehicle binding; `GET /users/{id}` no longer returns the
   plate digest. The dormant license plate module and its tables are kept for a
@@ -77,6 +145,20 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
 
 ### Security
 
+- No installation database stores e-mail addresses or password hashes any
+  more. Sessions are 8-hour host-only, HttpOnly cookies; cookie writes require
+  an allowed `Origin`, and CORS allows only the installation's apps, with
+  credentials, instead of any origin. Roles are limited to `user` and `admin`
+  by a constraint. Unknown command-line arguments stop the server instead of
+  being ignored.
+- The server runs with a database role that cannot change the schema, as UID
+  10001 with a read-only root filesystem and no capabilities. The database
+  container receives only its own account; the server receives its secrets as
+  files mounted into it alone and refuses secret files that others can read.
+- Birth date and disability status are stored only as encrypted envelopes
+  (`date_of_birth_enc`, `pcd_status_enc`). Undeclared values are encrypted too,
+  so a row does not show what was declared. Priority recommendations decrypt
+  them in the server instead of comparing clear values in SQL.
 - Receipts of `CAR_DETECTED` events written before the keyed fingerprint kept
   the raw plate or an unkeyed SHA-256 of the event. A migration redacts them
   and keeps their outcome; replaying one of those events is answered as an

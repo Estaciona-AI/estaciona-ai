@@ -10,7 +10,7 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
-use chrono::{Duration, Utc};
+use chrono::{Datelike, Duration, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -35,15 +35,11 @@ impl Fixture {
         let other = Uuid::new_v4();
         let admin = Uuid::new_v4();
         for (id, role) in [(owner, "user"), (other, "user"), (admin, "admin")] {
-            sqlx::query(
-                "INSERT INTO users (id, name, email, password_hash, role) \
-                 VALUES ($1, 'Reservation Fixture', $2, 'unused-test-hash', $3)",
-            )
-            .bind(id)
-            .bind(format!("{id}@example.invalid"))
-            .bind(role)
-            .execute(&pool)
-            .await?;
+            sqlx::query("INSERT INTO users (id, role) VALUES ($1, $2)")
+                .bind(id)
+                .bind(role)
+                .execute(&pool)
+                .await?;
         }
 
         let spot_id = "R01-01".to_owned();
@@ -61,6 +57,8 @@ impl Fixture {
             auth_limits: Default::default(),
             jwt_secret: "r01-disposable-jwt-secret".to_owned(),
             plate_pepper: "r01-disposable-plate-pepper".to_owned(),
+            personal_data: crate::personal_data::PersonalDataCipher::for_unit_test(),
+            identity: crate::identity::IdentityProvider::for_unit_test(),
         });
 
         Ok(Self {
@@ -507,8 +505,18 @@ async fn assert_recommendation_ignores_retired(pool: PgPool, branch: &str) {
     let retired = if branch == "priority" { "A-01" } else { "B-07" };
     sqlx::query("INSERT INTO spots (id,status,x,y,is_active) VALUES ($1,'free',1,0,FALSE),('C-01','free',10,0,TRUE)").bind(retired).execute(f.state.installation.pool()).await.unwrap();
     if branch == "priority" {
-        sqlx::query("UPDATE users SET pcd_status=TRUE WHERE id=$1")
+        let pcd = f
+            .state
+            .personal_data
+            .encrypt(
+                crate::personal_data::Field::UserPcdStatus,
+                f.owner,
+                &Some(true),
+            )
+            .unwrap();
+        sqlx::query("UPDATE users SET pcd_status_enc=$2 WHERE id=$1")
             .bind(f.owner)
+            .bind(pcd)
             .execute(f.state.installation.pool())
             .await
             .unwrap();
@@ -603,7 +611,7 @@ async fn assert_recommendation_unavailable(f: &Fixture) {
 async fn r08_priority_query_failure_does_not_fall_back_to_an_ordinary_spot(pool: PgPool) {
     let f = recommendation_fixture(pool).await;
     // Break the priority query at prepare time, while the role lookup still works.
-    sqlx::query("ALTER TABLE users RENAME COLUMN pcd_status TO r08_unavailable")
+    sqlx::query("ALTER TABLE users RENAME COLUMN pcd_status_enc TO r08_unavailable")
         .execute(f.state.installation.pool())
         .await
         .unwrap();
@@ -703,11 +711,7 @@ async fn add_preferred_spot(f: &Fixture, spot_id: &str) {
 async fn r08_valid_priority_still_takes_precedence_over_distance(pool: PgPool) {
     let f = recommendation_fixture(pool).await;
     add_preferred_spot(&f, "A-01").await;
-    sqlx::query("UPDATE users SET pcd_status=TRUE WHERE id=$1")
-        .bind(f.owner)
-        .execute(f.state.installation.pool())
-        .await
-        .unwrap();
+    declare(&f, f.owner, None, Some(true)).await;
     assert_recommended_spot(&f, "A-01").await;
 }
 
@@ -1036,4 +1040,81 @@ async fn admin_spot_status_rejects_values_outside_the_wire_contract(
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert_eq!(fixture.spot_status().await?, "free");
     Ok(())
+}
+
+async fn declare(f: &Fixture, user: Uuid, born: Option<chrono::NaiveDate>, pcd: Option<bool>) {
+    use crate::personal_data::Field;
+    let cipher = &f.state.personal_data;
+    sqlx::query("UPDATE users SET date_of_birth_enc=$2, pcd_status_enc=$3 WHERE id=$1")
+        .bind(user)
+        .bind(cipher.encrypt(Field::UserDateOfBirth, user, &born).unwrap())
+        .bind(cipher.encrypt(Field::UserPcdStatus, user, &pcd).unwrap())
+        .execute(f.state.installation.pool())
+        .await
+        .unwrap();
+}
+
+async fn recommended_for(f: &Fixture, user: Uuid) -> (StatusCode, serde_json::Value) {
+    let role = if user == f.admin { "admin" } else { "user" };
+    let response = reservations::recommend_spot(
+        State(f.state.clone()),
+        f.headers(user, role).await,
+        axum::extract::Query(reservations::RecommendQuery { user_id: user }),
+    )
+    .await
+    .into_response();
+    let status = response.status();
+    let body = to_bytes(response.into_body(), 16384).await.unwrap();
+    (status, serde_json::from_slice(&body).unwrap_or_default())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn encrypted_eligibility_selects_reserved_spots(pool: PgPool) {
+    let f = Fixture::new(pool).await.unwrap();
+    sqlx::query("INSERT INTO spots (id,status,x,y) VALUES ('A-01','free',5,0),('A-03','free',5,0)")
+        .execute(f.state.installation.pool())
+        .await
+        .unwrap();
+    let today = Utc::now().date_naive();
+    let sixty = chrono::NaiveDate::from_ymd_opt(today.year() - 60, today.month(), today.day())
+        .unwrap_or_else(|| chrono::NaiveDate::from_ymd_opt(today.year() - 60, 2, 28).unwrap());
+    declare(&f, f.owner, Some(sixty), None).await;
+    declare(&f, f.other, Some(sixty + Duration::days(1)), Some(true)).await;
+    let mut graph = ParkingGraph::new();
+    let camera = graph.add_node("cam-01", 0.0, 0.0).unwrap();
+    for spot in [f.spot_id.as_str(), "A-01", "A-03"] {
+        let node = graph.add_node(spot, 1.0, 0.0).unwrap();
+        graph.add_edge(camera, node, 1, true);
+    }
+    *f.state.installation.graph.write().await = graph;
+
+    assert_eq!(
+        recommended_for(&f, f.owner).await.1["recommended_spot"],
+        "A-03"
+    );
+    // One day short of 60 is not elderly; the disability declaration still applies.
+    assert_eq!(
+        recommended_for(&f, f.other).await.1["recommended_spot"],
+        "A-01"
+    );
+    assert_eq!(
+        recommended_for(&f, f.admin).await.1["recommended_spot"],
+        f.spot_id
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn an_envelope_moved_from_another_user_does_not_grant_priority(pool: PgPool) {
+    let f = Fixture::new(pool).await.unwrap();
+    declare(&f, f.other, None, Some(true)).await;
+    sqlx::query("UPDATE users SET pcd_status_enc=(SELECT pcd_status_enc FROM users WHERE id=$2) WHERE id=$1")
+        .bind(f.owner)
+        .bind(f.other)
+        .execute(f.state.installation.pool())
+        .await
+        .unwrap();
+    let (status, body) = recommended_for(&f, f.owner).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(body.is_null());
+    assert_eq!(f.active_count().await.unwrap(), 0);
 }

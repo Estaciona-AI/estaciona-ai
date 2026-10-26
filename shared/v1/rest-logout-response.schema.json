@@ -1,0 +1,19 @@
+{
+  "$id": "urn:estaciona-ai:rest:logout-response:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "end_session_url": {
+      "description": "Visit to end the identity provider session as well.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "end_session_url"
+  ],
+  "title": "LogoutResponse",
+  "type": "object",
+  "x-contract-version": "1.4.0"
+}

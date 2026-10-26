@@ -68,15 +68,6 @@ pub(crate) struct IssuedTicket {
     expires_at: DateTime<Utc>,
 }
 
-fn bearer(headers: &HeaderMap) -> Result<&str, ApiError> {
-    headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .filter(|value| !value.is_empty())
-        .ok_or((StatusCode::UNAUTHORIZED, "Bearer token required"))
-}
-
 fn service_unavailable(error: impl std::fmt::Display) -> ApiError {
     tracing::error!(%error, "WebSocket ticket operation unavailable");
     (
@@ -109,7 +100,9 @@ async fn issue(
         };
         (status, "Invalid request")
     })?;
-    let raw_jwt = bearer(&headers)?;
+    // Browsers send the session cookie; the CSRF guard has checked its Origin.
+    let raw_jwt =
+        security::session_token(&headers).ok_or((StatusCode::UNAUTHORIZED, "Session required"))?;
     let claims = security::verify_jwt(raw_jwt, &state.jwt_secret)
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or expired session"))?;
     let session = AuthSession::from_claims(claims)
@@ -417,9 +410,8 @@ mod postgres_tests {
     #[sqlx::test(migrations = "./migrations")]
     async fn cleanup_removes_expired_tickets_in_bounded_batches(pool: PgPool) {
         let user_id = Uuid::new_v4();
-        sqlx::query("INSERT INTO users (id,name,email,password_hash) VALUES ($1,'Ticket cleanup',$2,'unused')")
+        sqlx::query("INSERT INTO users (id) VALUES ($1)")
             .bind(user_id)
-            .bind(format!("{user_id}@example.invalid"))
             .execute(&pool)
             .await
             .unwrap();
@@ -474,6 +466,8 @@ mod origin_handshake_tests {
             crate::installation::test_support::provision(&pool).await,
             "r14-test-jwt".into(),
             "r14-test-pepper".into(),
+            crate::personal_data::Keyring::for_unit_test(),
+            crate::identity::IdentityProvider::for_unit_test(),
             crate::installation::test_support::package(SiteConfig {
                 directory: std::env::temp_dir(),
                 parkings: vec![ParkingLotConfig {
@@ -505,15 +499,12 @@ mod origin_handshake_tests {
 
     async fn insert_ticket(pool: &PgPool, destination: &str, role: &str) -> String {
         let user_id = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO users (id,name,email,password_hash,role) VALUES ($1,'R14 test',$2,'unused',$3)",
-        )
-        .bind(user_id)
-        .bind(format!("{user_id}@example.invalid"))
-        .bind(role)
-        .execute(pool)
-        .await
-        .unwrap();
+        sqlx::query("INSERT INTO users (id, role) VALUES ($1, $2)")
+            .bind(user_id)
+            .bind(role)
+            .execute(pool)
+            .await
+            .unwrap();
 
         let jwt = crate::sessions::issue(pool, user_id, role, "fixture")
             .await

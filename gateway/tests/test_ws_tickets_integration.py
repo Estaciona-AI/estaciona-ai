@@ -26,13 +26,15 @@ pytestmark = pytest.mark.skipif(
 server = delivery_server
 
 
-def http(server, path, bearer=None, payload=None, cookie=None):
+def http(server, path, bearer=None, payload=None, cookie=None, origin=None):
     headers = {}
     data = None
     if bearer:
         headers["Authorization"] = f"Bearer {bearer}"
     if cookie:
         headers["Cookie"] = cookie
+    if origin:
+        headers["Origin"] = origin
     if payload is not None:
         data = json.dumps(payload).encode()
         headers["Content-Type"] = "application/json"
@@ -92,17 +94,26 @@ def test_denied_origin_preserves_ticket_for_allowed_browser(
     asyncio.run(run())
 
 
-def test_ticket_is_bearer_only_scoped_to_app_and_single_use(server):
+def test_ticket_needs_a_session_is_scoped_to_app_and_single_use(server):
     user_id = insert_user(server)
     session_expires_at = int(time.time()) + 120
     jwt = token(server, user_id, "user", session_expires_at)
-    status, _, _ = http(
-        server,
-        "/auth/ws-ticket",
-        payload={"destination": "app"},
-        cookie=f"estaciona_token={jwt}",
-    )
-    assert status == 401
+    # The retired cookie name is not a session; the current one needs the app origin.
+    for cookie, origin, expected in [
+        (f"estaciona_token={jwt}", "http://localhost", 401),
+        (f"__Host-estaciona_session={jwt}", None, 403),
+        (f"__Host-estaciona_session={jwt}", "https://evil.example", 403),
+        (f"__Host-estaciona_session={jwt}", "http://localhost", 201),
+    ]:
+        status, _, _ = http(
+            server,
+            "/auth/ws-ticket",
+            payload={"destination": "app"},
+            cookie=cookie,
+            origin=origin,
+        )
+        assert status == expected, (cookie, origin)
+    server.query("DELETE FROM ws_tickets")
 
     status, result, headers = issue(server, jwt)
     assert status == 201, result

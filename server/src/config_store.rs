@@ -202,6 +202,8 @@ mod tests {
                 crate::installation::test_support::provision(&pool).await,
                 "r10-disposable-jwt".into(),
                 "r10-disposable-pepper".into(),
+                crate::personal_data::Keyring::for_unit_test(),
+                crate::identity::IdentityProvider::for_unit_test(),
                 crate::installation::test_support::package(
                     crate::site_config::SiteConfig::load(&self.0).unwrap(),
                 ),
@@ -220,8 +222,12 @@ mod tests {
 
     async fn principal(state: &crate::state::SharedState, role: &str) -> axum::http::HeaderMap {
         let id = uuid::Uuid::new_v4();
-        sqlx::query("INSERT INTO users (id, name, email, password_hash, role) VALUES ($1, 'R10 fixture', $2, 'unused-hash', $3)")
-            .bind(id).bind(format!("{id}@example.invalid")).bind(role).execute(state.installation.pool()).await.unwrap();
+        sqlx::query("INSERT INTO users (id, role) VALUES ($1, $2)")
+            .bind(id)
+            .bind(role)
+            .execute(state.installation.pool())
+            .await
+            .unwrap();
         let token = crate::sessions::issue(state.installation.pool(), id, role, &state.jwt_secret)
             .await
             .unwrap();

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        INSERT INTO users (id, name, email, password_hash, date_of_birth, pcd_status)\n        VALUES ($1, $2, $3, $4, $5, $6)\n        RETURNING\n        id,\n        name as \"name!\",\n        email as \"email!\",\n        date_of_birth,\n        pcd_status,\n        role as \"role!\",\n        created_at as \"created_at?\"\n        ",
+  "query": "\n        SELECT\n        id,\n        username,\n        display_name_enc,\n        date_of_birth_enc,\n        pcd_status_enc,\n        role as \"role!\",\n        created_at as \"created_at?\"\n        FROM users\n        WHERE id = $1\n        ",
   "describe": {
     "columns": [
       {
@@ -16,45 +16,45 @@
       },
       {
         "ordinal": 1,
-        "name": "name!",
-        "type_info": "Varchar",
+        "name": "username",
+        "type_info": "Text",
         "origin": {
           "Table": {
             "table": "users",
-            "name": "name"
+            "name": "username"
           }
         }
       },
       {
         "ordinal": 2,
-        "name": "email!",
-        "type_info": "Varchar",
+        "name": "display_name_enc",
+        "type_info": "Bytea",
         "origin": {
           "Table": {
             "table": "users",
-            "name": "email"
+            "name": "display_name_enc"
           }
         }
       },
       {
         "ordinal": 3,
-        "name": "date_of_birth",
-        "type_info": "Date",
+        "name": "date_of_birth_enc",
+        "type_info": "Bytea",
         "origin": {
           "Table": {
             "table": "users",
-            "name": "date_of_birth"
+            "name": "date_of_birth_enc"
           }
         }
       },
       {
         "ordinal": 4,
-        "name": "pcd_status",
-        "type_info": "Bool",
+        "name": "pcd_status_enc",
+        "type_info": "Bytea",
         "origin": {
           "Table": {
             "table": "users",
-            "name": "pcd_status"
+            "name": "pcd_status_enc"
           }
         }
       },
@@ -83,12 +83,7 @@
     ],
     "parameters": {
       "Left": [
-        "Uuid",
-        "Varchar",
-        "Varchar",
-        "Varchar",
-        "Date",
-        "Bool"
+        "Uuid"
       ]
     },
     "nullable": [
@@ -101,5 +96,5 @@
       true
     ]
   },
-  "hash": "956aff81ceea067ac4465ace74fce2c8b9e909f647cc5fe91b3dbf22138e8e7d"
+  "hash": "715e4eb650c4f794e6fbeca649a04888fe9c3677ded772b17b63922046ba1c88"
 }

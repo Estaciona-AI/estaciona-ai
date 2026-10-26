@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def catalog():
     manifest = json.loads((ROOT / "v1/manifest.json").read_text())
-    assert manifest["version"] == "1.3.0"
+    assert manifest["version"] == "1.4.0"
     assert manifest["wire_version"] == 1
     return json.loads((ROOT / manifest["catalog"]).read_text())
 
@@ -28,8 +28,8 @@ def test_catalog_covers_current_rest_operations_and_conditional_lpr():
         ("GET", "/health"),
         ("GET", "/api/v1/capabilities"),
         ("GET", "/api/v1/contracts/{path}"),
-        ("POST", "/api/v1/login"),
-        ("POST", "/api/v1/users"),
+        ("GET", "/api/v1/me"),
+        ("PUT", "/api/v1/me/eligibility"),
         ("GET", "/api/v1/users/{id}"),
         ("POST", "/api/v1/auth/logout"),
         ("POST", "/api/v1/auth/ws-ticket"),

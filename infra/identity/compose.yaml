@@ -1,0 +1,82 @@
+# Central identity provider (Keycloak) shared by every installation. Run it on
+# its own host: its database holds e-mail addresses and password hashes and
+# must not share a host, volume, backup or credentials with an installation.
+# Settings, each read by one container only (copy the *.example files):
+#   ./env/postgres.env   identity database owner
+#   ./env/keycloak.env   database password, bootstrap admin, realm import values
+# Compose variables: AUTH_DOMAIN (public hostname, e.g. auth.estaciona.tech).
+# The proxy publishes only /realms/ and /resources/. The admin console and the
+# Admin REST API used by tools/identity/provision.py listen on 127.0.0.1:8081;
+# reach them through an SSH tunnel. After the first sign-in, create a permanent
+# administrator with MFA in the master realm and delete the bootstrap one.
+services:
+  identity-db:
+    image: postgres:15-alpine@sha256:a8e042598834300dfaa17a54f695b87b7f25d3490433bbbe2ef3bffbb9747f24
+    container_name: estaciona_identity_db
+    restart: always
+    env_file:
+      - ./env/postgres.env
+    volumes:
+      - identity_postgres:/var/lib/postgresql/data
+    networks:
+      - identity
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.8.1@sha256:a78d6b79572168cb25886b80a8b5b8d4ed4390743e3eecb810538683e209dd6b
+    container_name: estaciona_keycloak
+    # Imports realm/estaciona.json only when the realm does not exist yet.
+    command: ["start", "--import-realm"]
+    restart: always
+    env_file:
+      - ./env/keycloak.env
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://identity-db:5432/keycloak
+      KC_HOSTNAME: https://${AUTH_DOMAIN:?Set AUTH_DOMAIN to the public identity hostname}
+      KC_HOSTNAME_ADMIN: http://127.0.0.1:8081
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: xforwarded
+      KC_HEALTH_ENABLED: "true"
+    volumes:
+      - ./realm:/opt/keycloak/data/import:ro
+    ports:
+      - "127.0.0.1:8081:8080"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    depends_on:
+      identity-db:
+        condition: service_healthy
+    networks:
+      - identity
+
+  identity-proxy:
+    image: caddy:2-alpine@sha256:eb4d35b7452d1ab6171fbdbe8d9275b2301dad6dad92115d91e19fb9b24d510f
+    container_name: estaciona_identity_proxy
+    restart: always
+    environment:
+      AUTH_DOMAIN: ${AUTH_DOMAIN:?Set AUTH_DOMAIN to the public identity hostname}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - identity_caddy_data:/data
+      - identity_caddy_config:/config
+    depends_on:
+      - keycloak
+    networks:
+      - identity
+
+volumes:
+  identity_postgres:
+    name: estaciona_identity_postgres
+  identity_caddy_data:
+  identity_caddy_config:
+
+networks:
+  identity:

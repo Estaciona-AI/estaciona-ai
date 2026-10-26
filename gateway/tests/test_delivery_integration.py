@@ -7,6 +7,7 @@ from functools import lru_cache
 """Opt-in integration against the built Rust server and a disposable PostgreSQL DB."""
 
 import asyncio
+import base64
 from contextlib import closing, suppress
 import hashlib
 import json
@@ -34,6 +35,14 @@ pytestmark = pytest.mark.skipif(
     reason="set ESTACIONA_TEST_SERVER and DATABASE_URL to run real Rust integration",
 )
 KEY = "11" * 32
+APP_ROLE_SCRIPT = Path(__file__).parents[2] / "infra" / "app-role.sql"
+IDENTITY = {
+    "OIDC_ISSUER_URL": "http://127.0.0.1:9/realms/integration",
+    "OIDC_CLIENT_ID": "integration",
+    "OIDC_CLIENT_SECRET": "integration-client-secret",
+    "OIDC_REDIRECT_URL": "http://localhost:8000/auth/callback",
+    "APP_URL": "http://localhost",
+}
 IMAGE = (
     "postgres@sha256:bbbf67eadd2381a2738a4a2e36d4c3936c36edd82d80e7ef00411194385d3829"
 )
@@ -100,16 +109,36 @@ class Server:
                 }
             )
         )
+        self.personal_data_keys = root / "personal-data.keys"
+        self.personal_data_keys.write_text(
+            "1:" + base64.b64encode(os.urandom(32)).decode() + "\n"
+        )
+        self.personal_data_keys.chmod(0o600)
         self.environment = {
             **os.environ,
             "DATABASE_URL": db_url,
             "SITE_DATA_DIR": str(site),
-            "JWT_SECRET": "disposable-jwt",
+            "JWT_SECRET": "disposable-jwt-secret-for-integration",
             "LPR_ENABLED": "false",
-            "PLATE_SECRET_PEPPER": "disposable-pepper",
+            "PLATE_SECRET_PEPPER": "disposable-plate-pepper-for-integration",
+            "PERSONAL_DATA_KEYS_FILE": str(self.personal_data_keys),
+            # Sign-in is covered by the Rust tests; here the provider stays
+            # unreachable, as during an outage: everything else keeps working.
+            **IDENTITY,
             "WS_ALLOWED_ORIGINS": "http://localhost",
         }
         self.environment.pop("EDGE_API_KEY", None)
+
+    def use_runtime_role(self):
+        """Serve with the DML-only role of infra/app-role.sql, as in production."""
+        password = uuid4().hex
+        with closing(psycopg2.connect(self.db_url)) as conn, conn:
+            with conn.cursor() as cursor:
+                cursor.execute(APP_ROLE_SCRIPT.read_text())
+                cursor.execute("ALTER ROLE estaciona_app PASSWORD %s", (password,))
+        parsed = urlsplit(self.db_url)
+        netloc = f"estaciona_app:{password}@{parsed.hostname}:{parsed.port or 5432}"
+        self.environment["DATABASE_URL"] = urlunsplit(parsed._replace(netloc=netloc))
 
     def query(self, statement, arguments=()):
         with closing(psycopg2.connect(self.db_url)) as conn, conn:
@@ -119,7 +148,7 @@ class Server:
 
     def start(self):
         if self.postgres_container:
-            parsed = urlsplit(self.db_url)
+            parsed = urlsplit(self.environment["DATABASE_URL"])
             netloc = (
                 parsed.netloc.rsplit("@", 1)[0] + f"@127.0.0.1:{parsed.port or 5432}"
             )
@@ -132,14 +161,19 @@ class Server:
                 "--cap-drop=ALL",
                 "--security-opt",
                 "no-new-privileges",
+                # The owner of the private fixture files, as SECRETS_DIR in production.
                 "--user",
-                "1000:1000",
+                f"{os.getuid()}:{os.getgid()}",
                 "--network",
                 f"container:{self.postgres_container}",
                 "--mount",
                 f"type=bind,source={self.binary},target=/app/server,readonly",
                 "--mount",
                 f"type=bind,source={self.root / 'site'},target=/site,readonly",
+                "--mount",
+                f"type=bind,source={self.personal_data_keys},target=/run/secrets/personal-data.keys,readonly",
+                "--env",
+                "PERSONAL_DATA_KEYS_FILE=/run/secrets/personal-data.keys",
                 "--env",
                 f"DATABASE_URL={database_url}",
                 "--env",
@@ -147,9 +181,14 @@ class Server:
                 "--env",
                 f"LPR_ENABLED={self.environment['LPR_ENABLED']}",
                 "--env",
-                "JWT_SECRET=disposable-jwt",
+                "JWT_SECRET=disposable-jwt-secret-for-integration",
                 "--env",
-                "PLATE_SECRET_PEPPER=disposable-pepper",
+                "PLATE_SECRET_PEPPER=disposable-plate-pepper-for-integration",
+                *[
+                    argument
+                    for key in IDENTITY
+                    for argument in ("--env", f"{key}={self.environment[key]}")
+                ],
                 "--env",
                 f"WS_ALLOWED_ORIGINS={self.environment['WS_ALLOWED_ORIGINS']}",
                 "--entrypoint",
@@ -237,6 +276,7 @@ def server(tmp_path):
             timeout=15,
         )
         assert initialized.returncode == 0, initialized.stdout + initialized.stderr
+        instance.use_runtime_role()
         instance.start()
         instance.query(
             "INSERT INTO edge_gateways (id, name, credential_digest) VALUES (%s, %s, %s)",
@@ -526,18 +566,12 @@ def test_durable_projection_ack_survives_real_server_restart(server, kind):
         (frame["event_id"],),
     ) == [(1,)]
     if kind.startswith("TREND_PREDICTION"):
-        from test_ws_tickets_integration import http, issue, ws_url
+        from test_session_integration import insert_user, token
+        from test_ws_tickets_integration import issue, ws_url
 
-        email = f"{uuid4()}@example.invalid"
-        credentials = {"email": email, "password": "disposable-r02b-password"}
-        status, user, _ = http(
-            server, "/users", payload={"name": "R02b", **credentials}
-        )
-        assert status == 201, user
-        server.query("UPDATE users SET role='admin' WHERE email=%s", (email,))
-        status, login, _ = http(server, "/login", payload=credentials)
-        assert status == 200, login
-        status, ticket, _ = issue(server, login["token"], "dashboard")
+        admin = insert_user(server, role="admin")
+        signed = token(server, admin, "admin", int(time.time()) + 3600)
+        status, ticket, _ = issue(server, signed, "dashboard")
         assert status == 201, ticket
 
         async def read_restored_forecast():

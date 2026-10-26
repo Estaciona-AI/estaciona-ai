@@ -58,7 +58,9 @@ def token(server, user_id, role, expires_at):
             ),
         )
     )
-    signature = hmac.new(b"disposable-jwt", signed, hashlib.sha256).digest()
+    signature = hmac.new(
+        b"disposable-jwt-secret-for-integration", signed, hashlib.sha256
+    ).digest()
     return (signed + b"." + base64.urlsafe_b64encode(signature).rstrip(b"=")).decode()
 
 
@@ -73,9 +75,8 @@ def enable_lpr(server):
 def insert_user(server, role="user", plate=None):
     user_id = uuid4()
     server.query(
-        "INSERT INTO users (id, name, email, password_hash, role) "
-        "VALUES (%s, 'Session fixture', %s, 'unused-test-hash', %s)",
-        (str(user_id), f"{user_id}@example.invalid", role),
+        "INSERT INTO users (id, role) VALUES (%s, %s)",
+        (str(user_id), role),
     )
     if plate is not None:
         # This is an explicitly trusted fixture, never the public registration flow.
@@ -486,7 +487,8 @@ def test_idle_websocket_revalidates_user_and_role(server, endpoint, role, change
             else:
                 server.query(
                     "UPDATE users SET role = %s WHERE id = %s",
-                    ("user" if role == "admin" else "viewer", str(user_id)),
+                    # Roles are only user or admin: any change ends the session.
+                    ("user" if role == "admin" else "admin", str(user_id)),
                 )
             # The approved five-second revalidation has 2.5 seconds of CI margin.
             await asyncio.wait_for(connection.wait_closed(), timeout=7.5)
@@ -510,7 +512,7 @@ def test_app_command_rechecks_principal_before_next_periodic_validation(server, 
                 server.query("DELETE FROM users WHERE id = %s", (str(user_id),))
             else:
                 server.query(
-                    "UPDATE users SET role = 'viewer' WHERE id = %s", (str(user_id),)
+                    "UPDATE users SET role = 'admin' WHERE id = %s", (str(user_id),)
                 )
             await connection.send(
                 json.dumps(
@@ -650,7 +652,7 @@ def test_older_socket_does_not_remove_the_newer_private_channel(server, terminat
     # A known plate and reservation produce a private navigation result.
     # session-camera is authorized but absent from the graph.
     hashed_plate = hmac.new(
-        b"disposable-pepper", b"R03TEST", hashlib.sha256
+        b"disposable-plate-pepper-for-integration", b"R03TEST", hashlib.sha256
     ).hexdigest()
     user_id = insert_user(server, plate=hashed_plate)
 

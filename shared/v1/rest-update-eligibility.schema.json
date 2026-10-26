@@ -1,0 +1,24 @@
+{
+  "$id": "urn:estaciona-ai:rest:update-eligibility:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Self-declared eligibility for reserved spots; `null` clears a declaration.",
+  "properties": {
+    "date_of_birth": {
+      "format": "date",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "pcd_status": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    }
+  },
+  "title": "UpdateEligibility",
+  "type": "object",
+  "x-contract-version": "1.4.0"
+}

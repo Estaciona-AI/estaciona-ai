@@ -546,7 +546,7 @@ def car_detected():
 
 def car_user(server):
     plate_digest = hmac.new(
-        b"disposable-pepper", b"R05TEST", hashlib.sha256
+        b"disposable-plate-pepper-for-integration", b"R05TEST", hashlib.sha256
     ).hexdigest()
     user_id = insert_user(server, plate=plate_digest)
     server.query(

@@ -9,15 +9,26 @@ use sqlx::PgPool;
 use std::time::Duration;
 
 /// No application writes, administrative dispatch or listener may precede this guard.
+/// The runtime role cannot migrate: a schema behind this binary stops startup.
 pub async fn prepare(
     pool: PgPool,
     identity: InstallationIdentity,
 ) -> Result<VerifiedInstallation, StoreError> {
     tokio::time::timeout(Duration::from_secs(10), async {
         require_match(&pool, &identity).await?;
-        store::migrate(&pool).await?;
-        require_match(&pool, &identity).await?;
+        store::require_migrated(&pool).await?;
         Ok(VerifiedInstallation::new(pool, identity))
+    })
+    .await
+    .map_err(|_| StoreError::Timeout)?
+}
+
+/// `--migrate`, run with the schema owner role before starting a new release.
+pub async fn migrate(pool: &PgPool, identity: &InstallationIdentity) -> Result<(), StoreError> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        require_match(pool, identity).await?;
+        store::migrate(pool).await?;
+        require_match(pool, identity).await
     })
     .await
     .map_err(|_| StoreError::Timeout)?

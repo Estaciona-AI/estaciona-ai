@@ -3,30 +3,24 @@
 
 ### BUILDER ###
 
-FROM rust:1.95.0-slim AS builder
-
-# hadolint ignore=DL3008
-RUN apt-get update && apt-get install -y --no-install-recommends \
-  pkg-config \
-  libssl-dev \
-  && rm -rf /var/lib/apt/lists/*
+# Builder and runtime share one Debian release (trixie), so the binary never
+# needs a newer glibc than the runtime has. TLS is rustls: no OpenSSL or libpq.
+FROM rust:1.95.0-slim-trixie@sha256:e14e87345b4d5964ddcc3491d27ee046a0f23820f340c3c1e24da6880141f7c0 AS builder
 
 WORKDIR /build
 COPY server/ ./server/
 WORKDIR /build/server
 
 ENV SQLX_OFFLINE=true
-RUN cargo build --release
+RUN cargo build --release --locked
 
 ### RUNTIME ###
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
 
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
   ca-certificates \
-  libssl3 \
-  libpq5 \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -34,6 +28,10 @@ COPY --from=builder /build/server/target/release/estaciona-ai-rust-server ./serv
 
 COPY LICENSE NOTICE LICENSING.md /usr/share/licenses/estaciona-ai/
 COPY LICENSES/ /usr/share/licenses/estaciona-ai/third-party/
+
+# The server never needs root; secret files must be owned by this UID.
+RUN useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin estaciona
+USER 10001:10001
 
 ENV RUST_LOG=info
 EXPOSE 8000

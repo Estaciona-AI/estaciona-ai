@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Guilherme Pedroza
 // SPDX-License-Identifier: Apache-2.0
 
-//! Local access-session registry. Identity-provider integration remains separate.
+//! Local access-session registry. Sessions start after a sign-in at the identity
+//! provider and end at logout, expiry or the provider's back-channel logout.
 use axum::{
     extract::State,
     http::{HeaderMap, StatusCode, header},
@@ -18,6 +19,12 @@ use crate::{
 };
 
 type ApiError = (StatusCode, &'static str);
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct LogoutResponse {
+    /// Visit to end the identity provider session as well.
+    end_session_url: Option<String>,
+}
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn unavailable(error: impl std::fmt::Display) -> ApiError {
@@ -35,11 +42,23 @@ pub(crate) fn expires_at(session: &AuthSession) -> Result<DateTime<Utc>, securit
         .ok_or((StatusCode::UNAUTHORIZED, "Invalid session expiry".into()))
 }
 
+#[cfg(test)]
 pub(crate) async fn issue(
     pool: &PgPool,
     user: Uuid,
     role: &str,
     secret: &str,
+) -> Result<String, sqlx::Error> {
+    issue_for_provider_session(pool, user, role, secret, None).await
+}
+
+/// The provider session (`sid`) lets back-channel logout find this session.
+pub(crate) async fn issue_for_provider_session(
+    pool: &PgPool,
+    user: Uuid,
+    role: &str,
+    secret: &str,
+    provider_session: Option<&str>,
 ) -> Result<String, sqlx::Error> {
     let token = security::create_jwt(&user.to_string(), role, secret)
         .map_err(|_| sqlx::Error::Protocol("Session signing failed".into()))?;
@@ -47,17 +66,67 @@ pub(crate) async fn issue(
         .map_err(|_| sqlx::Error::Protocol("Session signing failed".into()))?;
     let session = AuthSession::from_claims(claims)
         .map_err(|_| sqlx::Error::Protocol("Session expiry invalid".into()))?;
-    sqlx::query("INSERT INTO auth_sessions (id,user_id,role,expires_at) VALUES ($1,$2,$3,$4)")
-        .bind(session.session_id)
-        .bind(user)
-        .bind(role)
-        .bind(
-            expires_at(&session)
-                .map_err(|_| sqlx::Error::Protocol("Session expiry invalid".into()))?,
-        )
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "INSERT INTO auth_sessions (id,user_id,role,expires_at,idp_session_id) VALUES ($1,$2,$3,$4,$5)",
+    )
+    .bind(session.session_id)
+    .bind(user)
+    .bind(role)
+    .bind(expires_at(&session).map_err(|_| sqlx::Error::Protocol("Session expiry invalid".into()))?)
+    .bind(provider_session)
+    .execute(pool)
+    .await?;
     Ok(token)
+}
+
+async fn revocation(pool: &PgPool) -> Result<Transaction<'_, Postgres>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    sqlx::raw_sql("SET LOCAL lock_timeout='2s'; SET LOCAL statement_timeout='2s'")
+        .execute(&mut *tx)
+        .await?;
+    Ok(tx)
+}
+
+/// Their WebSocket tickets go in the same transaction; open sockets close at
+/// their next revalidation.
+async fn finish_revocation(
+    mut tx: Transaction<'_, Postgres>,
+    sessions: Vec<Uuid>,
+) -> Result<u64, sqlx::Error> {
+    sqlx::query("DELETE FROM ws_tickets WHERE session_id = ANY($1)")
+        .bind(&sessions)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(sessions.len() as u64)
+}
+
+pub(crate) async fn revoke_provider_session(pool: &PgPool, sid: &str) -> Result<u64, sqlx::Error> {
+    let mut tx = revocation(pool).await?;
+    let sessions = sqlx::query_scalar(
+        "UPDATE auth_sessions SET revoked_at=NOW() WHERE revoked_at IS NULL AND idp_session_id=$1 RETURNING id",
+    )
+    .bind(sid)
+    .fetch_all(&mut *tx)
+    .await?;
+    finish_revocation(tx, sessions).await
+}
+
+pub(crate) async fn revoke_account(
+    pool: &PgPool,
+    issuer: &str,
+    subject: &str,
+) -> Result<u64, sqlx::Error> {
+    let mut tx = revocation(pool).await?;
+    let sessions = sqlx::query_scalar(
+        "UPDATE auth_sessions SET revoked_at=NOW() WHERE revoked_at IS NULL AND user_id IN \
+         (SELECT id FROM users WHERE oidc_issuer=$1 AND oidc_subject=$2) RETURNING id",
+    )
+    .bind(issuer)
+    .bind(subject)
+    .fetch_all(&mut *tx)
+    .await?;
+    finish_revocation(tx, sessions).await
 }
 
 /// Serializes ticket issuance with logout; callers hold this until ticket commit.
@@ -77,12 +146,8 @@ pub(crate) async fn logout(
     State(state): State<SharedState>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
-    let raw = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .filter(|value| !value.is_empty())
-        .ok_or((StatusCode::UNAUTHORIZED, "Bearer token required"))?;
+    let raw =
+        security::session_token(&headers).ok_or((StatusCode::UNAUTHORIZED, "Session required"))?;
     let claims = security::verify_jwt(raw, &state.jwt_secret)
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or expired session"))?;
     let session = AuthSession::from_claims(claims)
@@ -120,15 +185,15 @@ pub(crate) async fn logout(
             "Session operation timed out",
         )
     })??;
+    // The provider session continues until the browser visits this URL.
+    let end_session_url = state.identity.end_session_url().await;
     Ok((
-        StatusCode::NO_CONTENT,
+        StatusCode::OK,
         [
-            (
-                header::SET_COOKIE,
-                "estaciona_token=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0",
-            ),
+            (header::SET_COOKIE, security::clear_session_cookie()),
             (header::CACHE_CONTROL, "no-store"),
         ],
+        axum::Json(LogoutResponse { end_session_url }),
     ))
 }
 
@@ -137,7 +202,10 @@ pub(crate) async fn cleanup_expired(pool: &PgPool) -> Result<u64, sqlx::Error> {
     sqlx::query("SET LOCAL statement_timeout='2s'")
         .execute(&mut *tx)
         .await?;
-    let count = sqlx::query("DELETE FROM auth_sessions WHERE id IN (SELECT id FROM auth_sessions WHERE expires_at<=NOW() ORDER BY expires_at LIMIT 1000 FOR UPDATE SKIP LOCKED)")
+    let mut count = sqlx::query("DELETE FROM auth_sessions WHERE id IN (SELECT id FROM auth_sessions WHERE expires_at<=NOW() ORDER BY expires_at LIMIT 1000 FOR UPDATE SKIP LOCKED)")
+        .execute(&mut *tx).await?.rows_affected();
+    // Abandoned sign-ins: the browser never came back from the provider.
+    count += sqlx::query("DELETE FROM oidc_login_attempts WHERE state_digest IN (SELECT state_digest FROM oidc_login_attempts WHERE expires_at<=NOW() ORDER BY expires_at LIMIT 1000 FOR UPDATE SKIP LOCKED)")
         .execute(&mut *tx).await?.rows_affected();
     tx.commit().await?;
     Ok(count)
@@ -152,12 +220,17 @@ mod tests {
     async fn fixture(pool: PgPool) -> (SharedState, Uuid) {
         let verified = crate::installation::test_support::provision(&pool).await;
         let user = Uuid::new_v4();
-        sqlx::query("INSERT INTO users (id,name,email,password_hash,role) VALUES ($1,'Sessions',$2,'unused','user')")
-            .bind(user).bind(format!("{user}@example.invalid")).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO users (id, role) VALUES ($1, 'user')")
+            .bind(user)
+            .execute(&pool)
+            .await
+            .unwrap();
         let state = crate::state::init_state(
             verified,
             "session-test-secret".into(),
             "test-pepper".into(),
+            crate::personal_data::Keyring::for_unit_test(),
+            crate::identity::IdentityProvider::for_unit_test(),
             crate::installation::test_support::package(SiteConfig {
                 directory: std::env::temp_dir(),
                 spots: vec![],
@@ -202,7 +275,7 @@ mod tests {
             .await
             .unwrap()
             .into_response();
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(response.status(), StatusCode::OK);
         assert!(
             response.headers()[header::SET_COOKIE]
                 .to_str()

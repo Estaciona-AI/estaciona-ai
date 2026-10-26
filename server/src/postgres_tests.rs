@@ -12,13 +12,10 @@ async fn migrations_persist_a_reservation_with_user_and_spot(
     let reservation_id = Uuid::new_v4();
     let spot_id = "migration-test-spot";
 
-    sqlx::query(
-        "INSERT INTO users (id, name, email, password_hash) \
-         VALUES ($1, 'Migration Fixture', 'migration@example.invalid', 'unused-test-hash')",
-    )
-    .bind(user_id)
-    .execute(&pool)
-    .await?;
+    sqlx::query("INSERT INTO users (id) VALUES ($1)")
+        .bind(user_id)
+        .execute(&pool)
+        .await?;
 
     sqlx::query("INSERT INTO spots (id, status, x, y) VALUES ($1, 'free', 0, 0)")
         .bind(spot_id)
@@ -335,4 +332,66 @@ async fn legacy_plate_receipts_are_redacted_and_other_events_kept(pool: PgPool) 
             .iter()
             .any(|(payload, _)| payload.contains("SPOT_UPDATE"))
     );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn runtime_role_changes_rows_but_not_the_schema_or_migration_history(pool: PgPool) {
+    crate::installation::test_support::provision(&pool).await;
+    sqlx::raw_sql(include_str!("../../infra/app-role.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Repeating the script keeps the same privileges.
+    sqlx::raw_sql(include_str!("../../infra/app-role.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let password = Uuid::new_v4().simple().to_string();
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "ALTER ROLE estaciona_app PASSWORD '{password}'"
+    )))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let options = pool
+        .connect_options()
+        .as_ref()
+        .clone()
+        .username("estaciona_app")
+        .password(&password);
+    let app = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .unwrap();
+
+    crate::installation::store::require_migrated(&app)
+        .await
+        .unwrap();
+    for statement in [
+        "INSERT INTO spots (id, status, x, y) VALUES ('runtime-role', 'free', 0, 0)",
+        "UPDATE spots SET status = 'occupied' WHERE id = 'runtime-role'",
+        "INSERT INTO site_map_revisions (fingerprint, manifest) VALUES (repeat('a', 64), '{}')",
+        "DELETE FROM spots WHERE id = 'runtime-role'",
+        "SELECT environment FROM installation_binding",
+    ] {
+        sqlx::raw_sql(statement).execute(&app).await.unwrap();
+    }
+    for statement in [
+        "CREATE TABLE intruder (id INT)",
+        "ALTER TABLE users ADD COLUMN intruder INT",
+        "CREATE INDEX intruder ON spots (x)",
+        "DROP TABLE vision_spot_mappings",
+        "TRUNCATE spots",
+        "DELETE FROM _sqlx_migrations",
+        "UPDATE _sqlx_migrations SET success = false",
+        "UPDATE installation_binding SET environment = 'production'",
+        "DELETE FROM installation_binding",
+    ] {
+        assert!(
+            sqlx::raw_sql(statement).execute(&app).await.is_err(),
+            "{statement}"
+        );
+    }
+    app.close().await;
 }
