@@ -8,10 +8,16 @@ use crate::{
     site_config::{ParkingLotConfig, SiteConfig, Spot3DDef},
 };
 
+/// Navigation waypoints, one every 0.15 map units: 7.5 km of path. Spots are
+/// matched to their nearest waypoint, so both bounds also cap startup work.
+pub const MAX_PATH_NODES: usize = 50_000;
+pub const MAX_SPOTS: usize = 10_000;
+
 #[derive(Debug)]
 pub enum MapGraphError {
     Duplicate(DuplicateNodeName),
     InvalidLayout,
+    TooLarge,
 }
 
 impl std::fmt::Display for MapGraphError {
@@ -19,6 +25,10 @@ impl std::fmt::Display for MapGraphError {
         match self {
             Self::Duplicate(error) => error.fmt(f),
             Self::InvalidLayout => f.write_str("Invalid navigation path extent"),
+            Self::TooLarge => write!(
+                f,
+                "Map exceeds {MAX_PATH_NODES} navigation waypoints or {MAX_SPOTS} spots"
+            ),
         }
     }
 }
@@ -27,7 +37,7 @@ impl std::error::Error for MapGraphError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Duplicate(error) => Some(error),
-            Self::InvalidLayout => None,
+            Self::InvalidLayout | Self::TooLarge => None,
         }
     }
 }
@@ -58,6 +68,9 @@ impl Layout {
             .first()
             .map(|lot| lot.path.as_slice())
             .unwrap_or(&[]);
+        if path.len() > MAX_PATH_NODES {
+            return Err(MapGraphError::TooLarge);
+        }
         let origin = path.first().map(|point| (point.x, point.z));
         let mut previous = origin;
         let mut node_count = usize::from(origin.is_some());
@@ -73,6 +86,10 @@ impl Layout {
             node_count = node_count
                 .checked_add(steps)
                 .ok_or(MapGraphError::InvalidLayout)?;
+            // Checked per segment, before any waypoint exists.
+            if node_count > MAX_PATH_NODES {
+                return Err(MapGraphError::TooLarge);
+            }
             segments.push(Segment {
                 origin: start,
                 delta,
@@ -90,6 +107,9 @@ impl Layout {
     }
 
     fn validate_names(&self, spots: &[Spot3DDef]) -> Result<(), MapGraphError> {
+        if spots.len() > MAX_SPOTS {
+            return Err(MapGraphError::TooLarge);
+        }
         let mut names = HashSet::new();
         for spot in spots {
             let collides_with_origin = self.origin.is_some() && spot.id == "cam-01";
@@ -250,5 +270,66 @@ mod tests {
             Err(MapGraphError::InvalidLayout)
         ));
         assert!(matches!(build(&site), Err(MapGraphError::InvalidLayout)));
+    }
+
+    fn spots(count: usize) -> Vec<Spot3DDef> {
+        (0..count)
+            .map(|index| Spot3DDef {
+                id: format!("spot-{index}"),
+                center_3d: Coords3D {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 1.0,
+                },
+            })
+            .collect()
+    }
+
+    #[test]
+    fn waypoint_budget_is_exact_and_checked_before_expansion() {
+        let step = 0.15;
+        let last = (MAX_PATH_NODES - 1) as f64;
+        // The origin plus MAX_PATH_NODES - 1 interpolated waypoints fit.
+        let at_limit = site("spot", last * step - 0.01);
+        let graph = build(&at_limit).unwrap();
+        let farthest = format!("path_node_{}", MAX_PATH_NODES - 1);
+        assert!(graph.calculate_route("cam-01", &farthest).is_some());
+        // One more waypoint does not.
+        let over = site("spot", last * step + 0.01);
+        assert!(matches!(
+            validate_names(&over.parkings, &over.spots),
+            Err(MapGraphError::TooLarge)
+        ));
+        assert!(matches!(build(&over), Err(MapGraphError::TooLarge)));
+        // A short map with a wrong scale would expand to billions of nodes.
+        let wrong_scale = site("spot", 1e9);
+        assert!(matches!(build(&wrong_scale), Err(MapGraphError::TooLarge)));
+    }
+
+    #[test]
+    fn repeated_path_points_count_against_the_budget() {
+        let mut site = site("spot", 0.0);
+        site.parkings[0].path = (0..=MAX_PATH_NODES)
+            .map(|_| PathNode { x: 0.0, z: 0.0 })
+            .collect();
+        assert!(matches!(
+            validate_names(&site.parkings, &site.spots),
+            Err(MapGraphError::TooLarge)
+        ));
+    }
+
+    #[test]
+    fn spot_budget_is_exact() {
+        let mut site = site("spot", 1.0);
+        site.spots = spots(MAX_SPOTS);
+        assert_eq!(
+            build(&site).unwrap().calculate_cost("cam-01", "spot-0"),
+            Some(1000)
+        );
+        site.spots = spots(MAX_SPOTS + 1);
+        assert!(matches!(
+            validate_names(&site.parkings, &site.spots),
+            Err(MapGraphError::TooLarge)
+        ));
     }
 }

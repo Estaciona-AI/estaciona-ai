@@ -142,6 +142,9 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
 - One silent spot no longer discards a whole hour of history, and registering a
   new spot no longer discards earlier hours. An hour counts when at least 90% of
   the spots monitored so far reported.
+- A map whose path would expand to more than 50,000 navigation waypoints, or
+  with more than 10,000 spots, is refused when it is loaded or written,
+  instead of exhausting memory when the server builds its graph.
 
 ### Security
 
