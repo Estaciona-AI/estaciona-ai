@@ -514,7 +514,66 @@ async fn a_new_role_replaces_the_old_and_ends_sessions_with_it(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(accounts, 1, "the provider subject identifies the account");
-    assert_eq!(f.me(&as_user).await.status().as_u16(), 403);
+    assert_eq!(f.me(&as_user).await.status().as_u16(), 401);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn sessions_ended_by_a_role_change_stay_ended_when_the_role_returns(pool: PgPool) {
+    let f = fixture(pool.clone()).await;
+    for (original, other) in [("admin", "user"), ("user", "admin")] {
+        let old = f.sign_in(&[original]).await;
+        sqlx::query(
+            "INSERT INTO ws_tickets (session_id,digest,user_id,role,destination,session_expires_at,expires_at) \
+             SELECT id,sha256(convert_to(id::text,'UTF8')),user_id,role,'app',EXTRACT(EPOCH FROM expires_at)::BIGINT,NOW()+INTERVAL '1 minute' \
+             FROM auth_sessions WHERE revoked_at IS NULL",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let changed = f.sign_in(&[other]).await;
+        let tickets: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ws_tickets")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(tickets, 0, "{original}: tickets of ended sessions go too");
+
+        let restored = f.sign_in(&[original]).await;
+        let path = format!("{original}→{other}→{original}");
+        assert_eq!(f.me(&old).await.status().as_u16(), 401, "{path}");
+        assert_eq!(f.me(&changed).await.status().as_u16(), 401, "{path}");
+        assert_eq!(f.me(&restored).await.status().as_u16(), 200, "{path}");
+        let live: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM auth_sessions WHERE revoked_at IS NULL")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(live, 1, "{path}");
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn concurrent_sign_ins_with_different_roles_leave_no_stale_session(pool: PgPool) {
+    let f = fixture(pool.clone()).await;
+    for round in 0..10 {
+        tokio::join!(f.sign_in(&["admin"]), f.sign_in(&["user"]));
+        let stale: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM auth_sessions s JOIN users u ON u.id=s.user_id \
+             WHERE s.revoked_at IS NULL AND s.role<>u.role",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(stale, 0, "round {round}");
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn sessions_with_the_same_role_survive_another_sign_in(pool: PgPool) {
+    let f = fixture(pool).await;
+    let first_device = f.sign_in(&["user"]).await;
+    let second_device = f.sign_in(&["user"]).await;
+    assert_eq!(f.me(&first_device).await.status().as_u16(), 200);
+    assert_eq!(f.me(&second_device).await.status().as_u16(), 200);
 }
 
 #[sqlx::test(migrations = "./migrations")]

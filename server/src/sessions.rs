@@ -9,7 +9,7 @@ use axum::{
     response::IntoResponse,
 };
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{PgExecutor, PgPool, Postgres, Transaction};
 use tokio::time::{Duration, timeout};
 use uuid::Uuid;
 
@@ -54,7 +54,7 @@ pub(crate) async fn issue(
 
 /// The provider session (`sid`) lets back-channel logout find this session.
 pub(crate) async fn issue_for_provider_session(
-    pool: &PgPool,
+    executor: impl PgExecutor<'_>,
     user: Uuid,
     role: &str,
     secret: &str,
@@ -74,9 +74,38 @@ pub(crate) async fn issue_for_provider_session(
     .bind(role)
     .bind(expires_at(&session).map_err(|_| sqlx::Error::Protocol("Session expiry invalid".into()))?)
     .bind(provider_session)
-    .execute(pool)
+    .execute(executor)
     .await?;
     Ok(token)
+}
+
+/// Ends the account's sessions issued with any other role, so restoring that
+/// role later cannot revive them. Runs in the caller's role-change transaction.
+pub(crate) async fn revoke_other_roles(
+    tx: &mut Transaction<'_, Postgres>,
+    user: Uuid,
+    role: &str,
+) -> Result<u64, sqlx::Error> {
+    let sessions: Vec<Uuid> = sqlx::query_scalar(
+        "UPDATE auth_sessions SET revoked_at=NOW() WHERE revoked_at IS NULL AND user_id=$1 AND role<>$2 RETURNING id",
+    )
+    .bind(user)
+    .bind(role)
+    .fetch_all(&mut **tx)
+    .await?;
+    delete_tickets(tx, &sessions).await?;
+    Ok(sessions.len() as u64)
+}
+
+async fn delete_tickets(
+    tx: &mut Transaction<'_, Postgres>,
+    sessions: &[Uuid],
+) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM ws_tickets WHERE session_id = ANY($1)")
+        .bind(sessions)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
 }
 
 async fn revocation(pool: &PgPool) -> Result<Transaction<'_, Postgres>, sqlx::Error> {
@@ -93,10 +122,7 @@ async fn finish_revocation(
     mut tx: Transaction<'_, Postgres>,
     sessions: Vec<Uuid>,
 ) -> Result<u64, sqlx::Error> {
-    sqlx::query("DELETE FROM ws_tickets WHERE session_id = ANY($1)")
-        .bind(&sessions)
-        .execute(&mut *tx)
-        .await?;
+    delete_tickets(&mut tx, &sessions).await?;
     tx.commit().await?;
     Ok(sessions.len() as u64)
 }
