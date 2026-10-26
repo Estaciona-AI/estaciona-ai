@@ -141,6 +141,7 @@ def test_comparison_applies_and_reports_the_requested_calibration(
         gamma=1.0,
         tile_size=512,
         tile_overlap=0.25,
+        sha256="ab" * 32,
     )
     profile.path.write_bytes(b"fixture")
     model = Mock()
@@ -162,6 +163,7 @@ def test_comparison_applies_and_reports_the_requested_calibration(
         "provider": "default",
         "precision": "fp32",
         "engine_cache": None,
+        "expected_sha256": "ab" * 32,
     }
     np.testing.assert_array_equal(model.detect.call_args.args[0], frame)
     assert model.detect.call_args.kwargs == {"confidence": 0.3}

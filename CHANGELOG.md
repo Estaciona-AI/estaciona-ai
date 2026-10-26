@@ -59,6 +59,12 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
   `EDGE_API_KEY_FILE`. The gateway listens on `127.0.0.1` by default
   (`GATEWAY_HOST` accepts only loopback addresses), and vision refuses a
   `ws://` gateway URL off its own host.
+- **Vision checks the model file before running it.** An ONNX model must have
+  the `.provenance.json` written by `tools/export_rtdetr.py` next to it, and
+  its SHA-256 must match. To run another model on purpose, set the detector
+  profile's `sha256` (or `VISION_MODEL_SHA256` for the legacy client).
+  TensorRT engine names now include the model digest, so engines are rebuilt
+  once after this upgrade.
 
 ### Added
 
@@ -150,6 +156,9 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
 - One silent spot no longer discards a whole hour of history, and registering a
   new spot no longer discards earlier hours. An hour counts when at least 90% of
   the spots monitored so far reported.
+- A map whose path would expand to more than 50,000 navigation waypoints, or
+  with more than 10,000 spots, is refused when it is loaded or written,
+  instead of exhausting memory when the server builds its graph.
 
 ### Security
 
