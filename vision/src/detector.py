@@ -8,7 +8,9 @@ engines are built locally by ONNX Runtime from the ONNX model and cached.
 """
 
 import ctypes
+import hashlib
 import importlib.util
+import json
 from pathlib import Path
 from contextlib import nullcontext
 from typing import Protocol
@@ -221,6 +223,31 @@ class RTDetrDetector:
             ]
 
 
+def verify_model(path, expected_sha256=None):
+    """Return the model's SHA-256 if it matches what this deployment expects.
+
+    The expected digest is the profile's explicit one, for a deliberate model
+    swap, or else the one the export recorded next to the model.
+    """
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for block in iter(lambda: stream.read(1 << 20), b""):
+            digest.update(block)
+    actual = digest.hexdigest()
+    if expected_sha256 is None:
+        provenance = Path(path).with_suffix(".provenance.json")
+        try:
+            expected_sha256 = json.loads(provenance.read_text())["onnx_sha256"]
+        except OSError, ValueError, KeyError, TypeError:
+            raise ValueError(
+                f"Model provenance missing or invalid: {provenance}; "
+                "export with tools/export_rtdetr.py or set the expected sha256"
+            ) from None
+    if actual != expected_sha256:
+        raise ValueError(f"Model {path} does not match its expected SHA-256")
+    return actual
+
+
 def load_detector(
     path,
     device="cuda",
@@ -233,6 +260,7 @@ def load_detector(
     provider="default",
     precision="fp32",
     engine_cache=None,
+    expected_sha256=None,
 ):
     path = Path(path)
     if provider not in ("default", "tensorrt") or precision not in ("fp32", "fp16"):
@@ -259,6 +287,7 @@ def load_detector(
         )
     if device not in ("cuda", "cpu"):
         raise ValueError("VISION_DEVICE must be cuda or cpu")
+    model_sha256 = verify_model(path, expected_sha256)
     if runtime is None:
         import onnxruntime as runtime
     if device == "cuda" and hasattr(runtime, "preload_dlls"):
@@ -292,9 +321,10 @@ def load_detector(
                     "trt_fp16_enable": precision == "fp16",
                     "trt_engine_cache_enable": True,
                     "trt_engine_cache_path": str(engine_cache),
-                    # Cache names ignore profile shapes: inputs with different
-                    # tile counts would overwrite and rebuild each other.
-                    "trt_engine_cache_prefix": f"rtdetr_b{batch}",
+                    # Cache names ignore profile shapes and the model file:
+                    # name both, so neither another tile count nor a swapped
+                    # model reuses an engine built for something else.
+                    "trt_engine_cache_prefix": f"rtdetr_{model_sha256[:16]}_b{batch}",
                     "trt_profile_min_shapes": shapes(1),
                     "trt_profile_opt_shapes": shapes(batch),
                     "trt_profile_max_shapes": shapes(batch),

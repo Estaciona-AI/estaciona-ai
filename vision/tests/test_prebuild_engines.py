@@ -27,6 +27,7 @@ def profile(cache, provider="tensorrt", precision="fp16", model="r18.onnx"):
         provider=provider,
         precision=precision,
         engine_cache=cache,
+        sha256=None,
     )
 
 
