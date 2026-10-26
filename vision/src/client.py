@@ -97,7 +97,11 @@ async def main(argv=None):
         spots = load_spots(spots_path)
 
         device = os.environ.get("VISION_DEVICE", "cuda")
-        model = load_detector(MODEL_PATH, device=device)
+        model = load_detector(
+            MODEL_PATH,
+            device=device,
+            expected_sha256=os.environ.get("VISION_MODEL_SHA256") or None,
+        )
 
         video_list = []
         if os.path.isdir(VIDEO_PATH):

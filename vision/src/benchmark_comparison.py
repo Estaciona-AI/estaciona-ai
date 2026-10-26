@@ -42,6 +42,7 @@ def comparison_pass(
         provider=profile.provider,
         precision=profile.precision,
         engine_cache=profile.engine_cache,
+        expected_sha256=profile.sha256,
         mapping=mapping,
     )
     if barrier is not None:

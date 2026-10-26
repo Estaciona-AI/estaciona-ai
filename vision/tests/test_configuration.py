@@ -256,3 +256,16 @@ def test_tensorrt_profile_requires_cuda_and_engine_cache(profile):
     data["detectors"]["main"]["device"] = "cpu"
     with pytest.raises(ValueError):
         load(save(profile))
+
+
+@pytest.mark.parametrize("sha256", ["AB" * 32, "ab" * 31, 42, "zz" * 32])
+def test_detector_digest_must_be_lowercase_sha256(profile, sha256):
+    profile[1]["detectors"]["main"]["sha256"] = sha256
+    with pytest.raises(ValueError, match="sha256"):
+        load(save(profile))
+
+
+def test_detector_digest_is_optional_and_kept(profile):
+    assert load(profile[0]).inputs[0].detector.sha256 is None
+    profile[1]["detectors"]["main"]["sha256"] = "ab" * 32
+    assert load(save(profile)).inputs[0].detector.sha256 == "ab" * 32
