@@ -51,6 +51,12 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
   from `WS_ALLOWED_ORIGINS`, which now also drives CORS. `POST /auth/logout`
   answers 200 with the provider's `end_session_url`. Contract 1.4.0 removes the
   login and registration operations.
+- **Vision checks the model file before running it.** An ONNX model must have
+  the `.provenance.json` written by `tools/export_rtdetr.py` next to it, and
+  its SHA-256 must match. To run another model on purpose, set the detector
+  profile's `sha256` (or `VISION_MODEL_SHA256` for the legacy client).
+  TensorRT engine names now include the model digest, so engines are rebuilt
+  once after this upgrade.
 
 ### Added
 
