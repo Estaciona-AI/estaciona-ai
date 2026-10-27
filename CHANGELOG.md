@@ -170,6 +170,12 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
   `infra/forecast-reader.sql` again: the reader also reads
   `installation_binding`. The daily retrain runs at 03:30 site time instead of
   at the next hourly forecast.
+- The gateway's local database no longer grows without bound: confirmed events
+  are deleted 24 hours after they arrived and metrics after 7 days, in small
+  batches every five minutes; pending events are never deleted. Above
+  `GATEWAY_MAX_DB_BYTES` (2 GiB) new local events are refused with close code
+  1013 and stay in the producer's outbox. Pending deliveries use a partial
+  index.
 - A back-channel logout that arrives while a sign-in for the same provider
   session or account is still completing now ends it as well: the callback
   refuses an ID token issued before the logout.
@@ -190,6 +196,11 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
 
 ### Security
 
+- WebSocket handshakes no longer compete freely for the database pool: at most
+  `WS_HANDSHAKE_CONCURRENCY` (2) authenticate at once and the rest get 503
+  with `Retry-After` before any query. Open sockets are capped per kind (edge
+  64, app 2000, dashboard 64) and messages are limited to 64 KiB (edge) and
+  16 KiB (app, dashboard).
 - A compromised producer or a capture on the local network no longer
   exposes the credential that authenticates the gateway to the server: the
   two keys are separate, the listener is loopback-only and compares keys in

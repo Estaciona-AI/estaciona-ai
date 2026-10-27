@@ -38,6 +38,7 @@ mod state;
 mod users;
 mod vehicles;
 mod ws;
+mod ws_admission;
 mod ws_origin;
 mod ws_tickets;
 
@@ -48,7 +49,7 @@ use axum::{
     routing::{get, post, put},
 };
 use sqlx::postgres::PgPoolOptions;
-use state::{SharedState, init_state};
+use state::SharedState;
 use tokio::net::TcpListener;
 use tower_http::{
     cors::{AllowOrigin, CorsLayer},
@@ -224,7 +225,7 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    let parking_state: SharedState = init_state(
+    let parking_state: SharedState = state::init_state_with(
         verified,
         config.jwt_secret,
         config.plate_pepper,
@@ -232,6 +233,7 @@ async fn main() {
         identity,
         package,
         lpr_mode,
+        config.ws_limits,
     )
     .await
     .expect("Failed to reconcile installation map");

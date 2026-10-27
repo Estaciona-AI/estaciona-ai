@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Guilherme Pedroza
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::ws_admission::{CLIENT_MESSAGE_BYTES, Kind};
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, Extension, Query, State},
@@ -342,11 +343,27 @@ pub async fn app_handler(
     if let Err(error) = origin_policy.authorize(&headers) {
         return error.into_response();
     }
-    let session = match consume(state.installation.pool(), &query.ticket, Destination::App).await {
+    let slot = match state.ws_admission.connection(Kind::App) {
+        Ok(slot) => slot,
+        Err(busy) => return busy.into_response(),
+    };
+    let consumed = {
+        let _handshake = match state.ws_admission.handshake() {
+            Ok(permit) => permit,
+            Err(busy) => return busy.into_response(),
+        };
+        consume(state.installation.pool(), &query.ticket, Destination::App).await
+    };
+    let session = match consumed {
         Ok(session) => session,
         Err((status, message)) => return (status, message).into_response(),
     };
-    ws.on_upgrade(move |socket| crate::ws::handle_app_socket(socket, state, session))
+    ws.max_message_size(CLIENT_MESSAGE_BYTES)
+        .max_frame_size(CLIENT_MESSAGE_BYTES)
+        .on_upgrade(move |socket| async move {
+            let _slot = slot;
+            crate::ws::handle_app_socket(socket, state, session).await
+        })
         .into_response()
 }
 
@@ -360,17 +377,32 @@ pub async fn dashboard_handler(
     if let Err(error) = origin_policy.authorize(&headers) {
         return error.into_response();
     }
-    let session = match consume(
-        state.installation.pool(),
-        &query.ticket,
-        Destination::Dashboard,
-    )
-    .await
-    {
+    let slot = match state.ws_admission.connection(Kind::Dashboard) {
+        Ok(slot) => slot,
+        Err(busy) => return busy.into_response(),
+    };
+    let consumed = {
+        let _handshake = match state.ws_admission.handshake() {
+            Ok(permit) => permit,
+            Err(busy) => return busy.into_response(),
+        };
+        consume(
+            state.installation.pool(),
+            &query.ticket,
+            Destination::Dashboard,
+        )
+        .await
+    };
+    let session = match consumed {
         Ok(session) => session,
         Err((status, message)) => return (status, message).into_response(),
     };
-    ws.on_upgrade(move |socket| crate::ws::handle_dashboard_socket(socket, state, session))
+    ws.max_message_size(CLIENT_MESSAGE_BYTES)
+        .max_frame_size(CLIENT_MESSAGE_BYTES)
+        .on_upgrade(move |socket| async move {
+            let _slot = slot;
+            crate::ws::handle_dashboard_socket(socket, state, session).await
+        })
         .into_response()
 }
 
