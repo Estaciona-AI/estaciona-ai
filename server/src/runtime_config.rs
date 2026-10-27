@@ -19,6 +19,7 @@ pub(crate) struct RuntimeConfig {
     pub identity: crate::identity::IdentityConfig,
     pub ws_origins: WsOriginPolicy,
     pub lpr_mode: LprMode,
+    pub ws_limits: crate::ws_admission::WsLimits,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -118,6 +119,23 @@ fn database(
     Ok(options)
 }
 
+/// An optional count from 1 to `max`.
+fn count(
+    get: &mut impl FnMut(&str) -> Option<OsString>,
+    key: &'static str,
+    default: usize,
+    max: usize,
+) -> Result<usize, ConfigError> {
+    let Some(value) = get(key) else {
+        return Ok(default);
+    };
+    value
+        .to_str()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| (1..=max).contains(value))
+        .ok_or(ConfigError(key))
+}
+
 /// Administrative commands need only the database.
 pub(crate) fn database_from_env() -> Result<PgConnectOptions, ConfigError> {
     database(&mut |key| std::env::var_os(key))
@@ -165,6 +183,24 @@ impl RuntimeConfig {
             .transpose()?;
         let lpr_mode =
             LprMode::parse(raw_lpr.as_deref()).map_err(|_| ConfigError("LPR_ENABLED"))?;
+        let defaults = crate::ws_admission::WsLimits::default();
+        let ws_limits = crate::ws_admission::WsLimits {
+            // The pool has five connections: keep at least one for requests.
+            handshakes: count(
+                &mut value,
+                "WS_HANDSHAKE_CONCURRENCY",
+                defaults.handshakes,
+                4,
+            )?,
+            edge: count(&mut value, "WS_MAX_EDGE_CONNECTIONS", defaults.edge, 10_000)?,
+            app: count(&mut value, "WS_MAX_APP_CONNECTIONS", defaults.app, 100_000)?,
+            dashboard: count(
+                &mut value,
+                "WS_MAX_DASHBOARD_CONNECTIONS",
+                defaults.dashboard,
+                10_000,
+            )?,
+        };
         Ok(Self {
             site_data_dir,
             database,
@@ -174,6 +210,7 @@ impl RuntimeConfig {
             identity,
             ws_origins,
             lpr_mode,
+            ws_limits,
         })
     }
 }
@@ -388,6 +425,43 @@ mod tests {
             assert!(!accepts(&remote(mode), Some("private")), "{mode}");
         }
         assert!(!accepts(&remote("verify-full"), Some("public")));
+    }
+
+    #[test]
+    fn websocket_limits_default_and_accept_only_bounded_counts() {
+        let parse = |key: &'static str, value: &str| {
+            let mut data = values();
+            data.insert(key, value.into());
+            RuntimeConfig::parse(|key| data.get(key).cloned())
+        };
+        let defaults = RuntimeConfig::parse(|key| values().get(key).cloned())
+            .unwrap()
+            .ws_limits;
+        assert_eq!(defaults, crate::ws_admission::WsLimits::default());
+        assert!(
+            defaults.handshakes < 5,
+            "keep pool connections for requests"
+        );
+        assert_eq!(
+            parse("WS_MAX_EDGE_CONNECTIONS", "3")
+                .unwrap()
+                .ws_limits
+                .edge,
+            3
+        );
+        for (key, value) in [
+            ("WS_HANDSHAKE_CONCURRENCY", "0"),
+            ("WS_HANDSHAKE_CONCURRENCY", "5"),
+            ("WS_MAX_EDGE_CONNECTIONS", "-1"),
+            ("WS_MAX_APP_CONNECTIONS", "many"),
+            ("WS_MAX_DASHBOARD_CONNECTIONS", "10001"),
+        ] {
+            assert_eq!(
+                parse(key, value).err(),
+                Some(ConfigError(key)),
+                "{key}={value}"
+            );
+        }
     }
 
     #[test]

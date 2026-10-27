@@ -12,6 +12,7 @@ use uuid::Uuid;
 use crate::reservation_store::{self, FinishReason};
 use crate::state::SharedState;
 use crate::ws::messages::{EdgeToServerMsg, EdgeTransportMsg, ServerToAppMsg, ServerToEdgeMsg};
+use crate::ws_admission::{EDGE_MESSAGE_BYTES, Kind};
 
 pub async fn ws_edge_handler(
     ws: WebSocketUpgrade,
@@ -29,8 +30,26 @@ pub async fn ws_edge_handler(
         )
             .into_response();
     };
-    match crate::edge_auth::authenticate(state.installation.pool(), token).await {
-        Ok(Some(principal)) => ws.on_upgrade(|socket| handle_edge_socket(socket, state, principal)),
+    let slot = match state.ws_admission.connection(Kind::Edge) {
+        Ok(slot) => slot,
+        Err(busy) => return busy.into_response(),
+    };
+    let authenticated = {
+        let _handshake = match state.ws_admission.handshake() {
+            Ok(permit) => permit,
+            Err(busy) => return busy.into_response(),
+        };
+        crate::edge_auth::authenticate(state.installation.pool(), token).await
+    };
+    match authenticated {
+        Ok(Some(principal)) => ws
+            .max_message_size(EDGE_MESSAGE_BYTES)
+            .max_frame_size(EDGE_MESSAGE_BYTES)
+            .on_upgrade(move |socket| async move {
+                // The slot is released when the socket closes.
+                let _slot = slot;
+                handle_edge_socket(socket, state, principal).await
+            }),
         Ok(None) => (
             axum::http::StatusCode::UNAUTHORIZED,
             "Invalid gateway credential",
