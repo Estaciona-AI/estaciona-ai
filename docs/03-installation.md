@@ -31,8 +31,31 @@ integration (`.github/workflows/ci.yml`).
 | Contracts (`shared/`) | as above; `python ../scripts/check_licenses.py` | `uv run --locked pytest` |
 | Identity tools (`tools/identity/`) | — | `python3 -m unittest -v test_realm test_provision` |
 
-GPU libraries for vision are installed with `uv sync --extra cuda`. Tests never
-require real cameras, real credentials or personal data.
+GPU libraries for vision are installed with `uv sync --locked --extra cuda`.
+Tests never require real cameras, real credentials or personal data.
+
+### Installation inputs
+
+The installation package is separate from the core repository. Its layout is
+defined by [`InstallationPackage`](../server/src/installation/package.rs):
+
+```text
+deployment/
+  installation.json
+  config.json
+  spots_3d.json
+  reservation_policy.json  (optional; validated defaults apply when absent)
+```
+
+The descriptor supplies explicit organization, installation and environment
+identifiers. The maps supply parking lots, navigation paths and spots; the
+reservation policy supplies lifetimes and per-user limits. Spot names do not
+encode accessibility: map fields declare the parking lot and reserved category.
+See [descriptor](../server/src/installation/descriptor.rs),
+[maps](../server/src/site_config.rs) and
+[policy](../server/src/reservation_policy.rs). Camera polygons and detector
+profiles are configured separately in the vision runtime; sharing spot IDs is
+necessary, but does not grant access to them.
 
 ## 3.3 Bringing up an installation
 
@@ -48,7 +71,7 @@ referenced file.
    placed in shared environment files, command-line arguments or Git.
 3. **Installation package.** Provide `SITE_DATA_DIR` with the installation
    descriptor, site maps and optional reservation policy, and validate it
-   offline with `--installation-validate --manifest PATH`.
+   offline with the server's `--installation-validate --manifest PATH` command.
 4. **Database.** Initialize a new database with `--installation-init` (or adopt
    an existing one with `--installation-adopt --confirm-database`), apply the
    release's migrations with `--migrate` using the owner role, then run
@@ -67,7 +90,56 @@ referenced file.
    input configuration with `python src/runtime.py CONFIG --validate`, then run
    it.
 9. **Forecast worker.** Create its read-only role with
-   `infra/forecast-reader.sql` and run `python -m ml.worker` in `gateway/`.
+   `infra/forecast-reader.sql` and run `uv run --locked python -m ml.worker`
+   in `gateway/`.
+
+### Administrative commands and first start
+
+Run the Compose commands below from the repository root; administrative
+commands use the server executable inside the container. Uppercase arguments
+are placeholders, not values supplied by this repository. Complete the Compose
+settings and private files described in its header before invoking Compose;
+its configuration is validated even for a one-off command.
+
+```sh
+docker compose -f infra/docker-compose.yml build server
+docker compose -f infra/docker-compose.yml up -d db
+docker compose -f infra/docker-compose.yml run --rm migrate \
+  ./server --installation-init --manifest /deployment/installation.json
+```
+
+For an existing installation, use `./server --migrate` through the `migrate`
+service instead. Adoption is a separate explicit administrative operation; it
+requires the connected database's name and is not a substitute for routine
+upgrades. Do not reinitialize or remove a database volume to upgrade it.
+Apply the runtime and forecast role scripts using an owner connection after
+migrations, as instructed in the scripts. Database initialization hooks run
+only on a new volume; existing installations follow the upgrade notes.
+
+The same administrative executable supports:
+
+```text
+./server --installation-validate --manifest MANIFEST
+./server --installation-check --manifest MANIFEST
+./server --edge-create EDGE_NAME --secret-file NEW_SECRET_FILE
+./server --edge-policy EDGE_UUID POLICY_FILE
+```
+
+Validation reads local package files only; the other commands need the
+appropriate database connection. Edge creation writes a new private credential
+file. Provision grants before starting producers; a shared spot identifier is
+not an authorization policy. Command syntax is defined in
+[`installation/cli.rs`](../server/src/installation/cli.rs) and
+[`edge_cli.rs`](../server/src/edge_cli.rs).
+
+After database binding, migrations, grants and identity configuration are
+complete, start `server` and the proxy with Compose. Start the gateway and
+vision on the same edge host; the forecast worker may run separately with its
+own read-only database connection and edge credential. In `vision/`, use
+`uv run --locked python src/runtime.py CONFIG --validate`, then
+`uv run --locked python src/runtime.py CONFIG`; append `--inspect` only when
+local visual inspection is needed. Use no real credentials in examples or
+recorded demonstrations.
 
 When upgrading, roll out in the order server, gateway, vision, and follow the
 release's upgrade notes; several migrations deliberately refuse automatic
@@ -77,9 +149,14 @@ downgrade.
 
 - `/health` answers while the process runs; `/ready` answers 200 only when the
   database is reachable and bound to this installation.
-- `python src/runtime.py CONFIG --validate` checks vision configuration without
-  loading models.
+- `uv run --locked python src/runtime.py CONFIG --validate` checks vision
+  configuration without loading models.
 - The optional local inspector (`--inspect`, bound to `127.0.0.1`) shows frames,
   detections and spot polygons for calibration.
 - The RTSP laboratory in `tools/rtsp-lab/` reproduces multi-input scenarios with
   synthetic streams for capacity checks before field deployment.
+
+Package validation and `/ready` establish configuration and database
+prerequisites. They do not establish camera quality, end-to-end delivery,
+forecast skill or a production acceptance result. Record those checks under
+[Methodology](05-methodology.md) and [Goals](08-goals-and-roadmap.md).

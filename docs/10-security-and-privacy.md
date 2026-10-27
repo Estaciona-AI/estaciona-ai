@@ -29,7 +29,7 @@ as described in [`SECURITY.md`](../SECURITY.md).
 | Vision → gateway | Loopback-only listener; a local key distinct from the cloud credential, compared in constant time |
 | Server → database | Runtime role without schema privileges; migrations applied separately by an owner role; refusal to start with an over-privileged role in production; TLS with certificate and host-name verification for remote databases unless a private container network is declared |
 | Secrets | Read from private files owned by the service user, with minimum lengths enforced at start-up |
-| Containers | Non-root user, read-only file system, all capabilities dropped, base images pinned by digest |
+| Server container | Non-root user, read-only file system, all capabilities dropped, base images pinned by digest |
 | Supply chain | Committed lockfiles used with `--locked`; actions pinned by digest; scheduled RustSec and Python advisory audits; license checks; dependency policy in `server/deny.toml` |
 
 ## 10.3 Personal data
@@ -37,7 +37,7 @@ as described in [`SECURITY.md`](../SECURITY.md).
 | Category | Where it lives | Protection |
 |---|---|---|
 | Credentials, e-mail address | Identity provider only | Provider-managed password hashing; multi-factor sign-in for administrators |
-| Account reference and generated username | Installation database | No direct identifier of the person |
+| Account reference and generated username | Installation database | Pseudonymous references; still treated as personal data when linkable to a person |
 | Display name and eligibility declarations | Installation database | AES-256-GCM [12] per field, bound to installation, column and row; keys outside the database |
 | Reservations and parking history | Installation database | Access limited to the person and administrators; history deleted after 180 days |
 | Vehicle plates | Not collected | The license plate module is disabled and refused in production |

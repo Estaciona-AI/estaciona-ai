@@ -7,7 +7,7 @@
 | RQ-1 | Can one GPU host process 20 inputs of 20 spots each at no less than 2.5 frames per second per input? | Open. Ten inputs reached a minimum of 2.48 FPS per input on a desktop proxy GPU; the 20-input test on the target datacenter GPU is pending. | Measurement, `CHANGELOG.md` `v0.9.0` *Performance* (#152, #153, #155, #156) |
 | RQ-2 | Does detector-derived spot occupancy agree with a reference? | Partially answered. On the laboratory corpus, detections agreed with a larger reference detector in 924 of 924 comparisons; the reference is provisional and not ground truth. | Measurement, `CHANGELOG.md` `v0.9.0` *Known limitations* |
 | RQ-3 | Can 24-hour occupancy be forecast better than naive baselines when little real history exists? | Open. The method and its acceptance gate are implemented and checked offline on simulated campuses; no real-site result exists yet. | Code and test, `gateway/ml/` |
-| RQ-4 | Can site-to-backend delivery remain lossless and timely over an intermittent link? | Answered for transport in staging: confirmation throughput rose from 6.1 to 15.7 events/s and p95 latency fell from 91.9 s to 0.68 s with 400 synthetic spot IDs and 20 cameras. Field behaviour is unmeasured. | Measurement, #154 |
+| RQ-4 | Can persisted site observations be replayed idempotently and confirmed promptly after a link interruption? | Partially answered for transport in staging: confirmation throughput rose from 6.1 to 15.7 events/s and p95 latency fell from 91.9 s to 0.68 s with 400 synthetic spot IDs and 20 cameras. This does not establish field behaviour or unlimited outage tolerance. | Measurement, #154 |
 
 ## 4.2 Design decisions
 
@@ -51,11 +51,13 @@ exposes interpretable, calibratable parameters per detector profile.
 changes, together with `torch` in the forecast); naive seasonal baselines only.
 *Decision.* LightGBM [2] on calendar and lag features, trained on simulated
 campuses around the site profile pooled with real history (real hours weighted
-more), and served only when a rolling backtest shows it beats the naive
-baselines (§[Methodology](05-methodology.md#3-forecast-evaluation)).
-*Rationale.* Few real hours exist at a new site; the simulated prior gives a
-usable starting point, and the gate prevents serving a model worse than a
-trivial forecast.
+more). An evaluated rolling backtest selects the lowest-error method among the
+model and naive baselines; the manifest records when evaluation is unavailable
+([Methodology](05-methodology.md#3-forecast-evaluation)).
+*Rationale.* A simulated prior supplies training examples before substantial
+real history accrues. Serving still requires recent observed history. Neither
+the prior nor historical selection proves forecast skill at a new site; that
+requires prospective evaluation (G-05).
 
 ### D-05 Delivery semantics: durable outboxes and idempotent application
 
