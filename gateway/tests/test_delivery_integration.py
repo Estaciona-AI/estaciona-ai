@@ -622,3 +622,47 @@ def test_freshness_survives_restart_and_rejects_future_poisoning(server):
     newer["payload"]["status"] = "free"
     assert asyncio.run(deliver(newer))["outcome"] == "applied"
     assert server.query("SELECT status FROM spots WHERE id='R02-A'") == [("free",)]
+
+
+def test_a_replay_after_retention_is_answered_as_a_duplicate(server, tmp_path, capsys):
+    """Deleting a confirmed event is safe: the server keeps the receipt."""
+    outbox, metrics = str(tmp_path / "outbox.db"), str(tmp_path / "metrics.db")
+    gateway.init_db(outbox)
+    gateway.init_metrics_db(metrics)
+    payload = json.dumps(message("unused")["payload"])
+    event_id = gateway.save_event(outbox, payload)
+
+    async def deliver():
+        task = asyncio.create_task(
+            gateway.sync_loop(outbox, metrics, server.url, KEY, asyncio.Event())
+        )
+        try:
+            await until(lambda: not gateway.pending_deliveries(outbox))
+        finally:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
+    asyncio.run(deliver())
+    assert (
+        f"event_id={event_id} outcome=applied duplicate=False"
+        in capsys.readouterr().out
+    )
+    with sqlite3.connect(outbox) as conn:
+        conn.execute("UPDATE fallback_events SET created_at = '2000-01-01 00:00:00'")
+    assert gateway.purge_synced_events(outbox, datetime.timedelta(days=1)) == 1
+
+    # The producer never saw its local ACK and replays the same event.
+    with sqlite3.connect(outbox) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM fallback_events").fetchone() == (0,)
+        conn.execute(
+            "INSERT INTO fallback_events (message_text, event_uuid) VALUES (?, ?)",
+            (payload, event_id),
+        )
+    asyncio.run(deliver())
+    assert (
+        f"event_id={event_id} outcome=applied duplicate=True" in capsys.readouterr().out
+    )
+    assert server.query(
+        "SELECT COUNT(*) FROM edge_event_receipts WHERE event_id=%s", (event_id,)
+    ) == [(1,)]
