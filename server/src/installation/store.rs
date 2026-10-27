@@ -11,6 +11,9 @@ use uuid::Uuid;
 use super::{Environment, InstallationIdentity};
 
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
+/// Applying every migration takes longer as they accumulate; each statement
+/// is still bounded by the lock and statement timeouts set in `migrate`.
+pub(crate) const MIGRATION_TIMEOUT: Duration = Duration::from_secs(300);
 // Identifiers are audited constants, never derived from an input descriptor.
 const BUSINESS_TABLES: &[&str] = &[
     "auth_sessions",
@@ -357,16 +360,20 @@ pub(crate) async fn require_migrated(pool: &PgPool) -> Result<(), StoreError> {
 
 /// A cancelled migrator must not return a session advisory lock to the pool.
 pub(crate) async fn migrate(pool: &PgPool) -> Result<(), StoreError> {
-    let mut connection = pool.acquire().await?;
-    connection.close_on_drop();
-    sqlx::query("SET lock_timeout='2s'")
-        .execute(&mut *connection)
-        .await?;
-    sqlx::query("SET statement_timeout='5s'")
-        .execute(&mut *connection)
-        .await?;
-    sqlx::migrate!()
-        .run(&mut *connection)
-        .await
-        .map_err(|_| StoreError::Migration)
+    timeout(MIGRATION_TIMEOUT, async {
+        let mut connection = pool.acquire().await?;
+        connection.close_on_drop();
+        sqlx::query("SET lock_timeout='2s'")
+            .execute(&mut *connection)
+            .await?;
+        sqlx::query("SET statement_timeout='5s'")
+            .execute(&mut *connection)
+            .await?;
+        sqlx::migrate!()
+            .run(&mut *connection)
+            .await
+            .map_err(|_| StoreError::Migration)
+    })
+    .await
+    .map_err(|_| StoreError::Timeout)?
 }

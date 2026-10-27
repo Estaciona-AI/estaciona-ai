@@ -25,13 +25,10 @@ pub async fn prepare(
 
 /// `--migrate`, run with the schema owner role before starting a new release.
 pub async fn migrate(pool: &PgPool, identity: &InstallationIdentity) -> Result<(), StoreError> {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        require_match(pool, identity).await?;
-        store::migrate(pool).await?;
-        require_match(pool, identity).await
-    })
-    .await
-    .map_err(|_| StoreError::Timeout)?
+    // Checks and migration are each bounded on their own (see store::migrate).
+    require_match(pool, identity).await?;
+    store::migrate(pool).await?;
+    require_match(pool, identity).await
 }
 
 async fn require_match(pool: &PgPool, identity: &InstallationIdentity) -> Result<(), StoreError> {
