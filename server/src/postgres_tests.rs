@@ -334,8 +334,13 @@ async fn legacy_plate_receipts_are_redacted_and_other_events_kept(pool: PgPool) 
     );
 }
 
+/// estaciona_app is one role for the whole PostgreSQL cluster: tests that set
+/// its password and connect as it run one at a time.
+static RUNTIME_ROLE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[sqlx::test(migrations = "./migrations")]
 async fn runtime_role_changes_rows_but_not_the_schema_or_migration_history(pool: PgPool) {
+    let _role = RUNTIME_ROLE.lock().await;
     crate::installation::test_support::provision(&pool).await;
     sqlx::raw_sql(include_str!("../../infra/app-role.sql"))
         .execute(&pool)
@@ -405,6 +410,7 @@ async fn runtime_role_changes_rows_but_not_the_schema_or_migration_history(pool:
 
 #[sqlx::test(migrations = "./migrations")]
 async fn production_starts_only_with_the_restricted_runtime_role(pool: PgPool) {
+    let _role = RUNTIME_ROLE.lock().await;
     use crate::installation::{
         startup,
         store::{self, BindMode, StoreError},
