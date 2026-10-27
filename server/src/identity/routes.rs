@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use tower_http::limit::RequestBodyLimitLayer;
 use uuid::Uuid;
 
-use super::{LogoutTarget, SignedIn};
+use super::SignedIn;
 use crate::{personal_data::Field, security, state::SharedState};
 
 /// Binds a sign-in to the browser that started it (no login CSRF).
@@ -211,6 +211,10 @@ async fn finish(
     };
     let token = match sign_in_account(&state, &signed_in, role).await {
         Ok(token) => token,
+        Err(error @ AccountError::LoggedOut) => {
+            tracing::warn!(%error, "Sign-in refused");
+            return failed(StatusCode::UNAUTHORIZED);
+        }
         Err(error) => {
             tracing::error!(%error, "Account sign-in could not be stored");
             return failed(StatusCode::SERVICE_UNAVAILABLE);
@@ -226,6 +230,8 @@ async fn finish(
 enum AccountError {
     Database(sqlx::Error),
     Encryption(crate::personal_data::CipherError),
+    /// The provider ended this session or account after issuing the token.
+    LoggedOut,
 }
 
 impl std::fmt::Display for AccountError {
@@ -233,6 +239,7 @@ impl std::fmt::Display for AccountError {
         match self {
             Self::Database(error) => write!(f, "account storage: {error}"),
             Self::Encryption(error) => write!(f, "account encryption: {error}"),
+            Self::LoggedOut => f.write_str("provider logout after the ID token was issued"),
         }
     }
 }
@@ -255,6 +262,28 @@ async fn sign_in_account(
             .begin()
             .await
             .map_err(AccountError::Database)?;
+        let mut keys = vec![("sub", signed_in.subject.as_str())];
+        keys.extend(
+            signed_in
+                .provider_session
+                .as_deref()
+                .map(|sid| ("sid", sid)),
+        );
+        crate::sessions::lock_logout_keys(&mut tx, &signed_in.issuer, &keys)
+            .await
+            .map_err(AccountError::Database)?;
+        if crate::sessions::logged_out_since(
+            &mut tx,
+            &signed_in.issuer,
+            signed_in.provider_session.as_deref(),
+            &signed_in.subject,
+            signed_in.issued_at,
+        )
+        .await
+        .map_err(AccountError::Database)?
+        {
+            return Err(AccountError::LoggedOut);
+        }
         let existing: Option<Uuid> = sqlx::query_scalar(
             "SELECT id FROM users WHERE oidc_issuer = $1 AND oidc_subject = $2 FOR UPDATE",
         )
@@ -336,8 +365,8 @@ async fn backchannel_logout(
     State(state): State<SharedState>,
     Form(form): Form<BackchannelLogout>,
 ) -> Response {
-    let target = match state.identity.verify_logout(&form.logout_token).await {
-        Ok(target) => target,
+    let logout = match state.identity.verify_logout(&form.logout_token).await {
+        Ok(logout) => logout,
         Err(error @ super::IdentityError::Discovery) => {
             tracing::warn!(%error, "Back-channel logout cannot be verified yet");
             return StatusCode::SERVICE_UNAVAILABLE.into_response();
@@ -354,14 +383,7 @@ async fn backchannel_logout(
         }
     };
     let issuer = state.identity.config().issuer.as_str().to_owned();
-    let revoked = match &target {
-        LogoutTarget::ProviderSession(sid) => {
-            crate::sessions::revoke_provider_session(state.installation.pool(), sid).await
-        }
-        LogoutTarget::Subject(subject) => {
-            crate::sessions::revoke_account(state.installation.pool(), &issuer, subject).await
-        }
-    };
+    let revoked = crate::sessions::apply_logout(state.installation.pool(), &issuer, &logout).await;
     let mut response = match revoked {
         Ok(count) => {
             tracing::info!(sessions = count, "Back-channel logout applied");

@@ -10,6 +10,7 @@ mod tests;
 
 pub use routes::routes;
 
+use chrono::{DateTime, Utc};
 use std::{fmt, sync::Mutex, time::Duration};
 
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, jwk::JwkSet};
@@ -193,6 +194,8 @@ pub struct SignedIn {
     pub display_name: Option<String>,
     pub roles: Vec<String>,
     pub provider_session: Option<String>,
+    /// When the provider issued the ID token, on the provider's clock.
+    pub issued_at: DateTime<Utc>,
 }
 
 /// Sessions a validated back-channel logout token ends.
@@ -202,9 +205,18 @@ pub enum LogoutTarget {
     Subject(String),
 }
 
+/// A validated back-channel logout: what it ends, and since when, on the same
+/// provider clock that stamps ID tokens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Logout {
+    pub target: LogoutTarget,
+    pub issued_at: DateTime<Utc>,
+}
+
 #[derive(Deserialize)]
 struct LogoutClaims {
     jti: String,
+    iat: i64,
     #[serde(default)]
     sub: Option<String>,
     #[serde(default)]
@@ -435,11 +447,12 @@ impl IdentityProvider {
             display_name,
             roles: claims.additional_claims().estaciona_roles.clone(),
             provider_session: claims.additional_claims().sid.clone(),
+            issued_at: claims.issue_time(),
         })
     }
 
     /// Validates an OIDC Back-Channel Logout 1.0 token.
-    pub async fn verify_logout(&self, token: &str) -> Result<LogoutTarget, IdentityError> {
+    pub async fn verify_logout(&self, token: &str) -> Result<Logout, IdentityError> {
         self.ready().await?;
         match self.decode_logout(token).await {
             Err(_) if self.refresh().await => self.decode_logout(token).await,
@@ -447,7 +460,7 @@ impl IdentityProvider {
         }
     }
 
-    async fn decode_logout(&self, token: &str) -> Result<LogoutTarget, IdentityError> {
+    async fn decode_logout(&self, token: &str) -> Result<Logout, IdentityError> {
         let header = jsonwebtoken::decode_header(token).map_err(|_| IdentityError::InvalidToken)?;
         if header.alg != Algorithm::EdDSA {
             return Err(IdentityError::InvalidToken);
@@ -476,11 +489,14 @@ impl IdentityProvider {
         {
             return Err(IdentityError::InvalidToken);
         }
-        match (claims.sid, claims.sub) {
-            (Some(sid), _) if !sid.is_empty() => Ok(LogoutTarget::ProviderSession(sid)),
-            (_, Some(sub)) if !sub.is_empty() => Ok(LogoutTarget::Subject(sub)),
-            _ => Err(IdentityError::InvalidToken),
-        }
+        let issued_at =
+            DateTime::from_timestamp(claims.iat, 0).ok_or(IdentityError::InvalidToken)?;
+        let target = match (claims.sid, claims.sub) {
+            (Some(sid), _) if !sid.is_empty() => LogoutTarget::ProviderSession(sid),
+            (_, Some(sub)) if !sub.is_empty() => LogoutTarget::Subject(sub),
+            _ => return Err(IdentityError::InvalidToken),
+        };
+        Ok(Logout { target, issued_at })
     }
 
     /// Re-reads metadata and keys, at most once per interval. Returns whether

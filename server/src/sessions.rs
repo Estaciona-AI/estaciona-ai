@@ -127,31 +127,100 @@ async fn finish_revocation(
     Ok(sessions.len() as u64)
 }
 
-pub(crate) async fn revoke_provider_session(pool: &PgPool, sid: &str) -> Result<u64, sqlx::Error> {
-    let mut tx = revocation(pool).await?;
-    let sessions = sqlx::query_scalar(
-        "UPDATE auth_sessions SET revoked_at=NOW() WHERE revoked_at IS NULL AND idp_session_id=$1 RETURNING id",
-    )
-    .bind(sid)
-    .fetch_all(&mut *tx)
-    .await?;
-    finish_revocation(tx, sessions).await
+/// Marks outlive any session or ID token issued before the logout.
+const LOGOUT_MARK_LIFETIME: &str = "9 hours";
+
+/// A collision between two keys only serializes unrelated logins.
+fn logout_key(issuer: &str, kind: &str, value: &str) -> String {
+    format!("oidc-logout {} {issuer} {kind} {value}", issuer.len())
 }
 
-pub(crate) async fn revoke_account(
-    pool: &PgPool,
+/// Back-channel logout and sign-in for the same provider session or account
+/// run one at a time: whichever commits second sees the other.
+pub(crate) async fn lock_logout_keys(
+    tx: &mut Transaction<'_, Postgres>,
     issuer: &str,
+    keys: &[(&str, &str)],
+) -> Result<(), sqlx::Error> {
+    let mut keys: Vec<String> = keys
+        .iter()
+        .map(|(kind, value)| logout_key(issuer, kind, value))
+        .collect();
+    // One order everywhere, so two transactions never wait on each other.
+    keys.sort();
+    for key in keys {
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(key)
+            .execute(&mut **tx)
+            .await?;
+    }
+    Ok(())
+}
+
+/// Whether the provider ended this session or account at or after `issued_at`;
+/// the caller holds the logout keys.
+pub(crate) async fn logged_out_since(
+    tx: &mut Transaction<'_, Postgres>,
+    issuer: &str,
+    provider_session: Option<&str>,
     subject: &str,
-) -> Result<u64, sqlx::Error> {
-    let mut tx = revocation(pool).await?;
-    let sessions = sqlx::query_scalar(
-        "UPDATE auth_sessions SET revoked_at=NOW() WHERE revoked_at IS NULL AND user_id IN \
-         (SELECT id FROM users WHERE oidc_issuer=$1 AND oidc_subject=$2) RETURNING id",
+    issued_at: DateTime<Utc>,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM oidc_logout_marks WHERE issuer=$1 AND logged_out_at>=$4 \
+         AND ((kind='sid' AND value=$2) OR (kind='sub' AND value=$3)))",
     )
     .bind(issuer)
+    .bind(provider_session)
     .bind(subject)
-    .fetch_all(&mut *tx)
+    .bind(issued_at)
+    .fetch_one(&mut **tx)
+    .await
+}
+
+/// Ends the sessions a back-channel logout names and records it, so a sign-in
+/// still completing with an older ID token cannot start a new one.
+pub(crate) async fn apply_logout(
+    pool: &PgPool,
+    issuer: &str,
+    logout: &crate::identity::Logout,
+) -> Result<u64, sqlx::Error> {
+    use crate::identity::LogoutTarget;
+    let (kind, value) = match &logout.target {
+        LogoutTarget::ProviderSession(sid) => ("sid", sid.as_str()),
+        LogoutTarget::Subject(subject) => ("sub", subject.as_str()),
+    };
+    let mut tx = revocation(pool).await?;
+    lock_logout_keys(&mut tx, issuer, &[(kind, value)]).await?;
+    sqlx::query(
+        "INSERT INTO oidc_logout_marks (issuer,kind,value,logged_out_at,expires_at) \
+         VALUES ($1,$2,$3,$4,$4+$5::interval) ON CONFLICT (issuer,kind,value) DO UPDATE \
+         SET logged_out_at=GREATEST(oidc_logout_marks.logged_out_at,EXCLUDED.logged_out_at), \
+         expires_at=GREATEST(oidc_logout_marks.expires_at,EXCLUDED.expires_at)",
+    )
+    .bind(issuer)
+    .bind(kind)
+    .bind(value)
+    .bind(logout.issued_at)
+    .bind(LOGOUT_MARK_LIFETIME)
+    .execute(&mut *tx)
     .await?;
+    let sessions = match &logout.target {
+        LogoutTarget::ProviderSession(sid) => sqlx::query_scalar(
+            "UPDATE auth_sessions SET revoked_at=NOW() WHERE revoked_at IS NULL AND idp_session_id=$1 RETURNING id",
+        )
+        .bind(sid)
+        .fetch_all(&mut *tx)
+        .await?,
+        LogoutTarget::Subject(subject) => sqlx::query_scalar(
+            "UPDATE auth_sessions SET revoked_at=NOW() WHERE revoked_at IS NULL AND user_id IN \
+             (SELECT id FROM users WHERE oidc_issuer=$1 AND oidc_subject=$2) RETURNING id",
+        )
+        .bind(issuer)
+        .bind(subject)
+        .fetch_all(&mut *tx)
+        .await?,
+    };
     finish_revocation(tx, sessions).await
 }
 
@@ -229,6 +298,8 @@ pub(crate) async fn cleanup_expired(pool: &PgPool) -> Result<u64, sqlx::Error> {
         .execute(&mut *tx)
         .await?;
     let mut count = sqlx::query("DELETE FROM auth_sessions WHERE id IN (SELECT id FROM auth_sessions WHERE expires_at<=NOW() ORDER BY expires_at LIMIT 1000 FOR UPDATE SKIP LOCKED)")
+        .execute(&mut *tx).await?.rows_affected();
+    count += sqlx::query("DELETE FROM oidc_logout_marks WHERE (issuer,kind,value) IN (SELECT issuer,kind,value FROM oidc_logout_marks WHERE expires_at<=NOW() ORDER BY expires_at LIMIT 1000 FOR UPDATE SKIP LOCKED)")
         .execute(&mut *tx).await?.rows_affected();
     // Abandoned sign-ins: the browser never came back from the provider.
     count += sqlx::query("DELETE FROM oidc_login_attempts WHERE state_digest IN (SELECT state_digest FROM oidc_login_attempts WHERE expires_at<=NOW() ORDER BY expires_at LIMIT 1000 FOR UPDATE SKIP LOCKED)")
