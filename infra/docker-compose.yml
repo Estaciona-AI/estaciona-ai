@@ -9,8 +9,14 @@
 #   plate_pepper            at least 32 random bytes
 #   personal_data_keys      see .env.example; back it up apart from the database
 #   oidc_client_secret      written by tools/identity/provision.py --secret-out
-# The server image runs as UID 10001 and refuses secret files others can read:
+# The server image runs as UID 10001 and refuses secret files others can read
+# or another user owns:
 #   chown 10001 "$SECRETS_DIR"/* && chmod 600 "$SECRETS_DIR"/*
+# One stack per installation. Defaults keep the original names; a second
+# installation on the same host sets its own compose project and
+# ESTACIONA_INSTANCE (containers and database volume), and its own
+# DB_HOST_PORT, SERVER_HOST_PORT, HTTP_PORT and HTTPS_PORT, e.g.
+#   docker compose -p gavea --env-file ../gavea.env up -d
 x-server: &server
   build:
     context: ..
@@ -26,12 +32,12 @@ x-server: &server
 services:
   db:
     image: postgres:15-alpine@sha256:a8e042598834300dfaa17a54f695b87b7f25d3490433bbbe2ef3bffbb9747f24
-    container_name: estaciona_db
+    container_name: ${ESTACIONA_INSTANCE:-estaciona}_db
     restart: always
     env_file:
       - ./env/postgres.env
     ports:
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:${DB_HOST_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     networks:
@@ -45,7 +51,7 @@ services:
   # Applies the migrations of this release with the owner role, then exits.
   migrate:
     <<: *server
-    container_name: estaciona_migrate
+    container_name: ${ESTACIONA_INSTANCE:-estaciona}_migrate
     command: ["./server", "--migrate"]
     restart: "no"
     environment:
@@ -66,10 +72,10 @@ services:
 
   server:
     <<: *server
-    container_name: estaciona_server
+    container_name: ${ESTACIONA_INSTANCE:-estaciona}_server
     restart: always
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:${SERVER_HOST_PORT:-8000}:8000"
     env_file:
       - ./env/server.env
     environment:
@@ -102,11 +108,11 @@ services:
     image: caddy:2-alpine@sha256:eb4d35b7452d1ab6171fbdbe8d9275b2301dad6dad92115d91e19fb9b24d510f
     environment:
       API_DOMAIN: ${API_DOMAIN:?Set API_DOMAIN to the public API hostname}
-    container_name: estaciona_caddy
+    container_name: ${ESTACIONA_INSTANCE:-estaciona}_caddy
     restart: always
     ports:
-      - "80:80"
-      - "443:443"
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile
       - caddy_data:/data
@@ -132,7 +138,7 @@ secrets:
 
 volumes:
   postgres_data:
-    name: estaciona_postgres_data
+    name: ${ESTACIONA_INSTANCE:-estaciona}_postgres_data
   caddy_data:
   caddy_config:
 
