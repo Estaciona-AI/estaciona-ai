@@ -107,6 +107,11 @@ pub fn rest_schemas() -> BTreeMap<&'static str, Value> {
     BTreeMap::from([
         rest!("user-response", crate::users::UserResponse, Serialize),
         rest!(
+            "personal-data-export",
+            crate::users::PersonalDataExport,
+            Serialize
+        ),
+        rest!(
             "update-eligibility",
             crate::users::UpdateEligibility,
             Deserialize

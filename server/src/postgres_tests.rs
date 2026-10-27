@@ -386,6 +386,7 @@ async fn runtime_role_changes_rows_but_not_the_schema_or_migration_history(pool:
         "INSERT INTO site_map_revisions (fingerprint, manifest) VALUES (repeat('a', 64), '{}')",
         "DELETE FROM spots WHERE id = 'runtime-role'",
         "SELECT environment FROM installation_binding",
+        "INSERT INTO admin_audit_log (actor_user_id, action) VALUES (gen_random_uuid(), 'runtime_check')",
     ] {
         sqlx::raw_sql(statement).execute(&app).await.unwrap();
     }
@@ -399,6 +400,10 @@ async fn runtime_role_changes_rows_but_not_the_schema_or_migration_history(pool:
         "UPDATE _sqlx_migrations SET success = false",
         "UPDATE installation_binding SET environment = 'production'",
         "DELETE FROM installation_binding",
+        // The administrative trail is append-only for the service.
+        "UPDATE admin_audit_log SET action = 'rewritten'",
+        "DELETE FROM admin_audit_log",
+        "TRUNCATE admin_audit_log",
     ] {
         assert!(
             sqlx::raw_sql(statement).execute(&app).await.is_err(),

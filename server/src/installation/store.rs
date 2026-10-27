@@ -16,6 +16,7 @@ const OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const MIGRATION_TIMEOUT: Duration = Duration::from_secs(300);
 // Identifiers are audited constants, never derived from an input descriptor.
 const BUSINESS_TABLES: &[&str] = &[
+    "admin_audit_log",
     "auth_sessions",
     "edge_camera_grants",
     "edge_camera_spots",

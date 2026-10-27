@@ -47,6 +47,8 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO estaciona_app;
 -- Migration history and the installation binding change only through the owner.
 REVOKE INSERT, UPDATE, DELETE ON public._sqlx_migrations FROM estaciona_app;
 REVOKE INSERT, UPDATE, DELETE ON public.installation_binding FROM estaciona_app;
+-- The administrative trail is append-only for the service.
+REVOKE UPDATE, DELETE, TRUNCATE ON public.admin_audit_log FROM estaciona_app;
 
 -- Tables that later migrations create as this owner get the same row access.
 ALTER DEFAULT PRIVILEGES IN SCHEMA public

@@ -59,6 +59,10 @@
         "id": "urn:estaciona-ai:rest:logout-response:v1",
         "path": "v1/rest-logout-response.schema.json"
       },
+      "personal-data-export": {
+        "id": "urn:estaciona-ai:rest:personal-data-export:v1",
+        "path": "v1/rest-personal-data-export.schema.json"
+      },
       "reservation-response": {
         "id": "urn:estaciona-ai:rest:reservation-response:v1",
         "path": "v1/rest-reservation-response.schema.json"
