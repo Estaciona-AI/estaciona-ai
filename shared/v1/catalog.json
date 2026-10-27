@@ -61,6 +61,43 @@
     },
     {
       "authentication": "human_session",
+      "authorization": "authenticated_user",
+      "availability": "always",
+      "error_schema": "v1/rest-api-error.schema.json",
+      "id": "export_personal_data",
+      "legacy_path": "/me/export",
+      "method": "GET",
+      "path": "/api/v1/me/export",
+      "request_encoding": "none",
+      "request_schema": null,
+      "responses": {
+        "200": {
+          "encoding": "json",
+          "schema": "v1/rest-personal-data-export.schema.json"
+        }
+      }
+    },
+    {
+      "authentication": "human_session",
+      "authorization": "authenticated_user",
+      "availability": "always",
+      "effect": "release_reservations_and_delete_local_account",
+      "error_schema": "v1/rest-api-error.schema.json",
+      "id": "delete_account",
+      "legacy_path": "/me",
+      "method": "DELETE",
+      "path": "/api/v1/me",
+      "request_encoding": "none",
+      "request_schema": null,
+      "responses": {
+        "204": {
+          "encoding": "empty",
+          "schema": null
+        }
+      }
+    },
+    {
+      "authentication": "human_session",
       "authorization": "self_or_admin",
       "availability": "always",
       "error_schema": "v1/rest-api-error.schema.json",
@@ -386,6 +423,28 @@
       "request_schema": null,
       "responses": {
         "200": {
+          "encoding": "text",
+          "schema": null
+        }
+      }
+    },
+    {
+      "authentication": "public",
+      "authorization": "public",
+      "availability": "always",
+      "error_schema": null,
+      "id": "readiness",
+      "legacy_path": null,
+      "method": "GET",
+      "path": "/ready",
+      "request_encoding": "none",
+      "request_schema": null,
+      "responses": {
+        "200": {
+          "encoding": "text",
+          "schema": null
+        },
+        "503": {
           "encoding": "text",
           "schema": null
         }
