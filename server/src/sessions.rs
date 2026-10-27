@@ -332,6 +332,7 @@ mod tests {
                 directory: std::env::temp_dir(),
                 spots: vec![],
                 parkings: vec![ParkingLotConfig {
+                    name: "Test lot".into(),
                     path: vec![PathNode { x: 0.0, z: 0.0 }, PathNode { x: 1.0, z: 0.0 }],
                 }],
             }),
