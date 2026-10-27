@@ -124,6 +124,7 @@ def test_listener_accepts_only_the_local_key_and_the_cloud_gets_the_cloud_key(
         with (
             patch("websockets.serve") as serve,
             patch("gateway.sync_loop", new_callable=AsyncMock) as sync_loop,
+            patch("gateway.retention_loop", new_callable=AsyncMock) as retention,
         ):
             serve.return_value.__aenter__ = AsyncMock()
             serve.return_value.__aexit__ = AsyncMock(return_value=False)
@@ -137,8 +138,11 @@ def test_listener_accepts_only_the_local_key_and_the_cloud_gets_the_cloud_key(
                 await task
         listener, host, port = serve.call_args.args
         assert (host, port) == ("127.0.0.1", 8001)
-        assert sync_loop.call_args.args[3] == CLOUD
-        assert sync_loop.call_args.kwargs["max_in_flight"] == 3
+        db, metrics, cloud_url, cloud_key, sync_event = sync_loop.call_args.args
+        assert (db, metrics) == ("local_fallback.db", "metrics.db")
+        assert (cloud_url, cloud_key) == ("wss://api.estaciona.tech/ws/edge", CLOUD)
+        assert sync_loop.call_args.kwargs == {"max_in_flight": 3}
+        retention.assert_called_once_with(db, metrics, gateway.Retention())
 
         # The cloud credential is refused by the local listener.
         socket = AsyncMock()
@@ -148,9 +152,24 @@ def test_listener_accepts_only_the_local_key_and_the_cloud_gets_the_cloud_key(
 
         socket = AsyncMock()
         socket.request.headers = {"Authorization": f"Bearer {LOCAL}"}
-        socket.recv.side_effect = ConnectionError("producer left")
+        socket.recv.side_effect = [
+            '{"type": "SPOT_UPDATE", "spot_id": "A-01", "status": "free"}',
+            ConnectionError("producer left"),
+        ]
         await listener(socket)
         socket.close.assert_not_awaited()
+        # The listener stores where the sync loop reads and wakes that loop.
+        assert len(gateway.pending_deliveries(db)) == 1
+        assert sync_event.is_set()
+
+        # It also enforces the storage budget.
+        socket.recv.side_effect = [
+            '{"type": "SPOT_UPDATE", "spot_id": "A-02", "status": "free"}'
+        ]
+        with patch("gateway.has_room", return_value=False) as has_room:
+            await listener(socket)
+        has_room.assert_called_once_with(db, metrics, gateway.Retention())
+        socket.close.assert_awaited_once_with(1013, "Gateway storage full")
 
     asyncio.run(run())
 
