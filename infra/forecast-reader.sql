@@ -18,4 +18,5 @@ ALTER ROLE estaciona_forecast_reader SET default_transaction_read_only = on;
 
 REVOKE ALL ON ALL TABLES IN SCHEMA public FROM estaciona_forecast_reader;
 REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM estaciona_forecast_reader;
-GRANT SELECT ON TABLE spots, physical_occupancy_hourly TO estaciona_forecast_reader;
+GRANT SELECT ON TABLE spots, physical_occupancy_hourly, site_map_revisions,
+    installation_binding TO estaciona_forecast_reader;

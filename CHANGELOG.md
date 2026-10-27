@@ -160,6 +160,16 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
 
 ### Fixed
 
+- Forecast quality metrics are now out of sample: each forecast is recorded
+  when issued (`forecast_ledger.db` next to the worker) and scored a day later
+  against what was observed; until then the evaluation is unavailable with
+  reason `no_prior_forecast`. Before, the current model rebuilt the forecast
+  of 24 hours earlier, possibly from hours it was trained on.
+- A forecast artifact is served only for the installation, site profile and
+  capacity it was trained for; otherwise the worker retrains it. Run
+  `infra/forecast-reader.sql` again: the reader also reads
+  `installation_binding`. The daily retrain runs at 03:30 site time instead of
+  at the next hourly forecast.
 - The gateway's local database no longer grows without bound: confirmed events
   are deleted 24 hours after they arrived and metrics after 7 days, in small
   batches every five minutes; pending events are never deleted. Above
@@ -174,13 +184,23 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
   truncated.
 - One silent spot no longer discards a whole hour of history, and registering a
   new spot no longer discards earlier hours. An hour counts when at least 90% of
-  the spots monitored so far reported.
+  the spots of the site map in force at that hour reported (from
+  `site_map_revisions`; the active spots when no revision exists). A camera
+  that stops reporting therefore lowers coverage even in a window that starts
+  after it stopped, and a small part of the lot is no longer taken as the
+  whole lot's rate. Run `infra/forecast-reader.sql` again: the reader now also
+  reads `site_map_revisions`.
 - A map whose path would expand to more than 50,000 navigation waypoints, or
   with more than 10,000 spots, is refused when it is loaded or written,
   instead of exhausting memory when the server builds its graph.
 
 ### Security
 
+- WebSocket handshakes no longer compete freely for the database pool: at most
+  `WS_HANDSHAKE_CONCURRENCY` (2) authenticate at once and the rest get 503
+  with `Retry-After` before any query. Open sockets are capped per kind (edge
+  64, app 2000, dashboard 64) and messages are limited to 64 KiB (edge) and
+  16 KiB (app, dashboard).
 - A compromised producer or a capture on the local network no longer
   exposes the credential that authenticates the gateway to the server: the
   two keys are separate, the listener is loopback-only and compares keys in

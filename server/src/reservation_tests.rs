@@ -59,6 +59,7 @@ impl Fixture {
             plate_pepper: "r01-disposable-plate-pepper".to_owned(),
             personal_data: crate::personal_data::PersonalDataCipher::for_unit_test(),
             identity: crate::identity::IdentityProvider::for_unit_test(),
+            ws_admission: Default::default(),
         });
 
         Ok(Self {
@@ -1200,7 +1201,7 @@ async fn a_spot_going_quiet_is_announced_unknown_once(pool: PgPool) {
         crate::freshness::sweep(&f.state, &mut announced)
             .await
             .unwrap(),
-        [f.spot_id.clone()]
+        std::slice::from_ref(&f.spot_id)
     );
     assert_eq!(updates.recv().await.unwrap(), unknown);
     // Still quiet: nothing new to say.
@@ -1224,7 +1225,7 @@ async fn a_spot_going_quiet_is_announced_unknown_once(pool: PgPool) {
         crate::freshness::sweep(&f.state, &mut announced)
             .await
             .unwrap(),
-        [f.spot_id.clone()]
+        std::slice::from_ref(&f.spot_id)
     );
     assert_eq!(updates.recv().await.unwrap(), unknown);
 }

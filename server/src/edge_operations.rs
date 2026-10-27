@@ -140,6 +140,7 @@ mod tests {
             plate_pepper: "fixture-pepper".into(),
             personal_data: crate::personal_data::PersonalDataCipher::for_unit_test(),
             identity: crate::identity::IdentityProvider::for_unit_test(),
+            ws_admission: Default::default(),
         });
         Fixture {
             state,

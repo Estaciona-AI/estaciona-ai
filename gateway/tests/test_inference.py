@@ -3,14 +3,18 @@
 
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from tempfile import mkdtemp
 from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 
 from ml import history, inference, train
+
+from forecast_db import history_engine
 from ml.backtest import HORIZON
 from ml.inference import PredictiveEngine, evaluate_forecast
 
@@ -38,8 +42,11 @@ def generic_profile(monkeypatch):
     monkeypatch.delenv("FORECAST_PROFILE", raising=False)
 
 
-def forecast_predictor(rates=None, capacity=400, model=None):
-    """A predictor over WINDOW hourly rates ending at the current hour."""
+def forecast_predictor(rates=None, capacity=400, model=None, issued=None):
+    """A predictor over WINDOW hourly rates ending at the current hour.
+
+    `issued` is the 24-hour forecast it recorded one day earlier, if any.
+    """
     rates = np.full(WINDOW, 0.25) if rates is None else np.asarray(rates, float)
     origin = pd.Timestamp.now(tz="UTC").floor("h")
     frame = pd.DataFrame(
@@ -51,11 +58,20 @@ def forecast_predictor(rates=None, capacity=400, model=None):
         }
     )
     predictor = PredictiveEngine.__new__(PredictiveEngine)
-    predictor.engine = None
-    predictor.manifest = {"serving": "model"}
+    predictor.engine = history_engine()
+    predictor.manifest = {
+        "serving": "model",
+        "context": train.deployment_context(predictor.engine, capacity),
+    }
     predictor.model = model or FixedRate(0.5)
     predictor.get_capacity = lambda: capacity
     predictor.history_frame = frame
+    predictor.ledger = None
+    if issued is not None:
+        predictor.ledger = inference.ForecastLedger(Path(mkdtemp()) / "ledger.db")
+        predictor.ledger.record(
+            origin - pd.Timedelta(hours=HORIZON), issued, origin - pd.Timedelta(days=1)
+        )
     return predictor
 
 
@@ -66,34 +82,13 @@ def predict(predictor):
         return predictor.predict_trends()
 
 
-def spots_engine(active, retired=()):
-    engine = create_engine("sqlite://")
-    with engine.begin() as connection:
-        connection.execute(
-            text("CREATE TABLE spots (id TEXT PRIMARY KEY,is_active BOOLEAN)")
-        )
-        connection.execute(
-            text(
-                "CREATE TABLE physical_occupancy_hourly (spot_id TEXT,hour_start TEXT,status TEXT)"
-            )
-        )
-        for spot in active:
-            connection.execute(
-                text("INSERT INTO spots VALUES (:id,TRUE)"), {"id": spot}
-            )
-        for spot in retired:
-            connection.execute(
-                text("INSERT INTO spots VALUES (:id,FALSE)"), {"id": spot}
-            )
-    return engine
-
-
 @pytest.mark.parametrize("spot_count", [3, 35])
 def test_forecast_capacity_comes_from_registered_spots(spot_count):
-    engine = spots_engine([str(index) for index in range(spot_count)], ["retired"])
+    engine = history_engine([str(index) for index in range(spot_count)], ["retired"])
     predictor = forecast_predictor()
     predictor.engine = engine
     del predictor.get_capacity
+    predictor.manifest["context"] = train.deployment_context(engine, spot_count)
     payload = predict(predictor)
     assert payload["max_capacity"] == spot_count
     assert len(payload["next_24h_occupancy"]) == 24
@@ -121,7 +116,7 @@ def test_forecast_marks_unmeasured_stay_duration_instead_of_fabricating_zero():
 
 
 def test_constant_targets_have_real_errors_but_no_fabricated_r2():
-    evaluation = predict(forecast_predictor())["evaluation"]
+    evaluation = predict(forecast_predictor(issued=np.full(HORIZON, 0.5)))["evaluation"]
     assert evaluation["status"] == "partial"
     assert evaluation["reason"] == "constant_target"
     assert "r2_score" not in evaluation
@@ -132,7 +127,8 @@ def test_constant_targets_have_real_errors_but_no_fabricated_r2():
 def test_negative_r2_is_a_valid_result_not_clamped_to_zero():
     rates = np.full(WINDOW, 0.25)
     rates[BACKTEST] = np.linspace(0.0, 0.2, HORIZON)
-    evaluation = predict(forecast_predictor(rates))["evaluation"]
+    issued = np.full(HORIZON, 0.5)
+    evaluation = predict(forecast_predictor(rates, issued=issued))["evaluation"]
     assert evaluation["status"] == "available"
     assert evaluation["r2_score"] < 0
 
@@ -157,8 +153,9 @@ def test_evaluation_failure_is_not_reported_as_perfect_zero_error():
 
 
 def test_perfect_constant_predictions_keep_actual_zero_errors():
-    rates = np.full(WINDOW, 0.5)  # FixedRate predicts 0.5 as well.
-    evaluation = predict(forecast_predictor(rates))["evaluation"]
+    rates = np.full(WINDOW, 0.5)  # The forecast issued a day ago said 0.5.
+    issued = np.full(HORIZON, 0.5)
+    evaluation = predict(forecast_predictor(rates, issued=issued))["evaluation"]
     assert evaluation["status"] == "partial"
     assert evaluation["mae"] == 0.0
     assert evaluation["rmse"] == 0.0
@@ -189,7 +186,7 @@ def test_non_finite_future_prediction_is_not_queued_as_a_forecast():
 
 
 def test_history_reads_physical_samples_without_personal_history():
-    engine = spots_engine(["a", "b"], ["retired"])
+    engine = history_engine(["a", "b"], ["retired"])
     hour = pd.Timestamp.now(tz="UTC").floor("h") - pd.Timedelta(hours=1)
     with engine.begin() as connection:
         for spot, status in [("a", "occupied"), ("b", "free"), ("retired", "occupied")]:
@@ -213,7 +210,7 @@ def test_forecast_refuses_missing_recent_history(rates):
 
 
 def test_empty_physical_history_is_unknown_instead_of_zero():
-    engine = spots_engine(["a"])
+    engine = history_engine(["a"])
     predictor = forecast_predictor()
     predictor.engine = engine
     with pytest.raises(ValueError, match="history"):
@@ -223,8 +220,8 @@ def test_empty_physical_history_is_unknown_instead_of_zero():
 
 def test_forecast_can_predict_without_claiming_an_unavailable_backtest():
     rates = np.full(WINDOW, 0.25)
-    rates[train.LOOKBACK] = np.nan  # One unobserved hour in the backtest window.
-    payload = predict(forecast_predictor(rates))
+    rates[train.LOOKBACK] = np.nan  # One unobserved hour in the scored window.
+    payload = predict(forecast_predictor(rates, issued=np.full(HORIZON, 0.25)))
     assert len(payload["next_24h_occupancy"]) == 24
     assert payload["evaluation"]["status"] == "unavailable"
     assert payload["evaluation"]["reason"] == "invalid_evaluation_window"
@@ -245,7 +242,7 @@ def frozen_clock(*instants):
 
 def hourly_history_engine(last_hour):
     # Spot a is always occupied; spot b only in the most recent stored hour.
-    engine = spots_engine(["a", "b"])
+    engine = history_engine(["a", "b"])
     with engine.begin() as connection:
         for offset in range(200):
             hour = (pd.Timestamp(last_hour) - pd.Timedelta(hours=offset)).isoformat()
@@ -257,8 +254,12 @@ def hourly_history_engine(last_hour):
             )
     predictor = PredictiveEngine.__new__(PredictiveEngine)
     predictor.engine = engine
-    predictor.manifest = {"serving": "model"}
+    predictor.manifest = {
+        "serving": "model",
+        "context": train.deployment_context(engine, 2),
+    }
     predictor.model = LastRate()
+    predictor.ledger = None
     return predictor
 
 
@@ -348,3 +349,49 @@ def test_forecast_database_on_a_declared_private_network(monkeypatch):
         with pytest.raises(ValueError, match="verify-full"):
             train.get_db_engine()
     create.assert_not_called()
+
+
+def test_without_an_issued_forecast_nothing_is_scored():
+    evaluation = predict(forecast_predictor())["evaluation"]
+    assert evaluation["status"] == "unavailable"
+    assert evaluation["reason"] == "no_prior_forecast"
+    assert "mae" not in evaluation
+
+
+def test_scores_come_from_the_forecast_issued_a_day_ago_not_the_current_model():
+    """Review R05: the artifact serving now may have trained on the scored
+    hours; only what was issued before them is out of sample."""
+    rates = np.full(WINDOW, 0.25)
+    # The day-old forecast was right; today's model would be far off.
+    predictor = forecast_predictor(
+        rates, model=FixedRate(0.9), issued=np.full(HORIZON, 0.25)
+    )
+    evaluation = predict(predictor)["evaluation"]
+    assert evaluation["mae"] == 0.0
+    assert evaluation["rmse"] == 0.0
+
+
+def test_each_forecast_is_recorded_once_and_survives_a_restart(tmp_path):
+    path = tmp_path / "ledger.db"
+    origin = datetime(2026, 10, 24, 12, tzinfo=timezone.utc)
+    first = inference.ForecastLedger(path)
+    first.record(origin, np.full(HORIZON, 0.3), origin)
+    # A restart within the hour cannot revise what was already issued.
+    inference.ForecastLedger(path).record(origin, np.full(HORIZON, 0.9), origin)
+    np.testing.assert_array_equal(
+        inference.ForecastLedger(path).issued(origin), np.full(HORIZON, 0.3)
+    )
+    assert inference.ForecastLedger(path).issued(origin + timedelta(hours=1)) is None
+    # Forecasts older than a week are dropped as new ones arrive.
+    first.record(origin + timedelta(days=8), np.full(HORIZON, 0.1), origin)
+    assert first.issued(origin) is None
+
+
+def test_a_prediction_is_recorded_for_tomorrows_evaluation(tmp_path):
+    predictor = forecast_predictor(model=FixedRate(0.4))
+    predictor.ledger = inference.ForecastLedger(tmp_path / "ledger.db")
+    payload = predict(predictor)
+    origin = pd.Timestamp(payload["next_24h_occupancy"][0]["timestamp"])
+    np.testing.assert_array_equal(
+        predictor.ledger.issued(origin.to_pydatetime()), np.full(HORIZON, 0.4)
+    )
