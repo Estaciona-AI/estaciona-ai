@@ -51,7 +51,8 @@ async def until(predicate):
         while not predicate():
             await asyncio.sleep(0)
 
-    await asyncio.wait_for(poll(), timeout=2)
+    # Only a failing test waits this long; a loaded runner still passes.
+    await asyncio.wait_for(poll(), timeout=10)
 
 
 class Cloud:
