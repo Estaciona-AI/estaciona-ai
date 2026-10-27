@@ -153,6 +153,14 @@ fn invalid_keyrings_are_refused_without_echoing_their_contents() {
         assert_eq!(error, expected);
         assert!(!error.to_string().contains(&secret));
     }
+    let error = Keyring::parse(&format!("1:{secret}\n\n2:{}", key(8).repeat(2)))
+        .err()
+        .unwrap();
+    assert_eq!(error, KeyringError::InvalidLine(3));
+    assert_eq!(
+        error.to_string(),
+        "PERSONAL_DATA_KEYS_FILE line 3 is not <id>:<base64 of 32 bytes>"
+    );
 }
 
 #[test]
@@ -166,7 +174,12 @@ fn keyring_files_must_be_private_and_within_the_size_limit() {
     assert_eq!(Keyring::load(&path).err(), Some(KeyringError::Unreadable));
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     assert!(Keyring::load(&path).is_ok());
-    std::fs::write(&path, "#".repeat(16 * 1024 + 1)).unwrap();
+    let line = format!("1:{}\n", key(3));
+    let at_limit = format!("{line}#{}", "#".repeat(16 * 1024 - line.len() - 1));
+    assert_eq!(at_limit.len(), 16 * 1024);
+    std::fs::write(&path, &at_limit).unwrap();
+    assert!(Keyring::load(&path).is_ok());
+    std::fs::write(&path, format!("{at_limit}#")).unwrap();
     assert_eq!(Keyring::load(&path).err(), Some(KeyringError::Unreadable));
     assert_eq!(
         Keyring::load(&directory.join("missing")).err(),

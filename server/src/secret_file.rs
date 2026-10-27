@@ -84,6 +84,7 @@ mod tests {
         assert!(read(&path, 64).is_err());
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert!(read(&path, 4).is_err());
+        assert_eq!(read(&path, 5).unwrap().as_str(), "value");
         let link = path.with_file_name("link");
         std::os::unix::fs::symlink(&path, &link).unwrap();
         assert!(read(&link, 64).is_err());
