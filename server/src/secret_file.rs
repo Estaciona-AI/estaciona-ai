@@ -10,17 +10,22 @@ use std::{
 };
 use zeroize::Zeroizing;
 
-/// Reads a regular file that only its owner can read or write, at most
-/// `max_bytes` long. One trailing line break is not part of the secret.
+/// Reads a regular file that only its owner can read or write, owned by the
+/// user this process runs as, at most `max_bytes` long. One trailing line
+/// break is not part of the secret.
 pub fn read(path: &Path, max_bytes: u64) -> io::Result<Zeroizing<String>> {
+    read_as(path, max_bytes, process_user()?)
+}
+
+fn read_as(path: &Path, max_bytes: u64, user: u32) -> io::Result<Zeroizing<String>> {
     let invalid = || {
         io::Error::new(
             io::ErrorKind::InvalidInput,
-            "Secret file must be a private regular file within the size limit",
+            "Secret file must be a private regular file of this user within the size limit",
         )
     };
     let before = fs::symlink_metadata(path)?;
-    if !before.is_file() || before.mode() & 0o077 != 0 {
+    if !before.is_file() || before.mode() & 0o077 != 0 || before.uid() != user {
         return Err(invalid());
     }
     let file = fs::File::open(path)?;
@@ -41,6 +46,13 @@ pub fn read(path: &Path, max_bytes: u64) -> io::Result<Zeroizing<String>> {
         }
     }
     Ok(text)
+}
+
+/// The effective user of this process: Linux makes it the owner of
+/// `/proc/self` (proc(5)), which avoids `unsafe` FFI for `geteuid`. Without
+/// procfs no secret can be read.
+fn process_user() -> io::Result<u32> {
+    Ok(fs::metadata("/proc/self")?.uid())
 }
 
 #[cfg(test)]
@@ -77,5 +89,15 @@ mod tests {
         assert!(read(&link, 64).is_err());
         assert!(read(&path.with_file_name("missing"), 64).is_err());
         assert!(read(path.parent().unwrap(), 64).is_err());
+    }
+
+    #[test]
+    fn a_private_file_of_another_user_is_refused() {
+        use std::os::unix::fs::MetadataExt;
+        let path = private_file("secret", "value");
+        let owner = std::fs::metadata(&path).unwrap().uid();
+        assert_eq!(super::process_user().unwrap(), owner);
+        assert!(super::read_as(&path, 64, owner).is_ok());
+        assert!(super::read_as(&path, 64, owner.wrapping_add(1)).is_err());
     }
 }
