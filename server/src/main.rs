@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod api_contract;
+mod audit;
 mod auth_limits;
 mod config_store;
 mod contracts;
@@ -18,6 +19,8 @@ mod pathfinding;
 mod personal_data;
 #[cfg(test)]
 mod postgres_tests;
+#[cfg(test)]
+mod privacy_tests;
 #[cfg(test)]
 mod reservation_concurrency_tests;
 mod reservation_policy;
@@ -278,7 +281,8 @@ async fn main() {
         .merge(ws_tickets::routes())
         .merge(vehicles::routes(lpr_mode))
         .route("/users/{id}", get(users::get_user))
-        .route("/me", get(users::me))
+        .route("/me", get(users::me).delete(users::delete_account))
+        .route("/me/export", get(users::export_personal_data))
         .route("/me/eligibility", put(users::update_eligibility))
         .route("/config", post(save_config));
     let versioned = api
@@ -289,6 +293,7 @@ async fn main() {
         .layer(axum::middleware::from_fn(api_contract::versioned_response));
     let app = Router::new()
         .route("/health", get(health_check))
+        .route("/ready", get(readiness))
         .route("/ws/edge", get(ws::ws_edge_handler))
         .route("/ws/app", get(ws_tickets::app_handler))
         .route("/ws/dashboard", get(ws_tickets::dashboard_handler))
@@ -387,12 +392,33 @@ async fn health_check() -> &'static str {
     "OK"
 }
 
+/// Liveness stays /health; this also proves the database answers and is still
+/// bound to this installation, so a proxy can stop routing to it otherwise.
+async fn readiness(State(state): State<SharedState>) -> (StatusCode, &'static str) {
+    let identity = state.installation.identity();
+    let check = installation::store::check(state.installation.pool(), &identity);
+    match tokio::time::timeout(std::time::Duration::from_secs(3), check).await {
+        Ok(Ok(installation::store::BindingStatus::Matching)) => (StatusCode::OK, "ready"),
+        Ok(Ok(status)) => {
+            tracing::error!(?status, "Installation binding no longer matches");
+            (StatusCode::SERVICE_UNAVAILABLE, "not ready")
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "Readiness check failed");
+            (StatusCode::SERVICE_UNAVAILABLE, "not ready")
+        }
+        Err(_) => (StatusCode::SERVICE_UNAVAILABLE, "not ready"),
+    }
+}
+
 async fn save_config(
     State(state): State<SharedState>,
     headers: HeaderMap,
     axum::Json(payload): axum::Json<serde_json::Value>,
 ) -> Result<&'static str, (axum::http::StatusCode, String)> {
-    crate::security::require_admin(&headers, &state.jwt_secret, state.installation.pool()).await?;
+    let actor =
+        crate::security::require_admin(&headers, &state.jwt_secret, state.installation.pool())
+            .await?;
     state
         .installation
         .config_store
@@ -418,6 +444,23 @@ async fn save_config(
                 )
             }
         })?;
+    // The file is written first: a configuration change is never lost to an
+    // audit failure, which is reported instead.
+    if let Err(error) = crate::audit::record(
+        state.installation.pool(),
+        actor,
+        "site_config_saved",
+        None,
+        serde_json::json!({}),
+    )
+    .await
+    {
+        tracing::error!(%error, "Configuration saved but its audit record failed");
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Configuration saved; audit record failed".to_owned(),
+        ));
+    }
 
     Ok(r#"{"status": "ok"}"#)
 }

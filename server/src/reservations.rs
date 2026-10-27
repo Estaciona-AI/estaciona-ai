@@ -72,7 +72,9 @@ pub async fn update_spot_status(
     headers: HeaderMap,
     Json(payload): Json<UpdateSpotStatus>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    crate::security::require_admin(&headers, &state.jwt_secret, state.installation.pool()).await?;
+    let actor =
+        crate::security::require_admin(&headers, &state.jwt_secret, state.installation.pool())
+            .await?;
     if payload.status != "occupied" && payload.status != "free" && payload.status != "reserved" {
         return Err((StatusCode::BAD_REQUEST, "Invalid status".to_string()));
     }
@@ -118,6 +120,20 @@ pub async fn update_spot_status(
         })?;
     }
 
+    crate::audit::record(
+        &mut *tx,
+        actor,
+        "spot_status_set",
+        Some(&id),
+        serde_json::json!({"status": payload.status}),
+    )
+    .await
+    .map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Database error".to_string(),
+        )
+    })?;
     tx.commit().await.map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -190,7 +206,24 @@ pub async fn get_reservations(
     State(state): State<SharedState>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    crate::security::require_admin(&headers, &state.jwt_secret, state.installation.pool()).await?;
+    let actor =
+        crate::security::require_admin(&headers, &state.jwt_secret, state.installation.pool())
+            .await?;
+    crate::audit::record(
+        state.installation.pool(),
+        actor,
+        "active_reservations_listed",
+        None,
+        serde_json::json!({}),
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("Audit record failed: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to fetch reservations".to_string(),
+        )
+    })?;
     let records = sqlx::query_as!(
         ReservationResponse,
         r#"

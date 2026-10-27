@@ -20,16 +20,16 @@ use crate::{
     state::{AppState, SharedState},
 };
 
-struct Fixture {
-    state: SharedState,
-    owner: Uuid,
-    other: Uuid,
-    admin: Uuid,
-    spot_id: String,
+pub(crate) struct Fixture {
+    pub(crate) state: SharedState,
+    pub(crate) owner: Uuid,
+    pub(crate) other: Uuid,
+    pub(crate) admin: Uuid,
+    pub(crate) spot_id: String,
 }
 
 impl Fixture {
-    async fn new(pool: PgPool) -> Result<Self, sqlx::Error> {
+    pub(crate) async fn new(pool: PgPool) -> Result<Self, sqlx::Error> {
         let verified = crate::installation::test_support::provision(&pool).await;
         let owner = Uuid::new_v4();
         let other = Uuid::new_v4();
@@ -98,7 +98,7 @@ impl Fixture {
         .await?)
     }
 
-    async fn headers(&self, user_id: Uuid, role: &str) -> HeaderMap {
+    pub(crate) async fn headers(&self, user_id: Uuid, role: &str) -> HeaderMap {
         let token = crate::sessions::issue(
             self.state.installation.pool(),
             user_id,
@@ -130,7 +130,7 @@ impl Fixture {
         .into_response()
     }
 
-    async fn create_for_owner(&self) -> Uuid {
+    pub(crate) async fn create_for_owner(&self) -> Uuid {
         let response = self.create(self.owner).await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), 16_384)

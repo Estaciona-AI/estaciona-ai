@@ -52,6 +52,24 @@ pub(super) fn document() -> Value {
             (200, json_body("v1/rest-user-response.schema.json")),
         ),
         rest(
+            "export_personal_data",
+            "GET",
+            "/me/export",
+            "human_session",
+            "authenticated_user",
+            None,
+            (200, json_body("v1/rest-personal-data-export.schema.json")),
+        ),
+        rest(
+            "delete_account",
+            "DELETE",
+            "/me",
+            "human_session",
+            "authenticated_user",
+            None,
+            (204, body("none", None)),
+        ),
+        rest(
             "get_user",
             "GET",
             "/users/{id}",
@@ -209,12 +227,13 @@ pub(super) fn document() -> Value {
             body("json", None),
         ),
         ("health", "/health", body("text", None)),
+        ("readiness", "/ready", body("text", None)),
     ] {
         operations.push(json!({
             "id":id, "method":"GET", "path":path, "legacy_path":null,
             "authentication":"public", "authorization":"public", "availability":"always",
             "request_schema":null, "request_encoding":"none", "responses":{"200":response},
-            "error_schema": if id == "health" {None} else {Some("v1/rest-api-error.schema.json")}
+            "error_schema": if matches!(id, "health" | "readiness") {None} else {Some("v1/rest-api-error.schema.json")}
         }));
     }
     for operation in &mut operations {
@@ -225,6 +244,12 @@ pub(super) fn document() -> Value {
             "save_config" => {
                 operation["effect"] = json!("persist_geometry_for_next_restart");
                 operation["request_encoding"] = json!("json");
+            }
+            "delete_account" => {
+                operation["effect"] = json!("release_reservations_and_delete_local_account")
+            }
+            "readiness" => {
+                operation["responses"]["503"] = body("text", None);
             }
             "websocket_ticket" => {
                 operation["effect"] = json!("single_use_destination_bound_ticket")
