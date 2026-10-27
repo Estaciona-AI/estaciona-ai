@@ -544,4 +544,25 @@ mod tests {
         );
         assert_eq!(graph.nodes.len(), 2);
     }
+
+    #[test]
+    fn a_spot_reachable_from_several_entrances_uses_the_cheapest() {
+        let mut graph = ParkingGraph::new();
+        let north = graph.add_node("cam-01", 0.0, 0.0).unwrap();
+        let south = graph.add_node("entrance-1", 10.0, 0.0).unwrap();
+        let spot = graph.add_node("spot", 8.0, 0.0).unwrap();
+        graph.mark_entrance("cam-01");
+        graph.mark_entrance("entrance-1");
+        graph.add_edge(north, spot, 80, true);
+        graph.add_edge(south, spot, 20, true);
+        assert_eq!(
+            graph.route_from_nearest_entrance("spot"),
+            Some((20, vec!["entrance-1".into(), "spot".into()]))
+        );
+        // A node that is not an entrance is never a starting point.
+        graph.mark_entrance("missing");
+        let unmarked = graph.add_node("corridor", 9.0, 0.0).unwrap();
+        graph.add_edge(unmarked, spot, 1, true);
+        assert_eq!(graph.route_from_nearest_entrance("spot").unwrap().0, 20);
+    }
 }
