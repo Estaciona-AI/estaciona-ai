@@ -96,6 +96,12 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
 - **Run `infra/app-role.sql` again after migrating.** The new administrative
   trail (`admin_audit_log`) is append-only for the service, which the script
   enforces.
+- **Wire contract 2.0.0.** The contract released on `main` is 1.3.0; this
+  release removes login and registration, changes the user response, and adds
+  the `unknown` spot status and the `no_prior_forecast` evaluation reason, so it
+  is published as 2.0.0. Hub and installation panels must move to it together
+  with the server; the HTTP prefix stays `/api/v1`. From now on CI refuses an
+  incompatible change released under the same major version.
 
 ### Added
 

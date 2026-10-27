@@ -495,7 +495,7 @@
     "session": "host_only_http_only_cookie",
     "start": "/auth/login"
   },
-  "version": "1.4.0",
+  "version": "2.0.0",
   "websockets": [
     {
       "authentication": "single_use_ticket",

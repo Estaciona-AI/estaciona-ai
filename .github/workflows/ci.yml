@@ -236,6 +236,12 @@ jobs:
           ../test-server/estaciona-ai-rust-server --export-contracts "$RUNNER_TEMP/generated-contracts"
           diff -u messages.json "$RUNNER_TEMP/generated-contracts/messages.json"
           diff -ru v1 "$RUNNER_TEMP/generated-contracts/v1"
+      - name: Refuse incompatible changes within the released major version
+        run: |
+          git fetch --no-tags --depth=1 origin main
+          mkdir -p "$RUNNER_TEMP/released"
+          git -C .. archive FETCH_HEAD shared | tar -x -C "$RUNNER_TEMP/released"
+          uv run --locked python contract_compat.py "$RUNNER_TEMP/released/shared" .
       - name: Check first-party licensing policy
         run: python ../scripts/check_licenses.py
       - name: Lint contract checks
