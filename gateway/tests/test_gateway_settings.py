@@ -170,7 +170,18 @@ def test_listener_accepts_only_the_local_key_and_the_cloud_gets_the_cloud_key(
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("header", [f"Bearer {LOCAL}x", f"Bearer {LOCAL[:-1]}", ""])
+@pytest.mark.parametrize(
+    "header",
+    [
+        f"Bearer {LOCAL}x",
+        f"Bearer {LOCAL[:-1]}",
+        "",
+        f"Basic {LOCAL}",
+        f"bearer {LOCAL}",
+        f"Bearer\t{LOCAL}",
+        f"Bearer  {LOCAL}",
+    ],
+)
 def test_authorization_rejects_near_misses(header):
     assert not gateway.is_authorized({"Authorization": header}, LOCAL)
 
