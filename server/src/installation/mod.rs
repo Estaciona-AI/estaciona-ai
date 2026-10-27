@@ -18,7 +18,7 @@ mod binding_tests;
 pub mod store;
 
 #[cfg(test)]
-mod store_tests;
+pub(crate) mod store_tests;
 
 #[cfg(test)]
 mod cli_tests;

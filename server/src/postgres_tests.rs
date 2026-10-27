@@ -368,6 +368,13 @@ async fn runtime_role_changes_rows_but_not_the_schema_or_migration_history(pool:
     crate::installation::store::require_migrated(&app)
         .await
         .unwrap();
+    assert_eq!(
+        crate::installation::store::excess_privileges(&app)
+            .await
+            .unwrap(),
+        Vec::<&str>::new(),
+        "the runtime role only reads and writes rows"
+    );
     for statement in [
         "INSERT INTO spots (id, status, x, y) VALUES ('runtime-role', 'free', 0, 0)",
         "UPDATE spots SET status = 'occupied' WHERE id = 'runtime-role'",
@@ -393,5 +400,50 @@ async fn runtime_role_changes_rows_but_not_the_schema_or_migration_history(pool:
             "{statement}"
         );
     }
+    app.close().await;
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn production_starts_only_with_the_restricted_runtime_role(pool: PgPool) {
+    use crate::installation::{
+        startup,
+        store::{self, BindMode, StoreError},
+        store_tests::identity,
+    };
+    let production = identity(3, "production");
+    store::bind(&pool, &production, BindMode::EmptyDatabase)
+        .await
+        .unwrap();
+    // The test pool connects as a superuser that owns every table.
+    let excess = store::excess_privileges(&pool).await.unwrap();
+    assert!(excess.contains(&"superuser") && excess.contains(&"own application tables"));
+    assert!(matches!(
+        startup::prepare(pool.clone(), production).await,
+        Err(StoreError::PrivilegedRuntimeRole)
+    ));
+
+    sqlx::raw_sql(include_str!("../../infra/app-role.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let password = Uuid::new_v4().simple().to_string();
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "ALTER ROLE estaciona_app PASSWORD '{password}'"
+    )))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let options = pool
+        .connect_options()
+        .as_ref()
+        .clone()
+        .username("estaciona_app")
+        .password(&password);
+    let app = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(options)
+        .await
+        .unwrap();
+    startup::prepare(app.clone(), production).await.unwrap();
     app.close().await;
 }
