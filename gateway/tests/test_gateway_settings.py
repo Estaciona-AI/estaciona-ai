@@ -97,7 +97,10 @@ def test_listener_accepts_only_the_local_key_and_the_cloud_gets_the_cloud_key(
             serve.return_value.__aenter__ = AsyncMock()
             serve.return_value.__aexit__ = AsyncMock(return_value=False)
             task = asyncio.create_task(gateway.main())
-            await asyncio.sleep(0.05)
+            for _ in range(1000):
+                if serve.called and sync_loop.called:
+                    break
+                await asyncio.sleep(0.01)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task

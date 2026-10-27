@@ -246,7 +246,10 @@ def test_sync_loop_sends_to_cloud(tmp_path):
                     sync_event,
                 )
             )
-            await asyncio.sleep(0.05)
+            for _ in range(1000):
+                if not pending_deliveries(db_path):
+                    break
+                await asyncio.sleep(0.01)
             task.cancel()
             try:
                 await task

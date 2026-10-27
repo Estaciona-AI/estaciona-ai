@@ -23,6 +23,11 @@ import pytest
 from test_delivery_integration import Server, server as delivery_server
 from test_session_integration import insert_user, token
 
+pytestmark = pytest.mark.skipif(
+    not os.environ.get("ESTACIONA_TEST_SERVER"),
+    reason="set ESTACIONA_TEST_SERVER and DATABASE_URL to run real Rust integration",
+)
+
 server = delivery_server
 
 ELIGIBILITY = {"date_of_birth": "1950-03-04", "pcd_status": True}
