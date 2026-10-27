@@ -86,10 +86,12 @@ pub async fn car_detected(
         (spot, route, false)
     } else {
         let free: Vec<String> = sqlx::query_scalar(
-            "SELECT id FROM spots WHERE status = 'free' AND is_active AND EXISTS( \
+            "SELECT id FROM spots WHERE status = 'free' AND is_active \
+             AND observation_timestamp > NOW() - make_interval(secs => $2) AND EXISTS( \
              SELECT 1 FROM edge_camera_spots WHERE gateway_id = $1 AND spot_id = spots.id)",
         )
         .bind(principal.gateway_id)
+        .bind(crate::freshness::stale_after_secs())
         .fetch_all(&mut *tx)
         .await?;
         let candidates = {

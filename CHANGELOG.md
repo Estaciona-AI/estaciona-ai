@@ -68,6 +68,10 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
   profile's `sha256` (or `VISION_MODEL_SHA256` for the legacy client).
   TensorRT engine names now include the model digest, so engines are rebuilt
   once after this upgrade.
+- **Apps must handle the spot status `unknown`.** A spot whose latest
+  observation is older than `OBSERVATION_STALE_AFTER_SECS` (120 s) or that no
+  camera has seen yet is `unknown` in snapshots and updates. It cannot be
+  reserved (409) or recommended until a camera reports it again.
 
 ### Added
 

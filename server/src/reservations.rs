@@ -37,7 +37,7 @@ pub struct ReservationResponse {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct UpdateSpotStatus {
-    #[schemars(schema_with = "crate::contracts::spot_status_schema")]
+    #[schemars(schema_with = "crate::contracts::settable_spot_status_schema")]
     pub status: String,
 }
 
@@ -475,8 +475,10 @@ pub async fn recommend_spot(
         spots if spots.is_empty() => None,
         spots => sqlx::query_scalar!(
             "SELECT id FROM spots WHERE status = 'free' AND is_active AND id = ANY($1) \
+             AND observation_timestamp > NOW() - make_interval(secs => $2) \
              ORDER BY id LIMIT 1",
-            &spots as &[&str]
+            &spots as &[&str],
+            crate::freshness::stale_after_secs()
         )
         .fetch_optional(state.installation.pool())
         .await
@@ -524,12 +526,14 @@ pub async fn recommend_spot(
             JOIN spots s ON s.id = h.spot_id
             WHERE h.user_id = $1 
               AND s.status = 'free' AND s.is_active
+              AND s.observation_timestamp > NOW() - make_interval(secs => $2)
               AND s.id NOT IN ('A-01', 'A-02', 'A-03', 'A-04')
             GROUP BY h.spot_id
             ORDER BY uses DESC
             LIMIT 1
             "#,
-            query.user_id
+            query.user_id,
+            crate::freshness::stale_after_secs()
         )
         .fetch_optional(state.installation.pool())
         .await
@@ -559,8 +563,10 @@ pub async fn recommend_spot(
         SELECT id 
         FROM spots 
         WHERE status = 'free' AND is_active
+          AND observation_timestamp > NOW() - make_interval(secs => $1)
           AND id NOT IN ('A-01', 'A-02', 'A-03', 'A-04')
-        "#
+        "#,
+        crate::freshness::stale_after_secs()
     )
     .fetch_all(state.installation.pool())
     .await

@@ -25,7 +25,13 @@ pub fn physical_state_schema(_: &mut SchemaGenerator) -> Schema {
     json_schema!({"type":"string","enum":["free","occupied"]})
 }
 
+/// What apps see: "unknown" when no recent observation backs the state.
 pub fn spot_status_schema(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({"type":"string","enum":["free","occupied","reserved","unknown"]})
+}
+
+/// What an administrator may set.
+pub fn settable_spot_status_schema(_: &mut SchemaGenerator) -> Schema {
     json_schema!({"type":"string","enum":["free","occupied","reserved"]})
 }
 

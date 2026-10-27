@@ -376,6 +376,12 @@ async fn reservation_handler_selects_its_context_database_with_repeated_local_id
         sqlx::query("INSERT INTO edge_camera_spots(gateway_id,camera_id,spot_id) VALUES ($1,'same-camera','shared-spot')")
             .bind(gateway).execute(state.installation.pool()).await.unwrap();
     }
+    for state in [&a, &b] {
+        sqlx::query("UPDATE spots SET observation_timestamp = NOW() - INTERVAL '30 seconds'")
+            .execute(state.installation.pool())
+            .await
+            .unwrap();
+    }
     for (index, state) in [&a, &b].into_iter().enumerate() {
         let token =
             crate::sessions::issue(state.installation.pool(), user, "user", &state.jwt_secret)

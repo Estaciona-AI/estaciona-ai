@@ -15,6 +15,12 @@ use crate::security::{AuthError, AuthSession};
 use crate::state::SharedState;
 use crate::ws::messages::{AppToServerMsg, ServerToAppMsg};
 
+#[derive(sqlx::FromRow)]
+struct SpotRow {
+    id: String,
+    status: String,
+}
+
 pub(crate) async fn handle_app_socket(socket: WebSocket, state: SharedState, session: AuthSession) {
     let user_id = session.user_id;
     let (mut sender, mut receiver) = socket.split();
@@ -31,7 +37,8 @@ pub(crate) async fn handle_app_socket(socket: WebSocket, state: SharedState, ses
     // Dropping these futures also cancels pending reads/writes; no detached tasks.
     let send_task = async {
         session.revalidate(state.installation.pool()).await?;
-        let db_spots = sqlx::query!("SELECT id, status FROM spots WHERE is_active")
+        let db_spots: Vec<SpotRow> = sqlx::query_as(crate::freshness::SNAPSHOT_SQL)
+            .bind(crate::freshness::stale_after_secs())
             .fetch_all(state.installation.pool())
             .await
             .map_err(|error| {
@@ -191,7 +198,8 @@ pub(crate) async fn handle_dashboard_socket(
 
     let send_task = async {
         session.revalidate(state.installation.pool()).await?;
-        let db_spots = sqlx::query!("SELECT id, status FROM spots WHERE is_active")
+        let db_spots: Vec<SpotRow> = sqlx::query_as(crate::freshness::SNAPSHOT_SQL)
+            .bind(crate::freshness::stale_after_secs())
             .fetch_all(state.installation.pool())
             .await
             .map_err(|error| {
