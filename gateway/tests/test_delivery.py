@@ -514,17 +514,19 @@ def test_oldest_deadline_survives_later_ack_and_invalid_traffic(tmp_path):
         cloud = Cloud()
         with (
             patch("gateway.websockets.connect", AsyncMock(return_value=cloud)),
-            patch("gateway.ACK_TIMEOUT_SECONDS", 0.08),
+            patch("gateway.ACK_TIMEOUT_SECONDS", 0.4),
         ):
             task = asyncio.create_task(
                 gateway.sync_loop(db, metrics, "ws://test", "test", asyncio.Event())
             )
             try:
                 await until(lambda: len(cloud.frames) == 3)
-                await asyncio.sleep(0.05)
+                # The oldest deadline expires at 0.4 s; restarting it on this
+                # late ACK would close at 0.65 s, outside the 0.25-0.55 s window.
+                await asyncio.sleep(0.25)
                 cloud.ack(cloud.frames[2])
                 cloud.responses.put_nowait("not-json")
-                await asyncio.wait_for(cloud.closed.wait(), 0.06)
+                await asyncio.wait_for(cloud.closed.wait(), 0.3)
                 assert [row[1] for row in gateway.pending_deliveries(db)] == ids[:2]
             finally:
                 task.cancel()

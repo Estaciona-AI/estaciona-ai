@@ -6,6 +6,7 @@ are refused before they reach the database pool, connections are capped per
 kind and released on close, and oversized messages close the socket."""
 
 import asyncio
+import os
 import time
 
 import pytest
@@ -16,6 +17,11 @@ from websockets.protocol import State
 from test_delivery_integration import KEY, receive_ready, server as delivery_server
 from test_session_integration import held_table_lock, insert_user, token
 from test_ws_tickets_integration import issue, ws_url
+
+pytestmark = pytest.mark.skipif(
+    not os.environ.get("ESTACIONA_TEST_SERVER"),
+    reason="set ESTACIONA_TEST_SERVER and DATABASE_URL to run real Rust integration",
+)
 
 server = delivery_server
 
