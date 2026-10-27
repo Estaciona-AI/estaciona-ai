@@ -76,6 +76,34 @@ def test_profile_rejects_invalid_site_facts(tmp_path, data):
         site_calendar.load_profile(write_profile(tmp_path, data), 10)
 
 
+def shift_hours(tmp_path, start, end):
+    data = {"shifts": [{"start": start, "end": end, "cars": [1] * 6}]}
+    shift = site_calendar.load_profile(write_profile(tmp_path, data), 10).shifts[0]
+    return shift.start, shift.end
+
+
+def test_shift_times_are_fractional_hours_across_the_whole_day(tmp_path):
+    assert shift_hours(tmp_path, "07:30", "11:45") == (7.5, 11.75)
+    assert shift_hours(tmp_path, "00:00", "23:59") == (0.0, 23 + 59 / 60)
+    assert shift_hours(tmp_path, "23:00", "23:30") == (23.0, 23.5)
+
+
+@pytest.mark.parametrize(
+    "start,end",
+    [
+        ("24:00", "23:00"),
+        ("07:00", "24:00"),
+        ("07:00", "12:60"),
+        ("-1:00", "07:00"),
+        ("07", "11:00"),
+        ("07:00:00", "11:00"),
+    ],
+)
+def test_shift_times_outside_hh_mm_are_refused(tmp_path, start, end):
+    with pytest.raises(ValueError, match="must be HH:MM"):
+        shift_hours(tmp_path, start, end)
+
+
 def hourly_index(days, start="2026-01-05"):
     return pd.date_range(start, periods=days * 24, freq="h", tz="UTC")
 
