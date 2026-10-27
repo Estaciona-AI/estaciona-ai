@@ -87,14 +87,12 @@ pub async fn execute(
         },
         Operation::Check => unreachable!(),
     };
-    tokio::time::timeout(Duration::from_secs(10), async {
-        store::preflight(pool, identity, &mode).await?;
-        store::migrate(pool).await?;
-        store::bind(pool, identity, mode).await?;
-        Ok(BindingStatus::Matching)
-    })
-    .await
-    .map_err(|_| StoreError::Timeout)?
+    // Each step has its own bound: quick checks and binding take seconds,
+    // while the time to migrate grows with the number of migrations.
+    store::preflight(pool, identity, &mode).await?;
+    store::migrate(pool).await?;
+    store::bind(pool, identity, mode).await?;
+    Ok(BindingStatus::Matching)
 }
 
 /// Exit codes: matching=0, operational/unbound/mismatch=1, invalid descriptor=2.
