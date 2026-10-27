@@ -160,6 +160,9 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
 
 ### Fixed
 
+- A back-channel logout that arrives while a sign-in for the same provider
+  session or account is still completing now ends it as well: the callback
+  refuses an ID token issued before the logout.
 - Forecast timestamps were one hour late: the first point is now the current
   hour, the first one not yet observed. Predicted counts are rounded instead of
   truncated.
