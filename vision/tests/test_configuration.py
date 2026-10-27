@@ -258,6 +258,35 @@ def test_tensorrt_profile_requires_cuda_and_engine_cache(profile):
         load(save(profile))
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "ws://10.0.0.5:8001/ws/edge",
+        "ws://0.0.0.0:8001/ws/edge",
+        "ws://gateway.internal:8001/ws/edge",
+        "http://127.0.0.1:8001/ws/edge",
+    ],
+)
+def test_plain_gateway_url_must_stay_on_this_host(profile, url):
+    profile[1]["gateway_url"] = url
+    with pytest.raises(ValueError, match="gateway URL"):
+        load(save(profile))
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "ws://localhost:8001/ws/edge",
+        "ws://[::1]:8001/ws/edge",
+        "ws://127.0.0.2:8001/ws/edge",
+        "wss://gateway.example:8443/ws/edge",
+    ],
+)
+def test_loopback_or_tls_gateway_urls_are_accepted(profile, url):
+    profile[1]["gateway_url"] = url
+    assert load(save(profile)).gateway_url == url
+
+
 @pytest.mark.parametrize("sha256", ["AB" * 32, "ab" * 31, 42, "zz" * 32])
 def test_detector_digest_must_be_lowercase_sha256(profile, sha256):
     profile[1]["detectors"]["main"]["sha256"] = sha256

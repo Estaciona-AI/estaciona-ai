@@ -2,9 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import sqlite3
+import hmac
+import ipaddress
 import json
+import os
+import stat
 import uuid
 from contextlib import closing
+from dataclasses import dataclass
 
 import datetime
 import asyncio
@@ -19,6 +24,89 @@ LOCAL_BATCH_MAX_MESSAGES = 64
 LOCAL_BATCH_FLUSH_BYTES = 256 * 1024
 LOCAL_BATCH_MAX_AGE_SECONDS = 0.05
 LOCAL_BATCH_IDLE_SECONDS = 0.01
+MIN_LOCAL_KEY_BYTES = 32
+MAX_SECRET_BYTES = 4096
+DEFAULT_GATEWAY_HOST = "127.0.0.1"
+
+
+@dataclass(frozen=True)
+class Settings:
+    cloud_url: str
+    cloud_key: str
+    local_key: str
+    host: str
+    port: int
+    max_in_flight: int
+
+
+def read_secret_file(path):
+    """A regular file only this process's user can read, as the server requires."""
+    before = os.lstat(path)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_mode & 0o077
+        or before.st_uid != os.geteuid()
+    ):
+        raise ValueError(f"{path} must be a private regular file owned by this user")
+    with open(path, "rb") as handle:
+        opened = os.fstat(handle.fileno())
+        # The path must still name the inspected file when it is opened.
+        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+            raise ValueError(f"{path} changed while it was opened")
+        data = handle.read(MAX_SECRET_BYTES + 1)
+    if len(data) > MAX_SECRET_BYTES:
+        raise ValueError(f"{path} exceeds {MAX_SECRET_BYTES} bytes")
+    text = data.decode("utf-8")
+    if text.endswith("\n"):
+        text = text[:-1].removesuffix("\r")
+    return text
+
+
+def secret(environ, name):
+    path = environ.get(f"{name}_FILE")
+    value = read_secret_file(path) if path else environ.get(name)
+    if not value or any(ord(c) < 32 for c in value):
+        raise ValueError(f"{name} or {name}_FILE is required")
+    return value
+
+
+def load_settings(environ):
+    """Two credentials: the cloud one never leaves this process, and producers
+    on this host authenticate with a local one the backend does not accept."""
+    cloud_key = secret(environ, "EDGE_API_KEY")
+    local_key = secret(environ, "GATEWAY_LOCAL_KEY")
+    if len(local_key.encode()) < MIN_LOCAL_KEY_BYTES:
+        raise ValueError(
+            f"GATEWAY_LOCAL_KEY needs at least {MIN_LOCAL_KEY_BYTES} bytes"
+        )
+    if hmac.compare_digest(local_key.encode(), cloud_key.encode()):
+        raise ValueError("GATEWAY_LOCAL_KEY must differ from the cloud EDGE_API_KEY")
+    host = environ.get("GATEWAY_HOST", DEFAULT_GATEWAY_HOST)
+    try:
+        loopback = host == "localhost" or ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        loopback = False
+    if not loopback:
+        # The local listener has no TLS: producers must share this host.
+        raise ValueError("GATEWAY_HOST must be a loopback address")
+    try:
+        port = int(environ.get("GATEWAY_PORT", "8001"))
+    except ValueError:
+        port = 0
+    if not 0 < port < 65536:
+        raise ValueError("GATEWAY_PORT must be a TCP port")
+    try:
+        max_in_flight = validate_ack_window(int(environ.get("EDGE_MAX_IN_FLIGHT", "8")))
+    except ValueError:
+        raise ValueError("EDGE_MAX_IN_FLIGHT must be an integer from 1 to 8") from None
+    return Settings(
+        cloud_url=environ.get("SERVER_WS_URL", "wss://api.estaciona.tech/ws/edge"),
+        cloud_key=cloud_key,
+        local_key=local_key,
+        host=host,
+        port=port,
+        max_in_flight=max_in_flight,
+    )
 
 
 def init_db(db_path):
@@ -249,7 +337,7 @@ def is_authorized(headers, expected_key):
     parts = auth.split(" ")
     if len(parts) != 2 or parts[0] != "Bearer":
         return False
-    return parts[1] == expected_key
+    return hmac.compare_digest(parts[1].encode(), expected_key.encode())
 
 
 async def handler(websocket, db_path, metrics_path, expected_key, sync_event):
@@ -580,10 +668,10 @@ async def sync_loop(
 
 
 async def main():
-    import os
     from dotenv import load_dotenv
 
     load_dotenv(os.path.join(os.path.dirname(__file__), "../.env"))
+    settings = load_settings(os.environ)
 
     db_path = "local_fallback.db"
     metrics_path = "metrics.db"
@@ -591,18 +679,8 @@ async def main():
     init_db(db_path)
     init_metrics_db(metrics_path)
 
-    cloud_url = os.environ.get("SERVER_WS_URL", "wss://api.estaciona.tech/ws/edge")
-    api_key = os.environ["EDGE_API_KEY"]
-    port = int(os.environ.get("GATEWAY_PORT", "8001"))
-    try:
-        max_in_flight = validate_ack_window(
-            int(os.environ.get("EDGE_MAX_IN_FLIGHT", "8"))
-        )
-    except ValueError:
-        raise ValueError("EDGE_MAX_IN_FLIGHT must be an integer from 1 to 8") from None
-
     print(
-        f"{datetime.datetime.now(datetime.UTC).strftime('%Y-%m-%d %H:%M:%S')} [INFO] STARTING_GATEWAY port={port}",
+        f"{datetime.datetime.now(datetime.UTC).strftime('%Y-%m-%d %H:%M:%S')} [INFO] STARTING_GATEWAY host={settings.host} port={settings.port}",
         flush=True,
     )
 
@@ -612,17 +690,17 @@ async def main():
         sync_loop(
             db_path,
             metrics_path,
-            cloud_url,
-            api_key,
+            settings.cloud_url,
+            settings.cloud_key,
             sync_event,
-            max_in_flight=max_in_flight,
+            max_in_flight=settings.max_in_flight,
         )
     )
 
     async def ws_handler(websocket, *args, **kwargs):
-        await handler(websocket, db_path, metrics_path, api_key, sync_event)
+        await handler(websocket, db_path, metrics_path, settings.local_key, sync_event)
 
-    async with websockets.serve(ws_handler, "0.0.0.0", port):
+    async with websockets.serve(ws_handler, settings.host, settings.port):
         await asyncio.Future()
 
 

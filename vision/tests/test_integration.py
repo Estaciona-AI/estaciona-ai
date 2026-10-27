@@ -149,7 +149,7 @@ def test_main_emits_initial_transition_and_heartbeat_in_microsecond_order(monkey
     monkeypatch.setattr(
         client.time, "gmtime", lambda: real_gmtime(instant().timestamp())
     )
-    monkeypatch.setattr(client, "EDGE_API_KEY", "disposable")
+    monkeypatch.setattr(client, "GATEWAY_LOCAL_KEY", "disposable")
     monkeypatch.setattr(client, "VIDEO_PATH", "fixture.mp4")
     monkeypatch.setattr(client.sys, "argv", ["client.py"])
     monkeypatch.setattr(

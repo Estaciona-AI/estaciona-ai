@@ -12,6 +12,8 @@ import asyncio
 import glob
 from pathlib import Path
 import hashlib
+from urllib.parse import urlsplit
+from configuration import is_loopback
 from delivery import LocalDelivery, LocalOutbox
 from dotenv import load_dotenv
 
@@ -29,7 +31,8 @@ from occupancy import (
 )
 
 WS_URL = os.environ.get("LOCAL_WS_URL", "ws://localhost:8001/ws/edge")
-EDGE_API_KEY = os.environ.get("EDGE_API_KEY")
+# The gateway's local credential; the cloud credential never reaches producers.
+GATEWAY_LOCAL_KEY = os.environ.get("GATEWAY_LOCAL_KEY")
 
 MODEL_PATH = os.environ.get("VISION_MODEL_PATH", "models/rtdetr-hgnetv2-l.onnx")
 VIDEO_PATH = os.environ.get("VISION_STREAM_URL")
@@ -79,15 +82,20 @@ async def main(argv=None):
         help="Process without OpenCV display or overlays",
     )
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
-    if not EDGE_API_KEY:
-        raise RuntimeError("EDGE_API_KEY is required")
+    if not GATEWAY_LOCAL_KEY:
+        raise RuntimeError("GATEWAY_LOCAL_KEY is required")
+    gateway = urlsplit(WS_URL)
+    if gateway.scheme != "wss" and not (
+        gateway.scheme == "ws" and is_loopback(gateway.hostname)
+    ):
+        raise RuntimeError("LOCAL_WS_URL must be wss:// or ws:// on this host")
     if not VIDEO_PATH:
         raise RuntimeError(
             "VISION_STREAM_URL is required: video file, directory or RTSP URL"
         )
     spots_path = args.spots_path
 
-    headers = {"Authorization": f"Bearer {EDGE_API_KEY}"}
+    headers = {"Authorization": f"Bearer {GATEWAY_LOCAL_KEY}"}
     websocket = None
     cap = None
     display = None

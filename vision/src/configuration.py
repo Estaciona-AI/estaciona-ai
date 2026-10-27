@@ -4,6 +4,7 @@
 """Validated local profiles. Installation coordinates are not authorization."""
 
 from dataclasses import dataclass
+import ipaddress
 import json
 import math
 import os
@@ -88,6 +89,13 @@ def _uuid(value):
     except ValueError, TypeError, AttributeError:
         pass
     raise ConfigurationError("invalid installation identity")
+
+
+def is_loopback(host):
+    try:
+        return host == "localhost" or ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 @dataclass(frozen=True)
@@ -306,6 +314,8 @@ def load_configuration(path) -> RuntimeConfiguration:
             and not url.fragment
             and url.port != 0
         )
+        # Without TLS the gateway credential may only travel inside this host.
+        valid_url = valid_url and (url.scheme == "wss" or is_loopback(url.hostname))
     except ValueError, TypeError, AttributeError:
         valid_url = False
     if not valid_url:

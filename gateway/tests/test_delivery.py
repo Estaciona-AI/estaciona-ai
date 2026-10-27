@@ -593,12 +593,14 @@ def test_main_rejects_invalid_window_before_starting_tasks(
     tmp_path, monkeypatch, value
 ):
     monkeypatch.setenv("EDGE_API_KEY", "disposable-test-key")
+    monkeypatch.setenv("GATEWAY_LOCAL_KEY", "l" * 32)
     monkeypatch.setenv("EDGE_MAX_IN_FLIGHT", value)
     with (
-        patch("gateway.init_db"),
+        patch("gateway.init_db") as init_db,
         patch("gateway.init_metrics_db"),
         patch("asyncio.create_task") as start,
     ):
         with pytest.raises(ValueError, match="EDGE_MAX_IN_FLIGHT"):
             asyncio.run(gateway.main())
         start.assert_not_called()
+        init_db.assert_not_called()

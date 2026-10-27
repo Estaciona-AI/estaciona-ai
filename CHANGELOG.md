@@ -51,6 +51,14 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
   from `WS_ALLOWED_ORIGINS`, which now also drives CORS. `POST /auth/logout`
   answers 200 with the provider's `end_session_url`. Contract 1.4.0 removes the
   login and registration operations.
+- **The gateway has two credentials.** Producers (vision) authenticate with a
+  new `GATEWAY_LOCAL_KEY` of at least 32 bytes; the gateway refuses the cloud
+  `EDGE_API_KEY` on its local listener and refuses to start when both are
+  equal. Point each vision profile's `credential_env` (and the legacy client)
+  to the local key, and move the cloud key to a private file named by
+  `EDGE_API_KEY_FILE`. The gateway listens on `127.0.0.1` by default
+  (`GATEWAY_HOST` accepts only loopback addresses), and vision refuses a
+  `ws://` gateway URL off its own host.
 - **Vision checks the model file before running it.** An ONNX model must have
   the `.provenance.json` written by `tools/export_rtdetr.py` next to it, and
   its SHA-256 must match. To run another model on purpose, set the detector
@@ -154,6 +162,10 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
 
 ### Security
 
+- A compromised producer or a capture on the local network no longer
+  exposes the credential that authenticates the gateway to the server: the
+  two keys are separate, the listener is loopback-only and compares keys in
+  constant time.
 - No installation database stores e-mail addresses or password hashes any
   more. Sessions are 8-hour host-only, HttpOnly cookies; cookie writes require
   an allowed `Origin`, and CORS allows only the installation's apps, with
