@@ -123,6 +123,13 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
   `ML_DATABASE_URL`. `ML_DATABASE_URL` is now required by the worker and must
   name the read-only role; it no longer falls back to `DATABASE_URL`.
 
+- Secret files must also be owned by the user the server runs as; a private
+  file of another account is refused.
+- The installation Docker Compose file takes `ESTACIONA_INSTANCE` and the
+  published ports (`DB_HOST_PORT`, `SERVER_HOST_PORT`, `HTTP_PORT`,
+  `HTTPS_PORT`), so two installations can run on one host. The defaults keep
+  the previous container, volume and port names.
+
 ### Removed
 
 - Local registration, password login and the `--create-admin` command, with
