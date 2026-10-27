@@ -19,8 +19,10 @@ zone.
 
 ## 7.2 Continuous integration
 
-Every push and pull request runs the following workflows; the dependency
-advisories also run on a schedule.
+The main CI workflow runs on configured push branches and pull requests to
+`develop` or `main`; dependency advisories have their own event filters and
+scheduled runs. The workflow files in [`.github/workflows/`](../.github/workflows)
+define the exact triggers.
 
 | Workflow | Gates |
 |---|---|
@@ -39,24 +41,35 @@ Third-party actions are pinned by commit digest, lockfiles are used with
 ## 7.3 Mutation testing
 
 Mutation testing audits the strength of the suites by introducing small faults
-and checking that a test fails [8, 9]. The campaign started on 2026-10-27
-covered the vision service, the gateway and the server's route planner; the
-server's security modules were in progress. Surviving mutants were triaged:
-real gaps received tests (#215, #216 and follow-ups) and equivalent mutants
-were recorded with their reason. Mutation results are a measure of test adequacy at a commit, not a
-coverage guarantee.
+and checking that a test fails [[8, 9]](references.md). The campaign started on
+2026-10-27 produced focused regression tests for vision (#215), routing (#216),
+and gateway and forecast (#217). These merged tests are included in F-11.
+The campaign was scoped by module; it does not establish that every module or
+surviving mutant has been evaluated. Mutation results describe test adequacy
+at a commit, not exhaustive coverage or an absence of defects.
 
 ## 7.4 Verification snapshot
 
-Local results on 2026-10-27 at `develop` `78a14eb`:
+The following executions were verified on GitHub Actions on 2026-10-27 at
+`develop` `9036d10` ([CI run 40567080230](https://github.com/Estaciona-AI/estaciona-ai/actions/runs/40567080230)).
+They are CI results, not a new local execution or a capacity benchmark.
 
-| Suite | Result | Conditions |
-|---|---|---|
-| Server (`cargo test --all-features`) | 390 passed | Disposable PostgreSQL test database |
-| Vision (`pytest`, without the RTSP integration test) | 407 passed | As in Python Vision CI |
-| Gateway and forecast (`pytest`) | 179 passed, 170 skipped | No server binary or database: integration tests skipped |
+| Suite and package directory | Command | Result | Conditions |
+|---|---|---|---|
+| Server (`server/`) | `cargo test --locked --all-features` | 390 passed | PostgreSQL service; isolated test databases |
+| Vision (`vision/`) | `uv run --locked pytest --ignore=tests/test_rtsp_lab_integration.py` | 407 passed | Dedicated RTSP case executed separately |
+| Gateway and forecast (`gateway/`) | `uv run --locked pytest --junitxml=test-results/gateway.xml` | 383 passed | Server binary and PostgreSQL available; integration required |
+| Contracts (`shared/`) | `uv run --locked pytest --junitxml=test-results/contracts.xml` | 36 passed | Exported schemas and compatibility checks |
+| Identity tools (`tools/identity/`) | `python3 -m unittest -v test_realm test_provision` | 17 passed | Synthetic provisioning and realm fixtures |
+| RTSP laboratory (`vision/`) | `uv run --locked pytest -q tests/test_rtsp_lab_integration.py` | 1 passed | Docker, pinned publishers and recovery scenario |
 
-For the same commit, the CI, Rust dependency security and Python dependency
-security workflows passed on GitHub Actions, including the gateway integration
-tests and the RTSP laboratory. Update this table
-with each release.
+The main run also passed its formatting, lint, build, license and contract
+compatibility gates. The separate
+[Rust dependency security run](https://github.com/Estaciona-AI/estaciona-ai/actions/runs/40567080253)
+and [Python dependency security run](https://github.com/Estaciona-AI/estaciona-ai/actions/runs/40567080472)
+passed at the same commit. These results concern the committed dependencies
+and checked paths; they do not certify an installation.
+
+F-10 retains the earlier local snapshot at `78a14eb`, including its integration
+skips. It is not the current suite count. Update this section before a release,
+and whenever a changed verification result is used to support a claim.
