@@ -351,6 +351,18 @@ def test_forecast_database_on_a_declared_private_network(monkeypatch):
     create.assert_not_called()
 
 
+def test_forecast_engine_normalizes_the_scheme_and_reads_the_network(monkeypatch):
+    monkeypatch.setenv(
+        "ML_DATABASE_URL", "postgres://reader@db/postgres_history?sslmode=disable"
+    )
+    monkeypatch.setenv("ML_DATABASE_NETWORK", "private")
+    with patch.object(train, "create_engine") as create:
+        train.get_db_engine()
+    create.assert_called_once_with(
+        "postgresql://reader@db/postgres_history?sslmode=disable"
+    )
+
+
 def test_without_an_issued_forecast_nothing_is_scored():
     evaluation = predict(forecast_predictor())["evaluation"]
     assert evaluation["status"] == "unavailable"
