@@ -229,13 +229,6 @@ def save_event(db_path, message_text):
     return event_uuid
 
 
-def get_unsynced_events(db_path):
-    with closing(sqlite3.connect(db_path)) as conn:
-        return conn.execute(
-            "SELECT id, message_text FROM fallback_events WHERE synced = 0 ORDER BY id ASC"
-        ).fetchall()
-
-
 def pending_deliveries(db_path, *, after_id=0, limit=None):
     with closing(sqlite3.connect(db_path)) as conn:
         return conn.execute(
@@ -243,16 +236,6 @@ def pending_deliveries(db_path, *, after_id=0, limit=None):
             "WHERE synced = 0 AND id > ? ORDER BY id LIMIT ?",
             (after_id, -1 if limit is None else limit),
         ).fetchall()
-
-
-def mark_events_as_synced(db_path, event_ids):
-    if not event_ids:
-        return
-    with closing(sqlite3.connect(db_path)) as conn, conn:
-        conn.executemany(
-            "UPDATE fallback_events SET synced = 1 WHERE id = ?",
-            [(i,) for i in event_ids],
-        )
 
 
 def _delete_batches(db_path, statement, cutoff):
@@ -326,6 +309,12 @@ async def retention_loop(db_path, metrics_path, retention=Retention()):
         await asyncio.sleep(RETENTION_INTERVAL_SECONDS)
 
 
+# One statement for live traffic and for seeding: they cannot drift apart.
+METRIC_INSERT = """INSERT INTO metrics (
+    edge_id, spot_id, status, detection_ts, edge_sent_ts, gateway_received_ts, event_uuid
+) VALUES (?, ?, ?, ?, ?, ?, ?)"""
+
+
 def save_metric(
     db_path,
     edge_id,
@@ -338,11 +327,7 @@ def save_metric(
 ):
     with closing(sqlite3.connect(db_path)) as conn, conn:
         conn.execute(
-            """
-            INSERT INTO metrics (edge_id, spot_id, status, detection_ts,
-                                 edge_sent_ts, gateway_received_ts, event_uuid)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
+            METRIC_INSERT,
             (
                 edge_id,
                 spot_id,
@@ -634,12 +619,7 @@ async def handler(
 
             if fresh_metrics:
                 with metrics_conn:
-                    metrics_conn.executemany(
-                        """INSERT INTO metrics (
-                            edge_id, spot_id, status, detection_ts, edge_sent_ts, gateway_received_ts, event_uuid
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                        fresh_metrics,
-                    )
+                    metrics_conn.executemany(METRIC_INSERT, fresh_metrics)
 
             if disconnected:
                 break

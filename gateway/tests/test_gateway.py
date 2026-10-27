@@ -11,8 +11,8 @@ from gateway import (
     init_db,
     init_metrics_db,
     save_event,
-    get_unsynced_events,
-    mark_events_as_synced,
+    finish_event,
+    pending_deliveries,
     save_metric,
     update_metrics_forwarded_batch,
     is_authorized,
@@ -47,26 +47,28 @@ def test_init_metrics_db(tmp_path):
     conn.close()
 
 
-def test_save_and_get_unsynced_events(tmp_path):
+def test_saved_events_are_pending_in_order_with_their_own_uuid(tmp_path):
     db_path = str(tmp_path / "test_fallback.db")
     init_db(db_path)
-    save_event(db_path, "event_data_1")
-    save_event(db_path, "event_data_2")
-    events = get_unsynced_events(db_path)
-    assert len(events) == 2
-    assert events[0][1] == "event_data_1"
-    assert events[1][1] == "event_data_2"
+    first = save_event(db_path, "event_data_1")
+    second = save_event(db_path, "event_data_2")
+    events = pending_deliveries(db_path)
+    assert [(uuid, text) for _, uuid, text in events] == [
+        (first, "event_data_1"),
+        (second, "event_data_2"),
+    ]
 
 
-def test_mark_events_as_synced(tmp_path):
+def test_a_finished_event_leaves_the_queue_with_its_outcome(tmp_path):
     db_path = str(tmp_path / "test_fallback.db")
     init_db(db_path)
-    save_event(db_path, "event_data_1")
-    events = get_unsynced_events(db_path)
-    event_id = events[0][0]
-    mark_events_as_synced(db_path, [event_id])
-    remaining = get_unsynced_events(db_path)
-    assert len(remaining) == 0
+    event = save_event(db_path, "event_data_1")
+    finish_event(db_path, event, "rejected", "invalid_local_payload")
+    assert pending_deliveries(db_path) == []
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute(
+            "SELECT synced, delivery_result, delivery_reason FROM fallback_events"
+        ).fetchone() == (1, "rejected", "invalid_local_payload")
 
 
 def test_save_and_update_metrics(tmp_path):
@@ -136,9 +138,9 @@ def test_handler_auth_success(tmp_path):
         sync_event = asyncio.Event()
         await handler(mock_ws, db_path, metrics_path, "secret_key", sync_event)
 
-        events = get_unsynced_events(db_path)
+        events = pending_deliveries(db_path)
         assert len(events) == 1
-        payload = json.loads(events[0][1])
+        payload = json.loads(events[0][2])
         assert "gateway_received_at" in payload
         assert sync_event.is_set()
 
@@ -159,7 +161,7 @@ def test_handler_auth_fail(tmp_path):
         await handler(mock_ws, db_path, metrics_path, "secret_key", sync_event)
 
         mock_ws.close.assert_called_once()
-        assert len(get_unsynced_events(db_path)) == 0
+        assert len(pending_deliveries(db_path)) == 0
 
     asyncio.run(run())
 
@@ -177,7 +179,7 @@ def test_malformed_frame_does_not_discard_valid_batch(tmp_path):
 
         await handler(mock_ws, db_path, metrics_path, "secret_key", asyncio.Event())
 
-        assert len(get_unsynced_events(db_path)) == 2
+        assert len(pending_deliveries(db_path)) == 2
 
     asyncio.run(run())
 
@@ -258,7 +260,7 @@ def test_sync_loop_sends_to_cloud(tmp_path):
             assert sent_payload["payload"] == payload
             assert "gateway_forwarded_at" in sent_payload
 
-            assert len(get_unsynced_events(db_path)) == 0
+            assert len(pending_deliveries(db_path)) == 0
 
             conn = sqlite3.connect(metrics_path)
             cursor = conn.cursor()
@@ -324,7 +326,7 @@ def test_send_without_cloud_ack_preserves_pending_event(tmp_path):
                 except asyncio.CancelledError:
                     pass
 
-        assert len(get_unsynced_events(db_path)) == 1
+        assert len(pending_deliveries(db_path)) == 1
 
     asyncio.run(run())
 
@@ -355,7 +357,7 @@ def test_continuous_input_commits_without_waiting_for_idle(tmp_path):
         )
         try:
             await asyncio.wait_for(paused.wait(), 2)
-            assert len(get_unsynced_events(db_path)) == 64
+            assert len(pending_deliveries(db_path)) == 64
             assert sync_event.is_set()
         finally:
             task.cancel()
@@ -382,7 +384,7 @@ def test_large_frames_flush_before_next_receive(tmp_path):
             if reads == 1:
                 return frame
             if reads == 2:
-                persisted_before_second_receive = len(get_unsynced_events(db_path)) == 1
+                persisted_before_second_receive = len(pending_deliveries(db_path)) == 1
             raise RuntimeError("closed")
 
         ws.recv.side_effect = recv
@@ -413,7 +415,7 @@ def test_continuous_slow_input_has_a_batch_deadline(tmp_path):
         )
         try:
             await asyncio.wait_for(sync_event.wait(), 0.20)
-            assert get_unsynced_events(db_path)
+            assert pending_deliveries(db_path)
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
@@ -452,9 +454,9 @@ def test_local_delivery_replay_has_one_persisted_event_and_ack_after_commit(tmp_
                 message = json.loads(text)
                 if message["type"] == "LOCAL_ACK":
                     # A separate connection must already see the event.
-                    rows = get_unsynced_events(db_path)
+                    rows = pending_deliveries(db_path)
                     assert len(rows) == 1
-                    assert json.loads(rows[0][1])["spot_id"] == "A-01"
+                    assert json.loads(rows[0][2])["spot_id"] == "A-01"
                     acks.append(message)
 
             ws.send.side_effect = send
@@ -501,6 +503,6 @@ def test_local_uuid_conflict_cannot_replace_persisted_payload(tmp_path):
             await handler(ws, db, metrics, "key", asyncio.Event())
             ack = json.loads(ws.send.call_args.args[0])
             assert ack["outcome"] == ("persisted" if status == "free" else "rejected")
-        assert json.loads(get_unsynced_events(db)[0][1])["status"] == "free"
+        assert json.loads(pending_deliveries(db)[0][2])["status"] == "free"
 
     asyncio.run(run())
