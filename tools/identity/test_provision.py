@@ -105,6 +105,9 @@ class FakeKeycloak:
                 [{"id": u} for u, c in self.clients.items() if c["clientId"] == wanted],
                 None,
             )
+        match = re.fullmatch(r"/roles/([^/]+)", path)
+        if method == "GET" and match:
+            return 200, {"id": f"realm-role-{match[1]}", "name": match[1]}, None
         match = re.fullmatch(r"/clients/([^/]+)/roles/([^/]+)", path)
         if method == "GET" and match:
             return 200, {"id": f"role-{match[2]}", "name": match[2]}, None
@@ -275,9 +278,33 @@ class ProvisionTest(unittest.TestCase):
         )
         mapping = [r for r in self.fake.requests if "role-mappings" in r[1]]
         self.assertEqual(mapping[0][3][0]["name"], "admin")
+        self.assertEqual(self.realm_roles(), [["estaciona-mfa"]])
         self.assertFalse(
             any("execute-actions-email" in r[1] for r in self.fake.requests)
         )
+
+    def realm_roles(self):
+        return [
+            [role["name"] for role in r[3]]
+            for r in self.fake.requests
+            if r[0] == "POST" and r[1].endswith("/role-mappings/realm")
+        ]
+
+    def test_administrators_and_only_they_need_a_second_factor(self):
+        self.create(Path(self.directory) / "client.secret")
+        self.assertEqual(self.invite("--no-email")[0], 0)  # role user
+        self.assertEqual(self.realm_roles(), [])
+        code, _, _ = self.run_tool(
+            "user-grant",
+            "--email",
+            "pessoa@example.invalid",
+            "--installation",
+            "uniube-centro",
+            "--role",
+            "admin",
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(self.realm_roles(), [["estaciona-mfa"]])
 
     def test_a_known_email_is_not_invited_twice(self):
         self.create(Path(self.directory) / "client.secret")

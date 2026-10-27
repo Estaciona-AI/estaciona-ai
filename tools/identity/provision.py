@@ -42,6 +42,8 @@ RESERVED_CLIENTS = {
     "security-admin-console",
 }
 INVITE_ACTIONS = ["VERIFY_EMAIL", "UPDATE_PASSWORD"]
+# Realm role whose holders also give a one-time code (realm browser flow).
+MFA_ROLE = "estaciona-mfa"
 MAX_SECRET_BYTES = 4096
 TIMEOUT_SECONDS = 15
 
@@ -324,6 +326,7 @@ def invite_user(kc: Keycloak, args) -> dict:
             f"/users/{user['id']}/role-mappings/clients/{uuid}",
             body=kc.roles(uuid, [args.role]),
         )
+        require_second_factor(kc, user["id"], args.role)
         if password is not None:
             kc.call(
                 "PUT",
@@ -346,6 +349,18 @@ def invite_user(kc: Keycloak, args) -> dict:
     }
 
 
+def require_second_factor(kc: Keycloak, user_id: str, role: str) -> None:
+    """Installation administrators sign in with a password and a one-time code;
+    the first sign-in asks them to set the code up."""
+    if role != "admin":
+        return
+    kc.call(
+        "POST",
+        f"/users/{user_id}/role-mappings/realm",
+        body=[kc.call("GET", f"/roles/{MFA_ROLE}")],
+    )
+
+
 def grant_access(kc: Keycloak, args) -> dict:
     uuid = kc.client_uuid(args.installation)
     user = kc.user_by_email(args.email)
@@ -356,6 +371,7 @@ def grant_access(kc: Keycloak, args) -> dict:
         f"/users/{user['id']}/role-mappings/clients/{uuid}",
         body=kc.roles(uuid, [args.role]),
     )
+    require_second_factor(kc, user["id"], args.role)
     return {
         "username": user["username"],
         "installation_client": args.installation,

@@ -4,7 +4,7 @@
 #   ./env/server.env       server settings that are not secrets
 # Secrets are files in SECRETS_DIR, mounted only where they are used:
 #   database_url            runtime role from infra/app-role.sql
-#   migration_database_url  owner role, used only by the one-shot migrate service
+#   migration_database_url  estaciona_owner (infra/db-init), used only by migrate
 #   jwt_secret              at least 32 random bytes
 #   plate_pepper            at least 32 random bytes
 #   personal_data_keys      see .env.example; back it up apart from the database
@@ -40,6 +40,8 @@ services:
       - "127.0.0.1:${DB_HOST_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      # Creates the non-superuser owner when the volume is new.
+      - ./db-init:/docker-entrypoint-initdb.d:ro
     networks:
       - estaciona_ai
     healthcheck:

@@ -257,16 +257,17 @@ pub async fn authenticated_user(
     Ok(authenticated_session(headers, secret, pool).await?.user_id)
 }
 
+/// The administrator acting, for the audit trail.
 pub async fn require_admin(
     headers: &HeaderMap,
     secret: &str,
     pool: &PgPool,
-) -> Result<(), AuthError> {
+) -> Result<Uuid, AuthError> {
     let session = authenticated_session(headers, secret, pool).await?;
     if session.role != "admin" {
         return Err((StatusCode::FORBIDDEN, "Admin required".to_string()));
     }
-    Ok(())
+    Ok(session.user_id)
 }
 
 #[cfg(test)]

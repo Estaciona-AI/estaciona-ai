@@ -16,6 +16,7 @@ const OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const MIGRATION_TIMEOUT: Duration = Duration::from_secs(300);
 // Identifiers are audited constants, never derived from an input descriptor.
 const BUSINESS_TABLES: &[&str] = &[
+    "admin_audit_log",
     "auth_sessions",
     "edge_camera_grants",
     "edge_camera_spots",
@@ -64,6 +65,7 @@ pub enum StoreError {
     ExistingData,
     DatabaseConfirmationMismatch,
     UnsupportedSchema,
+    PrivilegedRuntimeRole,
 }
 
 impl fmt::Display for StoreError {
@@ -87,6 +89,10 @@ impl fmt::Display for StoreError {
             }
             Self::UnsupportedSchema => {
                 "Application table inventory does not match the supported schema"
+            }
+            Self::PrivilegedRuntimeRole => {
+                "The server's database role can change the schema or bypass privileges; \
+                 connect with the role from infra/app-role.sql"
             }
         })
     }
@@ -356,6 +362,41 @@ pub(crate) async fn require_migrated(pool: &PgPool) -> Result<(), StoreError> {
     } else {
         Err(StoreError::MigrationPending)
     }
+}
+
+/// Powers the running service must not have: it only reads and writes rows.
+pub async fn excess_privileges(pool: &PgPool) -> Result<Vec<&'static str>, StoreError> {
+    let (superuser, create_db, create_role, bypass_rls, create_in_schema, owns_tables): (
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+    ) = timeout(
+        OPERATION_TIMEOUT,
+        sqlx::query_as(
+            "SELECT r.rolsuper, r.rolcreatedb, r.rolcreaterole, r.rolbypassrls, \
+             has_schema_privilege('public', 'CREATE'), \
+             EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+                    WHERE n.nspname = 'public' AND c.relowner = r.oid) \
+             FROM pg_roles r WHERE r.rolname = current_user",
+        )
+        .fetch_one(pool),
+    )
+    .await
+    .map_err(|_| StoreError::Timeout)??;
+    Ok([
+        (superuser, "superuser"),
+        (create_db, "create databases"),
+        (create_role, "create roles"),
+        (bypass_rls, "bypass row security"),
+        (create_in_schema, "create objects in schema public"),
+        (owns_tables, "own application tables"),
+    ]
+    .into_iter()
+    .filter_map(|(held, name)| held.then_some(name))
+    .collect())
 }
 
 /// A cancelled migrator must not return a session advisory lock to the pool.
