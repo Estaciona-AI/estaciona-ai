@@ -181,6 +181,11 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
 
 ### Security
 
+- WebSocket handshakes no longer compete freely for the database pool: at most
+  `WS_HANDSHAKE_CONCURRENCY` (2) authenticate at once and the rest get 503
+  with `Retry-After` before any query. Open sockets are capped per kind (edge
+  64, app 2000, dashboard 64) and messages are limited to 64 KiB (edge) and
+  16 KiB (app, dashboard).
 - A compromised producer or a capture on the local network no longer
   exposes the credential that authenticates the gateway to the server: the
   two keys are separate, the listener is loopback-only and compares keys in
