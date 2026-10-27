@@ -215,7 +215,7 @@ mod tests {
     }
 
     #[test]
-    fn r11_actual_generated_names_are_rejected() {
+    fn actual_generated_names_are_rejected() {
         for id in ["cam-01", "path_node_1", "path_node_7"] {
             let site = site(id, 1.0);
             assert!(matches!(
@@ -227,7 +227,7 @@ mod tests {
     }
 
     #[test]
-    fn r11_only_actual_names_collide_not_entire_prefixes() {
+    fn only_actual_names_collide_not_entire_prefixes() {
         for id in [
             "path_node_0",
             "path_node_01",
@@ -243,7 +243,7 @@ mod tests {
     }
 
     #[test]
-    fn r11_repeated_points_do_not_reserve_nonexistent_waypoints() {
+    fn repeated_points_do_not_reserve_nonexistent_waypoints() {
         let site = site("path_node_1", 0.0);
         validate_names(&site.parkings, &site.spots).unwrap();
         assert_eq!(
@@ -255,7 +255,7 @@ mod tests {
     }
 
     #[test]
-    fn r11_identifiers_are_local_to_each_graph() {
+    fn identifiers_are_local_to_each_graph() {
         let first = build(&site("shared-spot", 1.0)).unwrap();
         let second = build(&site("shared-spot", 2.0)).unwrap();
         assert_eq!(first.calculate_cost("cam-01", "shared-spot"), Some(1000));
@@ -263,7 +263,7 @@ mod tests {
     }
 
     #[test]
-    fn r11_unrepresentable_layout_is_rejected_without_expansion() {
+    fn unrepresentable_layout_is_rejected_without_expansion() {
         let site = site("spot", 1e300);
         assert!(matches!(
             validate_names(&site.parkings, &site.spots),

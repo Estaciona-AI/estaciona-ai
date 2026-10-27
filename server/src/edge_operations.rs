@@ -624,27 +624,27 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "./migrations")]
-    async fn r08_arrival_user_lookup_failure_has_no_effects(pool: PgPool) {
+    async fn arrival_user_lookup_failure_has_no_effects(pool: PgPool) {
         assert_arrival_database_failure(pool, "user").await;
     }
 
     #[sqlx::test(migrations = "./migrations")]
-    async fn r08_arrival_reservation_lookup_failure_preserves_existing_claim(pool: PgPool) {
+    async fn arrival_reservation_lookup_failure_preserves_existing_claim(pool: PgPool) {
         assert_arrival_database_failure(pool, "reservation").await;
     }
 
     #[sqlx::test(migrations = "./migrations")]
-    async fn r08_arrival_grant_lookup_failure_preserves_existing_claim(pool: PgPool) {
+    async fn arrival_grant_lookup_failure_preserves_existing_claim(pool: PgPool) {
         assert_arrival_database_failure(pool, "grant").await;
     }
 
     #[sqlx::test(migrations = "./migrations")]
-    async fn r08_arrival_free_spots_lookup_failure_has_no_effects(pool: PgPool) {
+    async fn arrival_free_spots_lookup_failure_has_no_effects(pool: PgPool) {
         assert_arrival_database_failure(pool, "free").await;
     }
 
     #[sqlx::test(migrations = "./migrations")]
-    async fn r09_full_private_queue_does_not_undo_committed_arrival_or_its_broadcast(pool: PgPool) {
+    async fn full_private_queue_does_not_undo_committed_arrival_or_its_broadcast(pool: PgPool) {
         let mut f = fixture(pool).await;
         let session = f
             .state
@@ -695,7 +695,7 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "./migrations")]
-    async fn r12_disabled_lpr_is_inert_even_for_an_ungranted_camera(pool: PgPool) {
+    async fn disabled_lpr_is_inert_even_for_an_ungranted_camera(pool: PgPool) {
         let mut f = fixture(pool).await;
         Arc::get_mut(&mut f.state).unwrap().installation.lpr_mode = crate::lpr::LprMode::Disabled;
         for camera in ["cam-01", "ungranted-camera"] {
@@ -717,7 +717,7 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "./migrations")]
-    async fn r12_pending_vehicle_does_not_identify_the_declaring_account(pool: PgPool) {
+    async fn pending_vehicle_does_not_identify_the_declaring_account(pool: PgPool) {
         let mut f = fixture(pool).await;
         sqlx::query("UPDATE vehicle_bindings SET status='pending'")
             .execute(f.state.installation.pool())
@@ -761,7 +761,7 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "./migrations")]
-    async fn r02b_path_receipt_restart_and_map_revision_are_consistent(pool: PgPool) {
+    async fn path_receipt_restart_and_map_revision_are_consistent(pool: PgPool) {
         let f = fixture(pool).await;
         grant_projections(&f).await;
         let id = Uuid::new_v4();
@@ -815,7 +815,7 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "./migrations")]
-    async fn r02b_receipt_failure_rolls_back_projection_before_publication(pool: PgPool) {
+    async fn receipt_failure_rolls_back_projection_before_publication(pool: PgPool) {
         let f = fixture(pool).await;
         grant_projections(&f).await;
         sqlx::raw_sql("CREATE FUNCTION fail_receipt() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected receipt failure'; END $$; CREATE TRIGGER fail_receipt BEFORE UPDATE ON edge_event_receipts FOR EACH ROW EXECUTE FUNCTION fail_receipt();")
@@ -853,7 +853,7 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "./migrations")]
-    async fn r02b_forecast_survives_restart_without_republishing_duplicates(pool: PgPool) {
+    async fn forecast_survives_restart_without_republishing_duplicates(pool: PgPool) {
         let mut f = fixture(pool).await;
         grant_projections(&f).await;
         let id = Uuid::new_v4();
@@ -877,7 +877,7 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "./migrations")]
-    async fn r02b_concurrent_paths_project_the_last_committed_value(pool: PgPool) {
+    async fn concurrent_paths_project_the_last_committed_value(pool: PgPool) {
         let f = fixture(pool).await;
         grant_projections(&f).await;
         let (a, b) = tokio::join!(
@@ -919,7 +919,7 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "./migrations")]
-    async fn r02b_disabled_lpr_is_explicit_and_does_not_create_reservations(pool: PgPool) {
+    async fn disabled_lpr_is_explicit_and_does_not_create_reservations(pool: PgPool) {
         let mut f = fixture(pool).await;
         Arc::get_mut(&mut f.state).unwrap().installation.lpr_mode = crate::lpr::LprMode::Disabled;
         let event = serde_json::json!({"type":"CAR_DETECTED", "plate":"ABC1D23", "camera_id":"cam-01", "timestamp":"2026-10-18T00:00:00Z"});
@@ -945,7 +945,7 @@ mod tests {
         assert_eq!(count, 0);
     }
     #[sqlx::test(migrations = "./migrations")]
-    async fn r02b_forecast_publication_cannot_overtake_an_earlier_commit(pool: PgPool) {
+    async fn forecast_publication_cannot_overtake_an_earlier_commit(pool: PgPool) {
         let f = fixture(pool).await;
         grant_projections(&f).await;
         let mut first_tx = edge_auth::begin_authorized(f.state.installation.pool(), &f.principal)

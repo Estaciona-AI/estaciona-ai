@@ -452,7 +452,7 @@ mod tests {
         }
     }
     #[sqlx::test(migrations = "./migrations")]
-    async fn r03b_signed_but_unregistered_session_is_not_authorization(pool: PgPool) {
+    async fn signed_but_unregistered_session_is_not_authorization(pool: PgPool) {
         let user = Uuid::new_v4();
         sqlx::query("INSERT INTO users (id, role) VALUES ($1, 'user')")
             .bind(user)

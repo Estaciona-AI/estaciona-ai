@@ -323,7 +323,7 @@ mod tests {
     }
 
     #[test]
-    fn r10_replacement_preserves_the_previous_file_inode() {
+    fn replacement_preserves_the_previous_file_inode() {
         let fixture = Fixture::new();
         fixture.seed();
         let old_path = fixture.0.join("previous-config.json");
@@ -351,7 +351,7 @@ mod tests {
     }
 
     #[test]
-    fn r10_partial_write_failure_keeps_config_and_cleans_temporary_file() {
+    fn partial_write_failure_keeps_config_and_cleans_temporary_file() {
         let fixture = Fixture::new();
         fixture.seed();
         let original = std::fs::read(fixture.0.join("config.json")).unwrap();
@@ -368,7 +368,7 @@ mod tests {
     }
 
     #[test]
-    fn r10_readers_keep_complete_config_until_publication() {
+    fn readers_keep_complete_config_until_publication() {
         let fixture = Fixture::new();
         fixture.seed();
         let original = std::fs::read(fixture.0.join("config.json")).unwrap();
@@ -386,7 +386,7 @@ mod tests {
     }
 
     #[test]
-    fn r10_rename_failure_cleans_temporary_file() {
+    fn rename_failure_cleans_temporary_file() {
         let fixture = Fixture::new();
         std::fs::create_dir(fixture.0.join("config.json")).unwrap();
         let result = replace_config_file(&fixture.0, |file| file.write_all(b"[]"));
@@ -396,7 +396,7 @@ mod tests {
     }
 
     #[test]
-    fn r10_writer_panic_keeps_config_and_cleans_temporary_file() {
+    fn writer_panic_keeps_config_and_cleans_temporary_file() {
         let fixture = Fixture::new();
         fixture.seed();
         let original = std::fs::read(fixture.0.join("config.json")).unwrap();
@@ -416,7 +416,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn r10_atomic_replacement_preserves_existing_file_permissions() {
+    fn atomic_replacement_preserves_existing_file_permissions() {
         use std::os::unix::fs::PermissionsExt;
         let fixture = Fixture::new();
         fixture.seed();
@@ -430,7 +430,7 @@ mod tests {
     }
 
     #[test]
-    fn r11_loading_rejects_collisions_with_generated_navigation_names() {
+    fn loading_rejects_collisions_with_generated_navigation_names() {
         let fixture = Fixture::new();
         fixture.seed();
         for id in ["cam-01", "path_node_1"] {
@@ -447,7 +447,7 @@ mod tests {
     }
 
     #[test]
-    fn r11_saving_rejects_new_collision_without_replacing_the_valid_config() {
+    fn saving_rejects_new_collision_without_replacing_the_valid_config() {
         let fixture = Fixture::new();
         fixture.seed();
         fixture.write(

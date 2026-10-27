@@ -262,7 +262,7 @@ async fn edge_registry_reversal_preserves_spots_and_allows_reapplication(
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn r02b_projection_storage_exists_and_enforces_single_forecast(pool: PgPool) {
+async fn projection_storage_exists_and_enforces_single_forecast(pool: PgPool) {
     let exists: bool = sqlx::query_scalar("SELECT to_regclass('edge_path_state') IS NOT NULL AND to_regclass('edge_forecast_state') IS NOT NULL")
         .fetch_one(&pool).await.unwrap();
     assert!(exists, "durable projections must survive process restart");

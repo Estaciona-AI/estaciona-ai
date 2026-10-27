@@ -181,7 +181,7 @@ impl Fixture {
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn r03_demoted_admin_cannot_mutate_a_spot(pool: PgPool) -> Result<(), sqlx::Error> {
+async fn demoted_admin_cannot_mutate_a_spot(pool: PgPool) -> Result<(), sqlx::Error> {
     let fixture = Fixture::new(pool).await?;
     let headers = fixture.headers(fixture.admin, "admin").await;
     sqlx::query("UPDATE users SET role = 'user' WHERE id = $1")
@@ -204,7 +204,7 @@ async fn r03_demoted_admin_cannot_mutate_a_spot(pool: PgPool) -> Result<(), sqlx
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn r03_deleted_user_cannot_create_a_reservation(pool: PgPool) -> Result<(), sqlx::Error> {
+async fn deleted_user_cannot_create_a_reservation(pool: PgPool) -> Result<(), sqlx::Error> {
     let fixture = Fixture::new(pool).await?;
     let headers = fixture.headers(fixture.owner, "user").await;
     sqlx::query("DELETE FROM users WHERE id = $1")
@@ -228,7 +228,7 @@ async fn r03_deleted_user_cannot_create_a_reservation(pool: PgPool) -> Result<()
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn r03_authorization_database_failure_denies_admin_mutation(
+async fn authorization_database_failure_denies_admin_mutation(
     pool: PgPool,
 ) -> Result<(), sqlx::Error> {
     let fixture = Fixture::new(pool).await?;
@@ -609,7 +609,7 @@ async fn assert_recommendation_unavailable(f: &Fixture) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn r08_priority_query_failure_does_not_fall_back_to_an_ordinary_spot(pool: PgPool) {
+async fn priority_query_failure_does_not_fall_back_to_an_ordinary_spot(pool: PgPool) {
     let f = recommendation_fixture(pool).await;
     // Break the priority query at prepare time, while the role lookup still works.
     sqlx::query("ALTER TABLE users RENAME COLUMN pcd_status_enc TO r08_unavailable")
@@ -620,7 +620,7 @@ async fn r08_priority_query_failure_does_not_fall_back_to_an_ordinary_spot(pool:
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn r08_history_count_failure_does_not_fall_back_to_the_closest_spot(pool: PgPool) {
+async fn history_count_failure_does_not_fall_back_to_the_closest_spot(pool: PgPool) {
     let f = recommendation_fixture(pool).await;
     sqlx::query("ALTER TABLE user_occupancy_history RENAME TO r08_unavailable")
         .execute(f.state.installation.pool())
@@ -630,7 +630,7 @@ async fn r08_history_count_failure_does_not_fall_back_to_the_closest_spot(pool: 
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn r08_favorite_lookup_failure_does_not_fall_back_to_the_closest_spot(pool: PgPool) {
+async fn favorite_lookup_failure_does_not_fall_back_to_the_closest_spot(pool: PgPool) {
     let f = recommendation_fixture(pool).await;
     for _ in 0..3 {
         sqlx::query("INSERT INTO user_occupancy_history (user_id,spot_id) VALUES ($1,$2)")
@@ -649,7 +649,7 @@ async fn r08_favorite_lookup_failure_does_not_fall_back_to_the_closest_spot(pool
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn r08_free_spots_query_failure_is_unavailable_instead_of_full(pool: PgPool) {
+async fn free_spots_query_failure_is_unavailable_instead_of_full(pool: PgPool) {
     let f = recommendation_fixture(pool).await;
     // Earlier priority reads and later verification reads must remain healthy.
     // Inject only the final ordinary-spots SELECT, using a disposable SQL view.
@@ -672,7 +672,7 @@ async fn r08_free_spots_query_failure_is_unavailable_instead_of_full(pool: PgPoo
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn r08_successful_empty_lookup_still_reports_full(pool: PgPool) {
+async fn successful_empty_lookup_still_reports_full(pool: PgPool) {
     let f = recommendation_fixture(pool).await;
     sqlx::query("UPDATE spots SET status='occupied'")
         .execute(f.state.installation.pool())
@@ -709,7 +709,7 @@ async fn add_preferred_spot(f: &Fixture, spot_id: &str) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn r08_valid_priority_still_takes_precedence_over_distance(pool: PgPool) {
+async fn valid_priority_still_takes_precedence_over_distance(pool: PgPool) {
     let f = recommendation_fixture(pool).await;
     add_preferred_spot(&f, "A-01").await;
     declare(&f, f.owner, None, Some(true)).await;
@@ -717,7 +717,7 @@ async fn r08_valid_priority_still_takes_precedence_over_distance(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn r08_valid_history_still_takes_precedence_over_distance(pool: PgPool) {
+async fn valid_history_still_takes_precedence_over_distance(pool: PgPool) {
     let f = recommendation_fixture(pool).await;
     add_preferred_spot(&f, "B-07").await;
     for _ in 0..3 {
@@ -731,7 +731,7 @@ async fn r08_valid_history_still_takes_precedence_over_distance(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn r08_valid_empty_history_still_uses_distance(pool: PgPool) {
+async fn valid_empty_history_still_uses_distance(pool: PgPool) {
     let f = recommendation_fixture(pool).await;
     add_preferred_spot(&f, "B-07").await;
     assert_recommended_spot(&f, "R01-01").await;

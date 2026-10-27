@@ -352,7 +352,7 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "./migrations")]
-    async fn r03b_logout_revokes_only_one_independent_session(pool: PgPool) {
+    async fn logout_revokes_only_one_independent_session(pool: PgPool) {
         let (state, user) = fixture(pool).await;
         let first = issue(state.installation.pool(), user, "user", &state.jwt_secret)
             .await
@@ -411,7 +411,7 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "./migrations")]
-    async fn r03b_logout_database_failure_does_not_claim_success(pool: PgPool) {
+    async fn logout_database_failure_does_not_claim_success(pool: PgPool) {
         let (state, user) = fixture(pool).await;
         let jwt = issue(state.installation.pool(), user, "user", &state.jwt_secret)
             .await
@@ -441,7 +441,7 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "./migrations")]
-    async fn r03b_logout_serializes_with_ticket_issuance_and_removes_committed_ticket(
+    async fn logout_serializes_with_ticket_issuance_and_removes_committed_ticket(
         pool: PgPool,
     ) {
         let (state, user) = fixture(pool).await;
@@ -481,7 +481,7 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "./migrations")]
-    async fn r03b_expired_session_cleanup_is_bounded(pool: PgPool) {
+    async fn expired_session_cleanup_is_bounded(pool: PgPool) {
         let (state, user) = fixture(pool).await;
         for _ in 0..1001 {
             sqlx::query("INSERT INTO auth_sessions (id,user_id,role,expires_at) VALUES ($1,$2,'user',NOW()-INTERVAL '1 second')")
@@ -506,7 +506,7 @@ mod tests {
         assert_eq!(cleanup_expired(state.installation.pool()).await.unwrap(), 1);
     }
     #[sqlx::test(migrations = "./migrations")]
-    async fn r03b_downgrade_cannot_discard_unexpired_revocation_state(pool: PgPool) {
+    async fn downgrade_cannot_discard_unexpired_revocation_state(pool: PgPool) {
         let (state, user) = fixture(pool).await;
         let jwt = issue(state.installation.pool(), user, "user", &state.jwt_secret)
             .await
