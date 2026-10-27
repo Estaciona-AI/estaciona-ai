@@ -79,9 +79,24 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
   lot with `"parking"`; the first lot is the default and the stored sector. The
   first point of each lot's path is an entrance (`cam-01` for the first lot,
   `entrance-N` for the others) and recommendations start at the nearest one.
+- **Run `infra/app-role.sql` again after migrating.** The new administrative
+  trail (`admin_audit_log`) is append-only for the service, which the script
+  enforces.
 
 ### Added
 
+- Data subject rights: `GET /api/v1/me/export` returns everything the
+  installation keeps about the signed-in person, decrypted (account,
+  reservations, parking history, sessions), and `DELETE /api/v1/me` releases
+  the person's reserved spots and deletes the local account with its sessions,
+  reservations and history. The identity provider account is removed with
+  `tools/identity/provision.py`.
+- `GET /ready` answers 200 only when the database answers and is still bound
+  to this installation; `/health` stays a liveness probe.
+- An administrative trail (`admin_audit_log`) records administrators reading
+  another person's data, overriding a spot status, listing active reservations
+  and saving the map, with who did it.
+- Personal parking history older than 180 days is deleted automatically.
 - Sign-in through the central identity provider: OpenID Connect code flow with
   PKCE as a confidential client (`openidconnect`), state bound to the browser
   by a cookie, single-use attempts, nonce, and ID tokens accepted only when
