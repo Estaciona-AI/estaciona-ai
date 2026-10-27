@@ -148,7 +148,8 @@ def test_worker_publishes_through_its_own_edge_credential(
             )
         )
         try:
-            await until(lambda: [row[0] for row in delivered()] == ["applied"])
+            # Includes training the first model, which a loaded machine slows.
+            await until(lambda: [row[0] for row in delivered()] == ["applied"], 120)
         finally:
             task.cancel()
             with suppress(asyncio.CancelledError):

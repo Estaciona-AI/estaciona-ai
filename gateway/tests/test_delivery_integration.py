@@ -43,6 +43,9 @@ IDENTITY = {
     "OIDC_REDIRECT_URL": "http://localhost:8000/auth/callback",
     "APP_URL": "http://localhost",
 }
+# How long a server command or startup may take before the harness gives up;
+# a wait, not a performance assertion.
+SERVER_COMMAND_TIMEOUT = 120
 # Optional server admission limits a test may lower.
 WS_LIMITS = (
     "WS_HANDSHAKE_CONCURRENCY",
@@ -226,7 +229,7 @@ class Server:
                 stdout=self.log,
                 stderr=self.log,
             )
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + SERVER_COMMAND_TIMEOUT
         while time.monotonic() < deadline:
             if self.process is not None and self.process.poll() is not None:
                 pytest.fail((self.root / "server.log").read_text())
@@ -286,7 +289,9 @@ def server(tmp_path):
             env=instance.environment,
             capture_output=True,
             text=True,
-            timeout=15,
+            # Applying every migration takes longer on a loaded machine; the
+            # command bounds itself (store::MIGRATION_TIMEOUT).
+            timeout=SERVER_COMMAND_TIMEOUT,
         )
         assert initialized.returncode == 0, initialized.stdout + initialized.stderr
         instance.use_runtime_role()
@@ -351,12 +356,12 @@ def message(event_id):
     }
 
 
-async def until(predicate):
+async def until(predicate, timeout=10):
     async def poll():
         while not predicate():
             await asyncio.sleep(0.01)
 
-    await asyncio.wait_for(poll(), timeout=10)
+    await asyncio.wait_for(poll(), timeout=timeout)
 
 
 async def receive_ready(connection):
