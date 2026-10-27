@@ -45,7 +45,11 @@ def test_defaults_listen_on_loopback_with_both_credentials():
         ({"GATEWAY_HOST": "192.168.0.10"}, "loopback"),
         ({"GATEWAY_HOST": "gateway.internal"}, "loopback"),
         ({"GATEWAY_PORT": "70000"}, "TCP port"),
+        ({"GATEWAY_PORT": "65536"}, "TCP port"),
+        ({"GATEWAY_PORT": "0"}, "TCP port"),
+        ({"GATEWAY_PORT": "http"}, "TCP port"),
         ({"EDGE_MAX_IN_FLIGHT": "9"}, "EDGE_MAX_IN_FLIGHT"),
+        ({"EDGE_MAX_IN_FLIGHT": "eight"}, "EDGE_MAX_IN_FLIGHT"),
     ],
 )
 def test_unsafe_or_incomplete_settings_refuse_to_start(overrides, message):
@@ -56,6 +60,29 @@ def test_unsafe_or_incomplete_settings_refuse_to_start(overrides, message):
 @pytest.mark.parametrize("host", ["127.0.0.1", "::1", "localhost", "127.0.0.2"])
 def test_every_loopback_host_is_accepted(host):
     assert gateway.load_settings(environment(GATEWAY_HOST=host)).host == host
+
+
+@pytest.mark.parametrize("port", [1, 65535])
+def test_port_range_is_inclusive_of_its_ends(port):
+    assert gateway.load_settings(environment(GATEWAY_PORT=str(port))).port == port
+
+
+def test_cloud_url_and_retention_can_be_tuned():
+    settings = gateway.load_settings(environment())
+    assert settings.cloud_url == "wss://api.estaciona.tech/ws/edge"
+
+    settings = gateway.load_settings(
+        environment(
+            SERVER_WS_URL="wss://staging.example/ws/edge",
+            GATEWAY_SYNCED_RETENTION_HOURS="0.5",
+            GATEWAY_METRICS_RETENTION_DAYS="30",
+            GATEWAY_MAX_DB_BYTES="1048576",
+        )
+    )
+    assert settings.cloud_url == "wss://staging.example/ws/edge"
+    assert settings.retention == gateway.Retention(
+        synced_hours=0.5, metrics_days=30, max_db_bytes=1048576
+    )
 
 
 def test_secrets_come_from_private_files_before_the_environment(tmp_path):
@@ -93,6 +120,7 @@ def test_listener_accepts_only_the_local_key_and_the_cloud_gets_the_cloud_key(
         with (
             patch("websockets.serve") as serve,
             patch("gateway.sync_loop", new_callable=AsyncMock) as sync_loop,
+            patch("gateway.retention_loop", new_callable=AsyncMock) as retention,
         ):
             serve.return_value.__aenter__ = AsyncMock()
             serve.return_value.__aexit__ = AsyncMock(return_value=False)
@@ -106,8 +134,11 @@ def test_listener_accepts_only_the_local_key_and_the_cloud_gets_the_cloud_key(
                 await task
         listener, host, port = serve.call_args.args
         assert (host, port) == ("127.0.0.1", 8001)
-        assert sync_loop.call_args.args[3] == CLOUD
-        assert sync_loop.call_args.kwargs["max_in_flight"] == 3
+        db, metrics, cloud_url, cloud_key, sync_event = sync_loop.call_args.args
+        assert (db, metrics) == ("local_fallback.db", "metrics.db")
+        assert (cloud_url, cloud_key) == ("wss://api.estaciona.tech/ws/edge", CLOUD)
+        assert sync_loop.call_args.kwargs == {"max_in_flight": 3}
+        retention.assert_called_once_with(db, metrics, gateway.Retention())
 
         # The cloud credential is refused by the local listener.
         socket = AsyncMock()
@@ -117,13 +148,48 @@ def test_listener_accepts_only_the_local_key_and_the_cloud_gets_the_cloud_key(
 
         socket = AsyncMock()
         socket.request.headers = {"Authorization": f"Bearer {LOCAL}"}
-        socket.recv.side_effect = ConnectionError("producer left")
+        socket.recv.side_effect = [
+            '{"type": "SPOT_UPDATE", "spot_id": "A-01", "status": "free"}',
+            ConnectionError("producer left"),
+        ]
         await listener(socket)
         socket.close.assert_not_awaited()
+        # The listener stores where the sync loop reads and wakes that loop.
+        assert len(gateway.pending_deliveries(db)) == 1
+        assert sync_event.is_set()
+
+        # It also enforces the storage budget.
+        socket.recv.side_effect = [
+            '{"type": "SPOT_UPDATE", "spot_id": "A-02", "status": "free"}'
+        ]
+        with patch("gateway.has_room", return_value=False) as has_room:
+            await listener(socket)
+        has_room.assert_called_once_with(db, metrics, gateway.Retention())
+        socket.close.assert_awaited_once_with(1013, "Gateway storage full")
 
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("header", [f"Bearer {LOCAL}x", f"Bearer {LOCAL[:-1]}", ""])
+@pytest.mark.parametrize(
+    "header",
+    [
+        f"Bearer {LOCAL}x",
+        f"Bearer {LOCAL[:-1]}",
+        "",
+        f"Basic {LOCAL}",
+        f"bearer {LOCAL}",
+        f"Bearer\t{LOCAL}",
+        f"Bearer  {LOCAL}",
+    ],
+)
 def test_authorization_rejects_near_misses(header):
     assert not gateway.is_authorized({"Authorization": header}, LOCAL)
+
+
+def test_secret_files_are_bounded_at_exactly_the_limit(tmp_path):
+    limit = gateway.MAX_SECRET_BYTES
+    exact = private_file(tmp_path, "exact", "c" * limit)
+    assert gateway.read_secret_file(exact) == "c" * limit
+    larger = private_file(tmp_path, "larger", "c" * (limit + 1))
+    with pytest.raises(ValueError, match=f"exceeds {limit} bytes"):
+        gateway.read_secret_file(larger)

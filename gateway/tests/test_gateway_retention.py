@@ -4,11 +4,13 @@
 """Confirmed events and metrics expire; pending events and the budget hold."""
 
 import asyncio
+from contextlib import closing
 import datetime
 import importlib.util
 import json
 from pathlib import Path
 import sqlite3
+import time
 
 import pytest
 import websockets
@@ -66,6 +68,21 @@ def test_only_confirmed_events_past_retention_are_deleted(tmp_path):
     assert old_synced not in remaining(db)
 
 
+def test_retention_ages_rows_in_utc_whatever_the_host_zone(tmp_path, monkeypatch):
+    db, _ = databases(tmp_path)
+    expired = event(db, synced=1, age=datetime.timedelta(hours=2))
+    recent = event(db, synced=1, age=datetime.timedelta(minutes=30))
+    monkeypatch.setenv("TZ", "America/Sao_Paulo")
+    time.tzset()
+    try:
+        assert gateway.purge_synced_events(db, datetime.timedelta(hours=1)) == 1
+    finally:
+        monkeypatch.undo()
+        time.tzset()
+    assert remaining(db) == {recent}
+    assert expired not in remaining(db)
+
+
 def test_retention_deletes_in_bounded_batches(tmp_path, monkeypatch):
     db, _ = databases(tmp_path)
     monkeypatch.setattr(gateway, "RETENTION_BATCH", 3)
@@ -96,6 +113,20 @@ def test_pending_deliveries_use_the_partial_index(tmp_path):
             (0, 64),
         ).fetchall()
     assert any("fallback_pending" in row[-1] for row in plan), plan
+
+
+def test_uncheckpointed_wal_counts_toward_the_budget(tmp_path):
+    db, _ = databases(tmp_path)
+    with closing(sqlite3.connect(db)) as writer:
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        with writer:
+            writer.executemany(
+                "INSERT INTO fallback_events (message_text) VALUES (?)",
+                [("x" * 2000,)] * 50,
+            )
+        with_wal = gateway.used_bytes(db)
+        writer.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        assert gateway.used_bytes(db) < with_wal
 
 
 def test_purged_space_counts_as_room_again(tmp_path):
@@ -173,3 +204,27 @@ def test_retention_settings_have_safe_defaults():
         {"EDGE_API_KEY": "c" * 64, "GATEWAY_LOCAL_KEY": "l" * 32}
     )
     assert settings.retention == gateway.Retention(24, 7, 2 * 1024**3)
+
+
+def test_retention_loop_keeps_purging_after_a_failed_pass(monkeypatch, capsys):
+    retention = gateway.Retention(synced_hours=1)
+    passes, sleeps = [], []
+
+    def apply(db, metrics, policy):
+        passes.append((db, metrics, policy))
+        if len(passes) == 1:
+            raise sqlite3.OperationalError("database is locked")
+
+    async def sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) == 2:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(gateway, "apply_retention", apply)
+    monkeypatch.setattr(gateway.asyncio, "sleep", sleep)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(gateway.retention_loop("events.db", "metrics.db", retention))
+
+    assert passes == [("events.db", "metrics.db", retention)] * 2
+    assert sleeps == [gateway.RETENTION_INTERVAL_SECONDS] * 2
+    assert "RETENTION_FAILED reason=database is locked" in capsys.readouterr().out
