@@ -592,4 +592,57 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert!(error.to_string().contains("South"));
     }
+
+    #[test]
+    fn spot_ids_must_be_present_and_unique() {
+        let fixture = Fixture::new();
+        fixture.seed();
+        for spots in [
+            serde_json::json!([{"id": "  ", "center3D": {"x": 1, "y": 0, "z": 1}}]),
+            serde_json::json!([
+                {"id": "EX-01", "center3D": {"x": 1, "y": 0, "z": 1}},
+                {"id": "EX-01", "center3D": {"x": 3, "y": 0, "z": 1}}
+            ]),
+        ] {
+            fixture.write("spots_3d.json", &spots);
+            let error = SiteConfig::load(&fixture.0).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert!(
+                error.to_string().contains("Empty or duplicate spot ID"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn map_files_are_read_up_to_exactly_two_mebibytes() {
+        const TWO_MIB: usize = 2 * 1024 * 1024;
+        let fixture = Fixture::new();
+        fixture.seed();
+        let spots = std::fs::read(fixture.0.join("spots_3d.json")).unwrap();
+        for (size, accepted) in [(TWO_MIB, true), (TWO_MIB + 1, false)] {
+            let mut padded = spots.clone();
+            padded.resize(size, b' ');
+            std::fs::write(fixture.0.join("spots_3d.json"), &padded).unwrap();
+            match SiteConfig::load(&fixture.0) {
+                Ok(site) => assert!(accepted && site.spots.len() == 2, "{size}"),
+                Err(error) => {
+                    assert!(!accepted, "{size}: {error}");
+                    assert!(error.to_string().contains("exceeds 2 MiB"), "{error}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_first_save_creates_the_parking_config() {
+        let fixture = Fixture::new();
+        fixture.seed();
+        std::fs::remove_file(fixture.0.join("config.json")).unwrap();
+        let config = serde_json::json!([
+            {"name": "Example", "path": [{"x": 0, "z": 0}, {"x": 4, "z": 0}]}
+        ]);
+        save_parking_config(&fixture.0, &config).unwrap();
+        assert_eq!(SiteConfig::load(&fixture.0).unwrap().parkings.len(), 1);
+    }
 }
