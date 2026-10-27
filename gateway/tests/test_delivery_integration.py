@@ -43,6 +43,13 @@ IDENTITY = {
     "OIDC_REDIRECT_URL": "http://localhost:8000/auth/callback",
     "APP_URL": "http://localhost",
 }
+# Optional server admission limits a test may lower.
+WS_LIMITS = (
+    "WS_HANDSHAKE_CONCURRENCY",
+    "WS_MAX_EDGE_CONNECTIONS",
+    "WS_MAX_APP_CONNECTIONS",
+    "WS_MAX_DASHBOARD_CONNECTIONS",
+)
 IMAGE = (
     "postgres@sha256:bbbf67eadd2381a2738a4a2e36d4c3936c36edd82d80e7ef00411194385d3829"
 )
@@ -191,6 +198,12 @@ class Server:
                 ],
                 "--env",
                 f"WS_ALLOWED_ORIGINS={self.environment['WS_ALLOWED_ORIGINS']}",
+                *[
+                    argument
+                    for key in WS_LIMITS
+                    if key in self.environment
+                    for argument in ("--env", f"{key}={self.environment[key]}")
+                ],
                 "--entrypoint",
                 "/app/server",
                 IMAGE,
