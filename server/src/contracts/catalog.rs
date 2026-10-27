@@ -67,7 +67,7 @@ pub(super) fn document() -> Value {
             "human_session",
             "authenticated_user",
             None,
-            (204, body("none", None)),
+            (204, body("empty", None)),
         ),
         rest(
             "get_user",
