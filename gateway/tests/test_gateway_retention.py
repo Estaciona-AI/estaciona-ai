@@ -173,3 +173,27 @@ def test_retention_settings_have_safe_defaults():
         {"EDGE_API_KEY": "c" * 64, "GATEWAY_LOCAL_KEY": "l" * 32}
     )
     assert settings.retention == gateway.Retention(24, 7, 2 * 1024**3)
+
+
+def test_retention_loop_keeps_purging_after_a_failed_pass(monkeypatch, capsys):
+    retention = gateway.Retention(synced_hours=1)
+    passes, sleeps = [], []
+
+    def apply(db, metrics, policy):
+        passes.append((db, metrics, policy))
+        if len(passes) == 1:
+            raise sqlite3.OperationalError("database is locked")
+
+    async def sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) == 2:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(gateway, "apply_retention", apply)
+    monkeypatch.setattr(gateway.asyncio, "sleep", sleep)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(gateway.retention_loop("events.db", "metrics.db", retention))
+
+    assert passes == [("events.db", "metrics.db", retention)] * 2
+    assert sleeps == [gateway.RETENTION_INTERVAL_SECONDS] * 2
+    assert "RETENTION_FAILED reason=database is locked" in capsys.readouterr().out
