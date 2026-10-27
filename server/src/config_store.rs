@@ -304,9 +304,7 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "./migrations")]
-    async fn config_route_returns_503_while_destination_is_busy_then_recovers(
-        pool: sqlx::PgPool,
-    ) {
+    async fn config_route_returns_503_while_destination_is_busy_then_recovers(pool: sqlx::PgPool) {
         let fixture = ConfigFixture::new();
         let original = fixture.read();
         let state = fixture.state(pool).await;
@@ -403,9 +401,7 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "./migrations")]
-    async fn config_route_rejects_navigation_collisions_without_publication(
-        pool: sqlx::PgPool,
-    ) {
+    async fn config_route_rejects_navigation_collisions_without_publication(pool: sqlx::PgPool) {
         let fixture = ConfigFixture::new();
         let mut initial = ConfigFixture::payload("Short");
         initial[0]["path"][1]["x"] = serde_json::json!(0);

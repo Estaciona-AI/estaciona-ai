@@ -447,9 +447,7 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "./migrations")]
-    async fn logout_serializes_with_ticket_issuance_and_removes_committed_ticket(
-        pool: PgPool,
-    ) {
+    async fn logout_serializes_with_ticket_issuance_and_removes_committed_ticket(pool: PgPool) {
         let (state, user) = fixture(pool).await;
         let jwt = issue(state.installation.pool(), user, "user", &state.jwt_secret)
             .await
