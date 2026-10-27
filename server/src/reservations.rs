@@ -11,8 +11,10 @@ use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::pathfinding::ParkingGraph;
 use crate::personal_data::Field;
 use crate::reservation_store::{self, CreateError, FinishReason};
+use crate::site_config::ReservedFor;
 use crate::state::SharedState;
 use crate::ws::messages::ServerToAppMsg;
 
@@ -396,8 +398,6 @@ impl RecommendationQueryError {
     }
 }
 
-const PCD_SPOTS: [&str; 2] = ["A-01", "A-02"];
-const ELDERLY_SPOTS: [&str; 2] = ["A-03", "A-04"];
 const ELDERLY_AGE: i32 = 60;
 
 /// Completed years, as PostgreSQL `age()` counts them (29 February included).
@@ -406,8 +406,9 @@ fn completed_years(born: NaiveDate, today: NaiveDate) -> i32 {
     today.year() - born.year() - i32::from(birthday_pending)
 }
 
-/// Reserved spots the user is eligible for. Eligibility is decrypted in the
-/// server, so the database never compares the clear values.
+/// Kinds of kept spots (the map's `reserved_for`) the user is eligible for.
+/// Eligibility is decrypted in the server, so the database never compares
+/// the clear values.
 async fn priority_spots(
     state: &SharedState,
     user_id: Uuid,
@@ -452,10 +453,10 @@ async fn priority_spots(
     })?;
     let mut spots = Vec::new();
     if pcd == Some(true) {
-        spots.extend(PCD_SPOTS);
+        spots.push(ReservedFor::Pcd.as_str());
     }
     if born.is_some_and(|born| completed_years(born, Utc::now().date_naive()) >= ELDERLY_AGE) {
-        spots.extend(ELDERLY_SPOTS);
+        spots.push(ReservedFor::Elderly.as_str());
     }
     Ok(spots)
 }
@@ -471,16 +472,16 @@ pub async fn recommend_spot(
     if requester != query.user_id {
         return Err((StatusCode::FORBIDDEN, "User access denied".to_string()));
     }
-    let priority_spot = match priority_spots(&state, query.user_id).await? {
-        spots if spots.is_empty() => None,
-        spots => sqlx::query_scalar!(
-            "SELECT id FROM spots WHERE status = 'free' AND is_active AND id = ANY($1) \
+    let priority_spots = match priority_spots(&state, query.user_id).await? {
+        kinds if kinds.is_empty() => Vec::new(),
+        kinds => sqlx::query_scalar!(
+            "SELECT id FROM spots WHERE status = 'free' AND is_active AND reserved_for = ANY($1) \
              AND observation_timestamp > NOW() - make_interval(secs => $2) \
-             ORDER BY id LIMIT 1",
-            &spots as &[&str],
+             ORDER BY id",
+            &kinds as &[&str],
             crate::freshness::stale_after_secs()
         )
-        .fetch_optional(state.installation.pool())
+        .fetch_all(state.installation.pool())
         .await
         .map_err(|source| {
             RecommendationQueryError {
@@ -491,9 +492,11 @@ pub async fn recommend_spot(
         })?,
     };
 
-    if let Some(priority) = priority_spot {
+    if let Some(first) = priority_spots.first() {
         let graph = state.installation.graph.read().await;
-        let route = graph.calculate_route("cam-01", &priority);
+        // The nearest kept spot; one no entrance reaches is still offered.
+        let (priority, route) = nearest(&graph, &priority_spots)
+            .map_or_else(|| (first.clone(), None), |(id, route)| (id, Some(route)));
         return Ok((
             StatusCode::OK,
             Json(serde_json::json!({
@@ -527,7 +530,7 @@ pub async fn recommend_spot(
             WHERE h.user_id = $1 
               AND s.status = 'free' AND s.is_active
               AND s.observation_timestamp > NOW() - make_interval(secs => $2)
-              AND s.id NOT IN ('A-01', 'A-02', 'A-03', 'A-04')
+              AND s.reserved_for IS NULL
             GROUP BY h.spot_id
             ORDER BY uses DESC
             LIMIT 1
@@ -547,7 +550,9 @@ pub async fn recommend_spot(
 
         if let Some(fav) = favorite_spot {
             let graph = state.installation.graph.read().await;
-            let route = graph.calculate_route("cam-01", &fav.spot_id);
+            let route = graph
+                .route_from_nearest_entrance(&fav.spot_id)
+                .map(|(_, route)| route);
             return Ok((
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -564,7 +569,7 @@ pub async fn recommend_spot(
         FROM spots 
         WHERE status = 'free' AND is_active
           AND observation_timestamp > NOW() - make_interval(secs => $1)
-          AND id NOT IN ('A-01', 'A-02', 'A-03', 'A-04')
+          AND reserved_for IS NULL
         "#,
         crate::freshness::stale_after_secs()
     )
@@ -582,35 +587,30 @@ pub async fn recommend_spot(
         return Err((StatusCode::NOT_FOUND, "Estacionamento Lotado".to_string()));
     }
 
-    let mut closest_spot_id = None;
-    let mut min_cost = u32::MAX;
-
-    {
-        let graph = state.installation.graph.read().await;
-        for spot in &free_spots {
-            if let Some(cost) = graph.calculate_cost("cam-01", &spot.id)
-                && cost < min_cost
-            {
-                min_cost = cost;
-                closest_spot_id = Some(spot.id.clone());
-            }
-        }
-    }
-
-    match closest_spot_id {
-        Some(spot_id) => {
-            let graph = state.installation.graph.read().await;
-            let route = graph.calculate_route("cam-01", &spot_id);
-            Ok((
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "recommended_spot": spot_id,
-                    "route": route
-                })),
-            ))
-        }
+    let ids: Vec<String> = free_spots.into_iter().map(|spot| spot.id).collect();
+    let graph = state.installation.graph.read().await;
+    match nearest(&graph, &ids) {
+        Some((spot_id, route)) => Ok((
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "recommended_spot": spot_id,
+                "route": route
+            })),
+        )),
         None => Err((StatusCode::NOT_FOUND, "Estacionamento Lotado".to_string())),
     }
+}
+
+/// The candidate closest to any entrance of the site, with its route.
+fn nearest(graph: &ParkingGraph, candidates: &[String]) -> Option<(String, Vec<String>)> {
+    candidates
+        .iter()
+        .filter_map(|id| {
+            let (cost, route) = graph.route_from_nearest_entrance(id)?;
+            Some((cost, id, route))
+        })
+        .min_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)))
+        .map(|(_, id, route)| (id.clone(), route))
 }
 
 #[cfg(test)]

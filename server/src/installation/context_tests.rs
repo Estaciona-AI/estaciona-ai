@@ -19,6 +19,7 @@ async fn verified_identity_reaches_runtime_and_uses_its_database(pool: PgPool) {
     let site = crate::site_config::SiteConfig {
         directory: std::env::temp_dir(),
         parkings: vec![crate::site_config::ParkingLotConfig {
+            name: "Test lot".into(),
             path: vec![
                 crate::site_config::PathNode { x: 0.0, z: 0.0 },
                 crate::site_config::PathNode { x: 1.0, z: 0.0 },
@@ -31,6 +32,8 @@ async fn verified_identity_reaches_runtime_and_uses_its_database(pool: PgPool) {
                 y: 0.0,
                 z: 1.0,
             },
+            reserved_for: None,
+            parking: None,
         }],
     };
     let state = crate::state::init_state(
