@@ -119,7 +119,7 @@ fn is_canonical_http_origin(origin: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{WsOriginConfigError, WsOriginPolicy};
+    use super::{WsOriginConfigError, WsOriginPolicy, is_canonical_http_origin};
     use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 
     #[test]
@@ -203,6 +203,52 @@ mod tests {
         assert_eq!(
             WsOriginPolicy::parse("https://a.example, https://a.example").unwrap_err(),
             WsOriginConfigError::DuplicateOrigin
+        );
+    }
+
+    #[test]
+    fn origins_that_parse_as_uris_must_still_be_canonical() {
+        for origin in [
+            "https://a.example",
+            "http://localhost:5173",
+            "https://a.example:80",
+            "http://a.example:443",
+            "https://127.0.0.1:8443",
+        ] {
+            assert!(is_canonical_http_origin(origin), "{origin}");
+        }
+        // Each of these is a valid URI, so only the canonical-form checks refuse it.
+        for origin in [
+            "https://user@a.example",
+            "https://A.example",
+            "HTTPS://a.example",
+            "ftp://a.example",
+            "https://a.example?next=1",
+            "https://a.example/app",
+            "http://a.example:80",
+            "https://a.example:443",
+        ] {
+            assert!(!is_canonical_http_origin(origin), "{origin}");
+        }
+    }
+
+    #[test]
+    fn cors_answers_exactly_the_configured_origins() {
+        let policy =
+            WsOriginPolicy::parse("https://parking.example.edu,http://localhost:5173").unwrap();
+        let mut values: Vec<_> = policy
+            .header_values()
+            .into_iter()
+            .map(|value| value.to_str().unwrap().to_owned())
+            .collect();
+        values.sort();
+        assert_eq!(
+            values,
+            ["http://localhost:5173", "https://parking.example.edu"]
+        );
+        assert_eq!(
+            WsOriginConfigError::InvalidOrigin.to_string(),
+            "origin list contains a non-canonical HTTP origin"
         );
     }
 }
