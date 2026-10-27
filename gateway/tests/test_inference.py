@@ -8,9 +8,11 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 
 from ml import history, inference, train
+
+from forecast_db import history_engine
 from ml.backtest import HORIZON
 from ml.inference import PredictiveEngine, evaluate_forecast
 
@@ -66,31 +68,9 @@ def predict(predictor):
         return predictor.predict_trends()
 
 
-def spots_engine(active, retired=()):
-    engine = create_engine("sqlite://")
-    with engine.begin() as connection:
-        connection.execute(
-            text("CREATE TABLE spots (id TEXT PRIMARY KEY,is_active BOOLEAN)")
-        )
-        connection.execute(
-            text(
-                "CREATE TABLE physical_occupancy_hourly (spot_id TEXT,hour_start TEXT,status TEXT)"
-            )
-        )
-        for spot in active:
-            connection.execute(
-                text("INSERT INTO spots VALUES (:id,TRUE)"), {"id": spot}
-            )
-        for spot in retired:
-            connection.execute(
-                text("INSERT INTO spots VALUES (:id,FALSE)"), {"id": spot}
-            )
-    return engine
-
-
 @pytest.mark.parametrize("spot_count", [3, 35])
 def test_forecast_capacity_comes_from_registered_spots(spot_count):
-    engine = spots_engine([str(index) for index in range(spot_count)], ["retired"])
+    engine = history_engine([str(index) for index in range(spot_count)], ["retired"])
     predictor = forecast_predictor()
     predictor.engine = engine
     del predictor.get_capacity
@@ -189,7 +169,7 @@ def test_non_finite_future_prediction_is_not_queued_as_a_forecast():
 
 
 def test_history_reads_physical_samples_without_personal_history():
-    engine = spots_engine(["a", "b"], ["retired"])
+    engine = history_engine(["a", "b"], ["retired"])
     hour = pd.Timestamp.now(tz="UTC").floor("h") - pd.Timedelta(hours=1)
     with engine.begin() as connection:
         for spot, status in [("a", "occupied"), ("b", "free"), ("retired", "occupied")]:
@@ -213,7 +193,7 @@ def test_forecast_refuses_missing_recent_history(rates):
 
 
 def test_empty_physical_history_is_unknown_instead_of_zero():
-    engine = spots_engine(["a"])
+    engine = history_engine(["a"])
     predictor = forecast_predictor()
     predictor.engine = engine
     with pytest.raises(ValueError, match="history"):
@@ -245,7 +225,7 @@ def frozen_clock(*instants):
 
 def hourly_history_engine(last_hour):
     # Spot a is always occupied; spot b only in the most recent stored hour.
-    engine = spots_engine(["a", "b"])
+    engine = history_engine(["a", "b"])
     with engine.begin() as connection:
         for offset in range(200):
             hour = (pd.Timestamp(last_hour) - pd.Timedelta(hours=offset)).isoformat()

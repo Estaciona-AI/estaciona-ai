@@ -12,7 +12,8 @@ import pytest
 
 import gateway
 from ml import train, worker
-from test_forecast_model import campus_engine, physical_engine, small_training
+from forecast_db import history_engine
+from test_forecast_model import campus_engine, small_training
 
 __all__ = ["small_training"]
 
@@ -61,7 +62,7 @@ def trainings(monkeypatch, small_training):
 
 
 def test_model_is_trained_only_when_missing_or_invalid(tmp_path, trainings):
-    engine = physical_engine([f"s{index}" for index in range(6)], [])
+    engine = history_engine([f"s{index}" for index in range(6)])
     first = worker.ensure_model(engine, str(tmp_path))
     assert len(trainings) == 1
     assert first.manifest["source"] == "synthetic_prior"
@@ -154,7 +155,7 @@ def test_failed_retrain_keeps_serving_the_previous_model(
 
 def test_prediction_failure_publishes_nothing_and_keeps_running(tmp_path, trainings):
     # A synthetic prior exists, but no camera has reported: nothing to forecast from.
-    engine = physical_engine([f"s{index}" for index in range(6)], [])
+    engine = history_engine([f"s{index}" for index in range(6)])
     published, sleeps, sync_event = run_loop(
         engine, str(tmp_path), str(tmp_path / "outbox.db"), utc(2026, 10, 24, 12, 0), 2
     )
