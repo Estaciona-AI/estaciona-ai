@@ -59,6 +59,7 @@ impl Fixture {
             plate_pepper: "r01-disposable-plate-pepper".to_owned(),
             personal_data: crate::personal_data::PersonalDataCipher::for_unit_test(),
             identity: crate::identity::IdentityProvider::for_unit_test(),
+            ws_admission: Default::default(),
         });
 
         Ok(Self {

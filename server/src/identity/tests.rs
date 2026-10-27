@@ -181,6 +181,7 @@ async fn fixture(pool: PgPool) -> Fixture {
         plate_pepper: "identity-test-plate-pepper-0123456789".into(),
         personal_data: crate::personal_data::PersonalDataCipher::for_unit_test(),
         identity,
+        ws_admission: Default::default(),
     });
     let policy = crate::ws_origin::WsOriginPolicy::parse(APP).unwrap();
     let router = Router::new()
