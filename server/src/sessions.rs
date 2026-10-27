@@ -26,6 +26,8 @@ pub(crate) struct LogoutResponse {
     end_session_url: Option<String>,
 }
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
+/// Personal parking history kept for recommendations, in days.
+pub(crate) const PERSONAL_HISTORY_DAYS: i32 = 180;
 
 fn unavailable(error: impl std::fmt::Display) -> ApiError {
     tracing::error!(%error, "Session storage unavailable");
@@ -301,6 +303,10 @@ pub(crate) async fn cleanup_expired(pool: &PgPool) -> Result<u64, sqlx::Error> {
         .execute(&mut *tx).await?.rows_affected();
     count += sqlx::query("DELETE FROM oidc_logout_marks WHERE (issuer,kind,value) IN (SELECT issuer,kind,value FROM oidc_logout_marks WHERE expires_at<=NOW() ORDER BY expires_at LIMIT 1000 FOR UPDATE SKIP LOCKED)")
         .execute(&mut *tx).await?.rows_affected();
+    // Personal parking history expires by age, not only by count.
+    count += sqlx::query("DELETE FROM user_occupancy_history WHERE id IN (SELECT id FROM user_occupancy_history WHERE occupied_at < NOW() - make_interval(days => $1) ORDER BY occupied_at LIMIT 1000 FOR UPDATE SKIP LOCKED)")
+        .bind(PERSONAL_HISTORY_DAYS)
+        .execute(&mut *tx).await?.rows_affected();
     // Abandoned sign-ins: the browser never came back from the provider.
     count += sqlx::query("DELETE FROM oidc_login_attempts WHERE state_digest IN (SELECT state_digest FROM oidc_login_attempts WHERE expires_at<=NOW() ORDER BY expires_at LIMIT 1000 FOR UPDATE SKIP LOCKED)")
         .execute(&mut *tx).await?.rows_affected();
@@ -332,6 +338,7 @@ mod tests {
                 directory: std::env::temp_dir(),
                 spots: vec![],
                 parkings: vec![ParkingLotConfig {
+                    name: "Test lot".into(),
                     path: vec![PathNode { x: 0.0, z: 0.0 }, PathNode { x: 1.0, z: 0.0 }],
                 }],
             }),

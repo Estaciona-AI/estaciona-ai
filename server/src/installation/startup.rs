@@ -17,6 +17,7 @@ pub async fn prepare(
     tokio::time::timeout(Duration::from_secs(10), async {
         require_match(&pool, &identity).await?;
         store::require_migrated(&pool).await?;
+        require_restricted_role(&pool, &identity).await?;
         Ok(VerifiedInstallation::new(pool, identity))
     })
     .await
@@ -29,6 +30,24 @@ pub async fn migrate(pool: &PgPool, identity: &InstallationIdentity) -> Result<(
     require_match(pool, identity).await?;
     store::migrate(pool).await?;
     require_match(pool, identity).await
+}
+
+/// Production runs only with the DML role of infra/app-role.sql; demo and
+/// test installations may use the owner and are warned.
+async fn require_restricted_role(
+    pool: &PgPool,
+    identity: &InstallationIdentity,
+) -> Result<(), StoreError> {
+    let excess = store::excess_privileges(pool).await?;
+    if excess.is_empty() {
+        return Ok(());
+    }
+    if identity.environment() == super::Environment::Production {
+        tracing::error!(privileges = ?excess, "Refusing a privileged database role");
+        return Err(StoreError::PrivilegedRuntimeRole);
+    }
+    tracing::warn!(privileges = ?excess, "Database role has more privileges than the service needs");
+    Ok(())
 }
 
 async fn require_match(pool: &PgPool, identity: &InstallationIdentity) -> Result<(), StoreError> {

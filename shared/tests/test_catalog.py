@@ -26,10 +26,13 @@ def test_catalog_covers_current_rest_operations_and_conditional_lpr():
     )
     expected = {
         ("GET", "/health"),
+        ("GET", "/ready"),
         ("GET", "/api/v1/capabilities"),
         ("GET", "/api/v1/contracts/{path}"),
         ("GET", "/api/v1/me"),
         ("PUT", "/api/v1/me/eligibility"),
+        ("GET", "/api/v1/me/export"),
+        ("DELETE", "/api/v1/me"),
         ("GET", "/api/v1/users/{id}"),
         ("POST", "/api/v1/auth/logout"),
         ("POST", "/api/v1/auth/ws-ticket"),

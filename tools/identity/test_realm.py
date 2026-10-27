@@ -30,6 +30,34 @@ class RealmTest(unittest.TestCase):
         self.assertEqual(realm["sslRequired"], "external")
         self.assertTrue(realm["eventsEnabled"] and realm["adminEventsEnabled"])
 
+    def test_administrators_sign_in_with_a_second_factor(self):
+        realm = self.realm
+        self.assertIn("estaciona-mfa", [r["name"] for r in realm["roles"]["realm"]])
+        self.assertEqual(realm["otpPolicyType"], "totp")
+        flows = {f["alias"]: f for f in realm["authenticationFlows"]}
+        browser = flows[realm["browserFlow"]]
+        self.assertTrue(browser["topLevel"])
+        forms = flows[browser["authenticationExecutions"][1]["flowAlias"]]
+        password, otp = forms["authenticationExecutions"]
+        self.assertEqual(password["authenticator"], "auth-username-password-form")
+        self.assertEqual(password["requirement"], "REQUIRED")
+        self.assertEqual(otp["requirement"], "CONDITIONAL")
+        condition, code = flows[otp["flowAlias"]]["authenticationExecutions"]
+        self.assertEqual(condition["authenticator"], "conditional-user-role")
+        configs = {c["alias"]: c["config"] for c in realm["authenticatorConfig"]}
+        self.assertEqual(
+            configs[condition["authenticatorConfig"]],
+            {"condUserRole": "estaciona-mfa", "negate": "false"},
+        )
+        self.assertEqual(
+            (code["authenticator"], code["requirement"]), ("auth-otp-form", "REQUIRED")
+        )
+        # No identity-provider shortcut or other way around the code.
+        self.assertEqual(
+            [e.get("authenticator") for e in browser["authenticationExecutions"]],
+            ["auth-cookie", None],
+        )
+
     def test_tokens_are_signed_only_with_ed25519(self):
         self.assertEqual(self.realm["defaultSignatureAlgorithm"], "EdDSA")
         providers = self.realm["components"]["org.keycloak.keys.KeyProvider"]

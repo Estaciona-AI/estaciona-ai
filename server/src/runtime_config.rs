@@ -19,6 +19,7 @@ pub(crate) struct RuntimeConfig {
     pub identity: crate::identity::IdentityConfig,
     pub ws_origins: WsOriginPolicy,
     pub lpr_mode: LprMode,
+    pub observation_stale_after_secs: u32,
     pub ws_limits: crate::ws_admission::WsLimits,
 }
 
@@ -183,6 +184,15 @@ impl RuntimeConfig {
             .transpose()?;
         let lpr_mode =
             LprMode::parse(raw_lpr.as_deref()).map_err(|_| ConfigError("LPR_ENABLED"))?;
+        let observation_stale_after_secs = match value("OBSERVATION_STALE_AFTER_SECS") {
+            None => crate::freshness::DEFAULT_STALE_AFTER_SECS,
+            Some(raw) => raw
+                .to_str()
+                .and_then(|raw| raw.parse::<u32>().ok())
+                // At least one heartbeat interval, at most an hour.
+                .filter(|seconds| (30..=3600).contains(seconds))
+                .ok_or(ConfigError("OBSERVATION_STALE_AFTER_SECS"))?,
+        };
         let defaults = crate::ws_admission::WsLimits::default();
         let ws_limits = crate::ws_admission::WsLimits {
             // The pool has five connections: keep at least one for requests.
@@ -210,6 +220,7 @@ impl RuntimeConfig {
             identity,
             ws_origins,
             lpr_mode,
+            observation_stale_after_secs,
             ws_limits,
         })
     }

@@ -30,7 +30,13 @@ pub fn physical_state_schema(_: &mut SchemaGenerator) -> Schema {
     json_schema!({"type":"string","enum":["free","occupied"]})
 }
 
+/// What apps see: "unknown" when no recent observation backs the state.
 pub fn spot_status_schema(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({"type":"string","enum":["free","occupied","reserved","unknown"]})
+}
+
+/// What an administrator may set.
+pub fn settable_spot_status_schema(_: &mut SchemaGenerator) -> Schema {
     json_schema!({"type":"string","enum":["free","occupied","reserved"]})
 }
 
@@ -105,6 +111,11 @@ pub fn rest_schemas() -> BTreeMap<&'static str, Value> {
     }
     BTreeMap::from([
         rest!("user-response", crate::users::UserResponse, Serialize),
+        rest!(
+            "personal-data-export",
+            crate::users::PersonalDataExport,
+            Serialize
+        ),
         rest!(
             "update-eligibility",
             crate::users::UpdateEligibility,

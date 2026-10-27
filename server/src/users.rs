@@ -118,7 +118,23 @@ pub async fn get_user(
     if requester.role != "admin" && requester.user_id != id {
         return Err((StatusCode::FORBIDDEN, "User access denied".to_string()));
     }
-    Ok((StatusCode::OK, Json(load(&state, id).await?)))
+    let user = load(&state, id).await?;
+    if requester.user_id != id {
+        // An administrator read someone else's personal data.
+        crate::audit::record(
+            state.installation.pool(),
+            requester.user_id,
+            "user_read",
+            Some(&id.to_string()),
+            serde_json::json!({}),
+        )
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "Audit record failed");
+            failed()
+        })?;
+    }
+    Ok((StatusCode::OK, Json(user)))
 }
 
 /// The signed-in account; apps call it after the sign-in redirect.
@@ -197,4 +213,150 @@ mod tests {
         assert_eq!(json["username"], "ea-7k3m9qx2vd");
         assert!(json.get("email").is_none());
     }
+}
+
+#[derive(Serialize, sqlx::FromRow, schemars::JsonSchema)]
+pub struct ExportedReservation {
+    pub id: Uuid,
+    pub spot_id: String,
+    pub status: String,
+    pub created_at: Option<DateTime<Utc>>,
+    pub expires_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Serialize, sqlx::FromRow, schemars::JsonSchema)]
+pub struct ExportedVisit {
+    pub spot_id: String,
+    pub occupied_at: DateTime<Utc>,
+    pub released_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Serialize, sqlx::FromRow, schemars::JsonSchema)]
+pub struct ExportedSession {
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
+/// Everything this installation keeps about the signed-in person, decrypted.
+/// E-mail and password live only at the identity provider.
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct PersonalDataExport {
+    pub account: UserResponse,
+    pub reservations: Vec<ExportedReservation>,
+    pub occupancy_history: Vec<ExportedVisit>,
+    pub sessions: Vec<ExportedSession>,
+}
+
+fn storage_error(error: sqlx::Error) -> ApiError {
+    tracing::error!(%error, "Personal data request failed");
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Personal data temporarily unavailable".to_string(),
+    )
+}
+
+pub async fn export_personal_data(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let requester =
+        crate::security::authenticated_user(&headers, &state.jwt_secret, state.installation.pool())
+            .await?;
+    let pool = state.installation.pool();
+    let account = load(&state, requester).await?;
+    let reservations = sqlx::query_as(
+        "SELECT id, spot_id, status, created_at, expires_at, completed_at \
+         FROM reservations WHERE user_id = $1 ORDER BY created_at",
+    )
+    .bind(requester)
+    .fetch_all(pool)
+    .await
+    .map_err(storage_error)?;
+    let occupancy_history = sqlx::query_as(
+        "SELECT spot_id, occupied_at, released_at FROM user_occupancy_history \
+         WHERE user_id = $1 ORDER BY occupied_at",
+    )
+    .bind(requester)
+    .fetch_all(pool)
+    .await
+    .map_err(storage_error)?;
+    let sessions = sqlx::query_as(
+        "SELECT created_at, expires_at, revoked_at FROM auth_sessions \
+         WHERE user_id = $1 ORDER BY created_at",
+    )
+    .bind(requester)
+    .fetch_all(pool)
+    .await
+    .map_err(storage_error)?;
+    Ok((
+        StatusCode::OK,
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(PersonalDataExport {
+            account,
+            reservations,
+            occupancy_history,
+            sessions,
+        }),
+    ))
+}
+
+/// Deletes this installation's account of the signed-in person: active
+/// reservations release their spots, and sessions, tickets, reservations and
+/// parking history go with the account. The identity provider account is
+/// removed separately (tools/identity/provision.py).
+pub async fn delete_account(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    let requester =
+        crate::security::authenticated_user(&headers, &state.jwt_secret, state.installation.pool())
+            .await?;
+    let mut tx = state
+        .installation
+        .pool()
+        .begin()
+        .await
+        .map_err(storage_error)?;
+    sqlx::query("SELECT id FROM users WHERE id = $1 FOR UPDATE")
+        .bind(requester)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage_error)?;
+    let released: Vec<String> = sqlx::query_scalar(
+        "UPDATE spots SET status = 'free', last_updated = NOW() WHERE status = 'reserved' \
+         AND id IN (SELECT spot_id FROM reservations WHERE user_id = $1 AND status = 'active') \
+         RETURNING id",
+    )
+    .bind(requester)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(storage_error)?;
+    // Sessions, tickets, reservations and history cascade with the account.
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(requester)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage_error)?;
+    tx.commit().await.map_err(storage_error)?;
+    for spot_id in released {
+        let update = crate::ws::messages::ServerToAppMsg::SpotUpdate {
+            spot_id,
+            status: "free".to_owned(),
+        };
+        if let Ok(json) = serde_json::to_string(&update) {
+            let _ = state.installation.tx.send(json);
+        }
+    }
+    Ok((
+        StatusCode::NO_CONTENT,
+        [
+            (
+                axum::http::header::SET_COOKIE,
+                crate::security::clear_session_cookie(),
+            ),
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+        ],
+    ))
 }

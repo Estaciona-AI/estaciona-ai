@@ -68,9 +68,49 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
   profile's `sha256` (or `VISION_MODEL_SHA256` for the legacy client).
   TensorRT engine names now include the model digest, so engines are rebuilt
   once after this upgrade.
+- **A production server needs the restricted database role.** It refuses to
+  start when its role is a superuser, can create databases or roles, bypasses
+  row security, can create objects in `public` or owns application tables.
+  New Docker Compose volumes create `estaciona_owner` (no superuser powers) and
+  `estaciona_app` from `ESTACIONA_OWNER_PASSWORD` and `ESTACIONA_APP_PASSWORD`
+  in `infra/env/postgres.env`; `POSTGRES_USER` is now only the container
+  superuser. An existing volume keeps its roles: create a non-superuser owner,
+  transfer the database and schema to it, and point `migration_database_url`
+  to it.
+- **Installation administrators sign in with a one-time code.** The realm's
+  browser flow asks holders of the realm role `estaciona-mfa` (given with every
+  admin role by `tools/identity/provision.py`) to set up and use TOTP. A realm
+  imported before this release keeps its flow: import the new flow and role,
+  or recreate the realm, and give `estaciona-mfa` to existing administrators.
+- **Apps must handle the spot status `unknown`.** A spot whose latest
+  observation is older than `OBSERVATION_STALE_AFTER_SECS` (120 s) or that no
+  camera has seen yet is `unknown` in snapshots and updates. It cannot be
+  reserved (409) or recommended until a camera reports it again.
+- **Maps declare kept spots, sectors and entrances.** Spot names no longer
+  imply anything: mark spots kept for people with a disability or aged 60 and
+  over with `"reserved_for": "pcd"` or `"elderly"` in `spots_3d.json` (the
+  Centro map's A-01/A-02 and A-03/A-04 need it). A spot may name its parking
+  lot with `"parking"`; the first lot is the default and the stored sector. The
+  first point of each lot's path is an entrance (`cam-01` for the first lot,
+  `entrance-N` for the others) and recommendations start at the nearest one.
+- **Run `infra/app-role.sql` again after migrating.** The new administrative
+  trail (`admin_audit_log`) is append-only for the service, which the script
+  enforces.
 
 ### Added
 
+- Data subject rights: `GET /api/v1/me/export` returns everything the
+  installation keeps about the signed-in person, decrypted (account,
+  reservations, parking history, sessions), and `DELETE /api/v1/me` releases
+  the person's reserved spots and deletes the local account with its sessions,
+  reservations and history. The identity provider account is removed with
+  `tools/identity/provision.py`.
+- `GET /ready` answers 200 only when the database answers and is still bound
+  to this installation; `/health` stays a liveness probe.
+- An administrative trail (`admin_audit_log`) records administrators reading
+  another person's data, overriding a spot status, listing active reservations
+  and saving the map, with who did it.
+- Personal parking history older than 180 days is deleted automatically.
 - Sign-in through the central identity provider: OpenID Connect code flow with
   PKCE as a confidential client (`openidconnect`), state bound to the browser
   by a cookie, single-use attempts, nonce, and ID tokens accepted only when
