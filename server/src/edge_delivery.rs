@@ -430,6 +430,17 @@ mod tests {
         Ok(id)
     }
 
+    /// A camera reported the spot moments ago, so it may be reserved.
+    async fn seen_recently(pool: &PgPool, spot_id: &str) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "UPDATE spots SET observation_timestamp = NOW() - INTERVAL '30 seconds' WHERE id = $1",
+        )
+        .bind(spot_id)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
     async fn user(pool: &PgPool) -> Result<Uuid, sqlx::Error> {
         let id = Uuid::new_v4();
         sqlx::query("INSERT INTO users (id) VALUES ($1)")
@@ -708,6 +719,7 @@ mod tests {
     async fn occupied_receipt_and_captured_reservation_are_committed(pool: PgPool) -> TestResult {
         let principal = principal(&pool).await?;
         let spot_id = authorized_spot(&pool, &principal, "free").await?;
+        seen_recently(&pool, &spot_id).await?;
         let owner = user(&pool).await?;
         let reservation = reservation_store::create(
             &pool,
@@ -1420,6 +1432,7 @@ mod tests {
     async fn legacy_authorized_observation_commits_without_a_receipt(pool: PgPool) -> TestResult {
         let principal = principal(&pool).await?;
         let spot_id = authorized_spot(&pool, &principal, "free").await?;
+        seen_recently(&pool, &spot_id).await?;
         let owner = user(&pool).await?;
         let reservation = reservation_store::create(
             &pool,
@@ -1633,6 +1646,7 @@ mod tests {
     ) -> TestResult {
         let principal = principal(&pool).await?;
         let spot_id = authorized_spot(&pool, &principal, "free").await?;
+        seen_recently(&pool, &spot_id).await?;
         let owner = user(&pool).await?;
         let mut tx = pool.begin().await?;
         let reservation = reservation_store::create_in_transaction(
