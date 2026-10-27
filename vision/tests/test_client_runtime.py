@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import hashlib
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
 import numpy as np
@@ -207,3 +209,22 @@ def test_legacy_client_requires_the_local_gateway_key(runtime, monkeypatch):
     monkeypatch.setattr(client, "GATEWAY_LOCAL_KEY", None)
     with pytest.raises(RuntimeError, match="GATEWAY_LOCAL_KEY"):
         asyncio.run(client.main(["--headless"]))
+
+
+def test_default_outbox_is_per_camera_and_created_once(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(client, "DELIVERY", None)
+    monkeypatch.setattr(client, "CAMERA_ID", "cam-07")
+    monkeypatch.delenv("VISION_OUTBOX_PATH", raising=False)
+    delivery = client.local_delivery()
+    key = hashlib.sha256(b"cam-07").hexdigest()[:16]
+    assert delivery.url == client.WS_URL
+    assert delivery.outbox.path == Path("data") / f"vision-outbox-{key}.db"
+    assert (tmp_path / "data" / f"vision-outbox-{key}.db").is_file()
+    assert client.local_delivery() is delivery
+
+
+def test_outbox_path_can_be_set_by_the_environment(tmp_path, monkeypatch):
+    monkeypatch.setattr(client, "DELIVERY", None)
+    monkeypatch.setenv("VISION_OUTBOX_PATH", str(tmp_path / "custom" / "outbox.db"))
+    assert client.local_delivery().outbox.path == tmp_path / "custom" / "outbox.db"
