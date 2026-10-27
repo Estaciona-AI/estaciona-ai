@@ -118,6 +118,52 @@ async def sync(db, metrics, cloud, predicate):
                 await task
 
 
+def test_idle_loop_waits_and_forwards_later_events_with_the_cloud_key(tmp_path):
+    db, metrics = setup(tmp_path)
+    cloud = Cloud(lambda cloud, frame: cloud.ack(frame))
+    wake = asyncio.Event()
+
+    async def run():
+        with patch(
+            "gateway.websockets.connect", new_callable=AsyncMock, return_value=cloud
+        ) as connect:
+            task = asyncio.create_task(
+                gateway.sync_loop(db, metrics, "ws://test", "test", wake)
+            )
+            try:
+                for _ in range(10):
+                    await asyncio.sleep(0)
+                assert not task.done()
+                connect.assert_not_called()
+                event_id = enqueue(db, metrics, payload())
+                wake.set()
+                await until(lambda: not gateway.pending_deliveries(db))
+            finally:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+        assert connect.call_args.args == ("ws://test",)
+        assert connect.call_args.kwargs["additional_headers"] == {
+            "Authorization": "Bearer test"
+        }
+        return event_id
+
+    event_id = asyncio.run(run())
+    [frame] = cloud.frames
+    forwarded = frame.pop("gateway_forwarded_at")
+    assert frame == {
+        "type": "EDGE_EVENT",
+        "version": 1,
+        "event_id": event_id,
+        "payload": payload(),
+    }
+    assert forwarded.endswith("Z")
+    with sqlite3.connect(metrics) as conn:
+        assert conn.execute("SELECT gateway_forwarded_ts FROM metrics").fetchone() == (
+            forwarded,
+        )
+
+
 def test_backlog_migration_preserves_ids_and_synced_history(tmp_path):
     path = str(tmp_path / "legacy.db")
     with sqlite3.connect(path) as conn:
