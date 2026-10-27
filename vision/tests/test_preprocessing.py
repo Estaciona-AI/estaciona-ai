@@ -37,7 +37,15 @@ def test_preprocess_frame_clahe():
 def test_preprocess_frame_clahe_and_gamma():
     frame = np.random.randint(0, 256, (100, 100, 3), dtype=np.uint8)
     processed = preprocess_frame(frame, gamma=1.5, clahe_enabled=True)
-    assert processed.shape == (100, 100, 3)
+    corrected = preprocess_frame(frame, gamma=1.5, clahe_enabled=False)
+    # CLAHE equalizes the gamma-corrected frame, not the raw one.
+    assert np.array_equal(
+        processed, preprocess_frame(corrected, gamma=1.0, clahe_enabled=True)
+    )
+    assert not np.array_equal(processed, corrected)
+    assert not np.array_equal(
+        processed, preprocess_frame(frame, gamma=1.0, clahe_enabled=True)
+    )
 
 
 def test_preprocess_frame_immutability():
