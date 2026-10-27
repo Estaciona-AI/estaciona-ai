@@ -136,6 +136,7 @@ async def run(engine, models_dir, outbox, metrics, cloud_url, api_key):
     await asyncio.gather(
         gateway.sync_loop(outbox, metrics, cloud_url, api_key, sync_event),
         forecast_loop(engine, models_dir, outbox, sync_event),
+        gateway.retention_loop(outbox, metrics),
     )
 
 
