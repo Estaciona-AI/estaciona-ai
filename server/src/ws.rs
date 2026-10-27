@@ -84,7 +84,13 @@ pub(crate) async fn handle_app_socket(socket: WebSocket, state: SharedState, ses
 
     let value = state.clone();
     let recv_task = async {
-        while let Some(Ok(Message::Text(text))) = receiver.next().await {
+        while let Some(Ok(message)) = receiver.next().await {
+            let text = match message {
+                Message::Text(text) => text,
+                // The protocol layer answers pings; only text carries commands.
+                Message::Ping(_) | Message::Pong(_) => continue,
+                Message::Binary(_) | Message::Close(_) => break,
+            };
             if let Ok(msg) = serde_json::from_str::<AppToServerMsg>(&text) {
                 session.revalidate(value.installation.pool()).await?;
                 match msg {
@@ -355,7 +361,7 @@ mod delivery_tests {
     }
 
     #[tokio::test]
-    async fn r09_lagged_broadcast_requires_reconnection_instead_of_continuing() {
+    async fn lagged_broadcast_requires_reconnection_instead_of_continuing() {
         let (updates, mut receiver) = tokio::sync::broadcast::channel(2);
         for message in ["old", "middle", "latest"] {
             updates.send(message.to_owned()).unwrap();
@@ -376,7 +382,7 @@ mod delivery_tests {
     }
 
     #[tokio::test]
-    async fn r09_closed_broadcast_ends_delivery_without_spinning() {
+    async fn closed_broadcast_ends_delivery_without_spinning() {
         let (updates, mut receiver) = tokio::sync::broadcast::channel::<String>(2);
         drop(updates);
         let mut sink = TestSink {
@@ -408,17 +414,17 @@ mod delivery_tests {
     }
 
     #[tokio::test]
-    async fn r09_write_timeout_covers_readiness() {
+    async fn write_timeout_covers_readiness() {
         assert_write_times_out(true).await;
     }
 
     #[tokio::test]
-    async fn r09_write_timeout_covers_flush() {
+    async fn write_timeout_covers_flush() {
         assert_write_times_out(false).await;
     }
 
     #[tokio::test]
-    async fn r09_transport_write_can_be_canceled_before_its_timeout() {
+    async fn transport_write_can_be_canceled_before_its_timeout() {
         let mut sink = TestSink {
             blocked_before_send: true,
             blocked_on_flush: false,
@@ -435,7 +441,7 @@ mod delivery_tests {
     }
 
     #[tokio::test]
-    async fn r09_healthy_transport_delivers_normally() {
+    async fn healthy_transport_delivers_normally() {
         let mut sink = TestSink {
             blocked_before_send: false,
             blocked_on_flush: false,
