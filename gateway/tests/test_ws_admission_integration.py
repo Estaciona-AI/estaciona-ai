@@ -89,8 +89,8 @@ def test_slow_authentication_cannot_take_every_handshake_slot(server):
 
 
 async def alive(connection):
-    """No ping: the app socket accepts only text frames, as browsers send."""
-    await asyncio.sleep(0.5)
+    await asyncio.wait_for(await connection.ping(), timeout=5)
+    await asyncio.sleep(0.2)
     assert connection.state is State.OPEN
 
 
@@ -129,5 +129,25 @@ def test_an_oversized_client_message_closes_the_socket(server, endpoint, role):
             await alive(connection)
             await connection.send("x" * (16 * 1024 + 1))
             await closed_by_server(connection)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("endpoint,role", [("app", "user"), ("dashboard", "admin")])
+def test_a_client_ping_is_answered_and_keeps_the_socket_open(server, endpoint, role):
+    """Non-browser clients (websockets' keepalive) send pings every 20 s."""
+    user = insert_user(server, role=role)
+    jwt = token(server, user, role, int(time.time()) + 120)
+    status, ticket, _ = issue(server, jwt, endpoint)
+    assert status == 201, ticket
+
+    async def run():
+        async with websockets.connect(
+            ws_url(server, endpoint, ticket["ticket"]),
+            origin="http://localhost",
+            ping_interval=None,
+        ) as connection:
+            for _ in range(3):
+                await alive(connection)
 
     asyncio.run(run())

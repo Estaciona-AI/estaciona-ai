@@ -531,7 +531,7 @@ mod tests {
     }
 
     #[test]
-    fn r11_duplicate_name_does_not_replace_an_existing_route_origin() {
+    fn duplicate_name_does_not_replace_an_existing_route_origin() {
         let mut graph = ParkingGraph::new();
         let origin = graph.add_node("cam-01", 0.0, 0.0).unwrap();
         let spot = graph.add_node("spot", 1.0, 0.0).unwrap();

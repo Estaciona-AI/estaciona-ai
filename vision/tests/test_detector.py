@@ -547,7 +547,12 @@ def test_tensorrt_preload_skips_builder_resources(tmp_path, monkeypatch):
 def test_tensorrt_preload_without_extra_is_a_no_op(monkeypatch):
     module = load_detector()
     monkeypatch.setattr(module.importlib.util, "find_spec", lambda name: None)
+    loaded = []
+    monkeypatch.setattr(
+        module.ctypes, "CDLL", lambda *args, **kwargs: loaded.append(args)
+    )
     module._load_tensorrt_runtime()
+    assert loaded == []
 
 
 def cpu_runtime():

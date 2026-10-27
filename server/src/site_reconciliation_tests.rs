@@ -367,7 +367,7 @@ async fn downgrade_refuses_retired_spots_and_upgrade_preserves_legacy_rows(pool:
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn r11_navigation_collision_does_not_reconcile_any_database_changes(pool: PgPool) {
+async fn navigation_collision_does_not_reconcile_any_database_changes(pool: PgPool) {
     crate::state::init_state(
         crate::installation::test_support::provision(&pool).await,
         "test".into(),

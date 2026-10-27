@@ -16,7 +16,12 @@ import psycopg2
 from psycopg2 import sql
 import pytest
 
-from test_delivery_integration import IDENTITY, Server, server as delivery_server
+from test_delivery_integration import (
+    IDENTITY,
+    SERVER_COMMAND_TIMEOUT,
+    Server,
+    server as delivery_server,
+)
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("ESTACIONA_TEST_SERVER"),
@@ -78,7 +83,7 @@ def command(server, *args, environment=None):
         env=server.environment if environment is None else environment,
         capture_output=True,
         text=True,
-        timeout=15,
+        timeout=SERVER_COMMAND_TIMEOUT,
     )
 
 
@@ -500,7 +505,7 @@ def test_offline_package_validation_is_read_only_and_does_not_require_runtime(
         env=env,
         capture_output=True,
         text=True,
-        timeout=15,
+        timeout=SERVER_COMMAND_TIMEOUT,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "do-not-echo" not in result.stdout + result.stderr

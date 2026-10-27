@@ -61,7 +61,7 @@ mod tests {
     use super::*;
 
     #[tokio::test(flavor = "current_thread")]
-    async fn r10_filesystem_work_does_not_run_on_the_async_worker() {
+    async fn filesystem_work_does_not_run_on_the_async_worker() {
         let worker = std::thread::current().id();
         let store = LocalConfigStore::new(std::env::temp_dir());
         store
@@ -98,7 +98,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn r10_busy_destination_rejects_without_queuing_a_second_write() {
+    async fn busy_destination_rejects_without_queuing_a_second_write() {
         let store = LocalConfigStore::new(std::env::temp_dir());
         let (release, task) = pause_writer(store.clone()).await;
         let result = tokio::time::timeout(
@@ -114,7 +114,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn r10_canceled_caller_does_not_release_a_running_write() {
+    async fn canceled_caller_does_not_release_a_running_write() {
         let store = LocalConfigStore::new(std::env::temp_dir());
         let (release, task) = pause_writer(store.clone()).await;
         task.abort();
@@ -137,7 +137,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn r10_independent_destinations_do_not_share_write_admission() {
+    async fn independent_destinations_do_not_share_write_admission() {
         let first = LocalConfigStore::new("first-site");
         let second = LocalConfigStore::new("second-site");
         let (release, task) = pause_writer(first).await;
@@ -153,7 +153,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn r10_worker_panic_is_reported_and_releases_write_admission() {
+    async fn worker_panic_is_reported_and_releases_write_admission() {
         let store = LocalConfigStore::new(std::env::temp_dir());
         let result = store.run_write(|_| panic!("injected writer panic")).await;
         assert!(matches!(result, Err(ConfigWriteError::Storage(_))));
@@ -161,7 +161,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn r10_storage_failure_releases_write_admission() {
+    async fn storage_failure_releases_write_admission() {
         let store = LocalConfigStore::new(std::env::temp_dir());
         let result = store
             .run_write(|_| Err(io::Error::other("injected I/O failure")))
@@ -240,7 +240,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn r10_saving_separate_configs_preserves_extra_fields_and_isolation() {
+    async fn saving_separate_configs_preserves_extra_fields_and_isolation() {
         let first = ConfigFixture::new();
         let second = ConfigFixture::new();
         let one = LocalConfigStore::new(&first.0);
@@ -256,7 +256,7 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "./migrations")]
-    async fn r10_config_route_preserves_success_and_invalid_payload_contracts(pool: sqlx::PgPool) {
+    async fn config_route_preserves_success_and_invalid_payload_contracts(pool: sqlx::PgPool) {
         let fixture = ConfigFixture::new();
         let state = fixture.state(pool).await;
         let headers = principal(&state, "admin").await;
@@ -277,7 +277,7 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "./migrations")]
-    async fn r10_config_route_rejects_non_admin_before_storage_work(pool: sqlx::PgPool) {
+    async fn config_route_rejects_non_admin_before_storage_work(pool: sqlx::PgPool) {
         let fixture = ConfigFixture::new();
         let original = fixture.read();
         let state = fixture.state(pool).await;
@@ -304,9 +304,7 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "./migrations")]
-    async fn r10_config_route_returns_503_while_destination_is_busy_then_recovers(
-        pool: sqlx::PgPool,
-    ) {
+    async fn config_route_returns_503_while_destination_is_busy_then_recovers(pool: sqlx::PgPool) {
         let fixture = ConfigFixture::new();
         let original = fixture.read();
         let state = fixture.state(pool).await;
@@ -336,7 +334,7 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "./migrations")]
-    async fn r10_config_route_reports_storage_failure_without_exposing_paths(pool: sqlx::PgPool) {
+    async fn config_route_reports_storage_failure_without_exposing_paths(pool: sqlx::PgPool) {
         let fixture = ConfigFixture::new();
         let state = fixture.state(pool).await;
         let headers = principal(&state, "admin").await;
@@ -366,7 +364,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn r10_started_publication_completes_after_caller_cancellation() {
+    async fn started_publication_completes_after_caller_cancellation() {
         let fixture = ConfigFixture::new();
         let store = LocalConfigStore::new(&fixture.0);
         let (started, ready) = tokio::sync::oneshot::channel();
@@ -403,9 +401,7 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "./migrations")]
-    async fn r11_config_route_rejects_navigation_collisions_without_publication(
-        pool: sqlx::PgPool,
-    ) {
+    async fn config_route_rejects_navigation_collisions_without_publication(pool: sqlx::PgPool) {
         let fixture = ConfigFixture::new();
         let mut initial = ConfigFixture::payload("Short");
         initial[0]["path"][1]["x"] = serde_json::json!(0);
@@ -443,7 +439,7 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "./migrations")]
-    async fn r11_config_route_treats_unreadable_geometry_as_storage_failure(pool: sqlx::PgPool) {
+    async fn config_route_treats_unreadable_geometry_as_storage_failure(pool: sqlx::PgPool) {
         let fixture = ConfigFixture::new();
         let original = fixture.read();
         let state = fixture.state(pool).await;
