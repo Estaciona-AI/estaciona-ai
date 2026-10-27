@@ -24,9 +24,24 @@ LOCAL_BATCH_MAX_MESSAGES = 64
 LOCAL_BATCH_FLUSH_BYTES = 256 * 1024
 LOCAL_BATCH_MAX_AGE_SECONDS = 0.05
 LOCAL_BATCH_IDLE_SECONDS = 0.01
+# Confirmed events stay long enough for a producer to replay one it never saw
+# acknowledged locally; the server keeps its receipts, so a later replay is
+# answered as a duplicate. Metrics are diagnostics.
+SYNCED_RETENTION_HOURS = 24
+METRICS_RETENTION_DAYS = 7
+MAX_DB_BYTES = 2 * 1024**3
+RETENTION_BATCH = 5000
+RETENTION_INTERVAL_SECONDS = 300
 MIN_LOCAL_KEY_BYTES = 32
 MAX_SECRET_BYTES = 4096
 DEFAULT_GATEWAY_HOST = "127.0.0.1"
+
+
+@dataclass(frozen=True)
+class Retention:
+    synced_hours: float = SYNCED_RETENTION_HOURS
+    metrics_days: float = METRICS_RETENTION_DAYS
+    max_db_bytes: int = MAX_DB_BYTES
 
 
 @dataclass(frozen=True)
@@ -37,6 +52,7 @@ class Settings:
     host: str
     port: int
     max_in_flight: int
+    retention: Retention = Retention()
 
 
 def read_secret_file(path):
@@ -99,7 +115,26 @@ def load_settings(environ):
         max_in_flight = validate_ack_window(int(environ.get("EDGE_MAX_IN_FLIGHT", "8")))
     except ValueError:
         raise ValueError("EDGE_MAX_IN_FLIGHT must be an integer from 1 to 8") from None
+
+    def positive(name, default, kind):
+        try:
+            value = kind(environ.get(name, default))
+        except ValueError:
+            value = 0
+        if not value > 0:
+            raise ValueError(f"{name} must be a positive number")
+        return value
+
     return Settings(
+        retention=Retention(
+            synced_hours=positive(
+                "GATEWAY_SYNCED_RETENTION_HOURS", SYNCED_RETENTION_HOURS, float
+            ),
+            metrics_days=positive(
+                "GATEWAY_METRICS_RETENTION_DAYS", METRICS_RETENTION_DAYS, float
+            ),
+            max_db_bytes=positive("GATEWAY_MAX_DB_BYTES", MAX_DB_BYTES, int),
+        ),
         cloud_url=environ.get("SERVER_WS_URL", "wss://api.estaciona.tech/ws/edge"),
         cloud_key=cloud_key,
         local_key=local_key,
@@ -146,6 +181,10 @@ def init_db(db_path):
                 )
             conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS fallback_event_uuid ON fallback_events(event_uuid)"
+            )
+            # Pending rows are a small, moving minority of a large table.
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS fallback_pending ON fallback_events(id) WHERE synced = 0"
             )
             conn.commit()
         except Exception:
@@ -214,6 +253,77 @@ def mark_events_as_synced(db_path, event_ids):
             "UPDATE fallback_events SET synced = 1 WHERE id = ?",
             [(i,) for i in event_ids],
         )
+
+
+def _delete_batches(db_path, statement, cutoff):
+    deleted = 0
+    with closing(sqlite3.connect(db_path)) as conn:
+        while True:
+            with conn:
+                count = conn.execute(statement, (cutoff, RETENTION_BATCH)).rowcount
+            deleted += count
+            if count < RETENTION_BATCH:
+                break
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    return deleted
+
+
+def _cutoff(age):
+    moment = datetime.datetime.now(datetime.UTC) - age
+    # SQLite CURRENT_TIMESTAMP format, so text comparison orders correctly.
+    return moment.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def purge_synced_events(db_path, retention):
+    """Delete confirmed events older than `retention`; pending ones never."""
+    return _delete_batches(
+        db_path,
+        "DELETE FROM fallback_events WHERE id IN (SELECT id FROM fallback_events "
+        "WHERE synced = 1 AND created_at < ? ORDER BY id LIMIT ?)",
+        _cutoff(retention),
+    )
+
+
+def purge_metrics(metrics_path, retention):
+    return _delete_batches(
+        metrics_path,
+        "DELETE FROM metrics WHERE id IN (SELECT id FROM metrics "
+        "WHERE created_at < ? ORDER BY id LIMIT ?)",
+        _cutoff(retention),
+    )
+
+
+def used_bytes(db_path):
+    """Bytes in use: deleted rows leave free pages that new rows reuse, so the
+    file size alone would never shrink below the budget again."""
+    with closing(sqlite3.connect(db_path)) as conn:
+        pages = conn.execute("PRAGMA page_count").fetchone()[0]
+        free = conn.execute("PRAGMA freelist_count").fetchone()[0]
+        size = conn.execute("PRAGMA page_size").fetchone()[0]
+    wal = f"{db_path}-wal"
+    return (pages - free) * size + (os.path.getsize(wal) if os.path.exists(wal) else 0)
+
+
+def apply_retention(db_path, metrics_path, retention):
+    purge_synced_events(db_path, datetime.timedelta(hours=retention.synced_hours))
+    purge_metrics(metrics_path, datetime.timedelta(days=retention.metrics_days))
+
+
+def has_room(db_path, metrics_path, retention):
+    """Whether new events fit the budget, purging expired rows first if not."""
+    if used_bytes(db_path) < retention.max_db_bytes:
+        return True
+    apply_retention(db_path, metrics_path, retention)
+    return used_bytes(db_path) < retention.max_db_bytes
+
+
+async def retention_loop(db_path, metrics_path, retention=Retention()):
+    while True:
+        try:
+            await asyncio.to_thread(apply_retention, db_path, metrics_path, retention)
+        except Exception as error:
+            print(f"[ERROR] RETENTION_FAILED reason={error}", flush=True)
+        await asyncio.sleep(RETENTION_INTERVAL_SECONDS)
 
 
 def save_metric(
@@ -340,7 +450,9 @@ def is_authorized(headers, expected_key):
     return hmac.compare_digest(parts[1].encode(), expected_key.encode())
 
 
-async def handler(websocket, db_path, metrics_path, expected_key, sync_event):
+async def handler(
+    websocket, db_path, metrics_path, expected_key, sync_event, retention=None
+):
     if not is_authorized(websocket.request.headers, expected_key):
         await websocket.close(1008, "Unauthorized")
         return
@@ -468,6 +580,19 @@ async def handler(websocket, db_path, metrics_path, expected_key, sync_event):
                     f"{datetime.datetime.now(datetime.UTC).strftime('%Y-%m-%d %H:%M:%S')} [INFO] MSG_RECEIVED edge_id={edge_id} spot_id={spot_id} latency_ms={latency_ms:.1f}",
                     flush=True,
                 )
+
+            if (
+                events_to_insert
+                and retention is not None
+                and not await asyncio.to_thread(
+                    has_room, db_path, metrics_path, retention
+                )
+            ):
+                # Nothing of this batch is acknowledged: the producer keeps it
+                # in its own bounded outbox and retries later.
+                print("[ERROR] GATEWAY_STORAGE_FULL", flush=True)
+                await websocket.close(1013, "Gateway storage full")
+                return
 
             local_acks = []
             fresh_metrics = []
@@ -697,8 +822,17 @@ async def main():
         )
     )
 
+    asyncio.create_task(retention_loop(db_path, metrics_path, settings.retention))
+
     async def ws_handler(websocket, *args, **kwargs):
-        await handler(websocket, db_path, metrics_path, settings.local_key, sync_event)
+        await handler(
+            websocket,
+            db_path,
+            metrics_path,
+            settings.local_key,
+            sync_event,
+            settings.retention,
+        )
 
     async with websockets.serve(ws_handler, settings.host, settings.port):
         await asyncio.Future()

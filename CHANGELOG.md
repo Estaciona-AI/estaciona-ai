@@ -160,6 +160,12 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
 
 ### Fixed
 
+- The gateway's local database no longer grows without bound: confirmed events
+  are deleted 24 hours after they arrived and metrics after 7 days, in small
+  batches every five minutes; pending events are never deleted. Above
+  `GATEWAY_MAX_DB_BYTES` (2 GiB) new local events are refused with close code
+  1013 and stay in the producer's outbox. Pending deliveries use a partial
+  index.
 - A back-channel logout that arrives while a sign-in for the same provider
   session or account is still completing now ends it as well: the callback
   refuses an ID token issued before the logout.
