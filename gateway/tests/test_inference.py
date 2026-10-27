@@ -305,3 +305,46 @@ def test_forecast_never_falls_back_to_the_server_owner_credential(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "postgresql://owner@db/estaciona")
     with pytest.raises(ValueError, match="ML_DATABASE_URL"):
         train.get_db_engine()
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "postgresql://reader@127.0.0.1/estaciona",
+        "postgresql://reader@localhost/estaciona?sslmode=disable",
+        "postgresql://reader@[::1]:5432/estaciona",
+        "postgresql://reader@/estaciona?host=/run/postgresql",
+        "postgresql://reader@db.internal/estaciona?sslmode=verify-full",
+    ],
+)
+def test_forecast_database_tls_accepts_local_or_verified(url):
+    train.check_database_tls(url)
+
+
+@pytest.mark.parametrize(
+    "mode", [None, "disable", "allow", "prefer", "require", "verify-ca"]
+)
+def test_forecast_database_tls_refuses_unverified_remote_hosts(mode):
+    url = "postgresql://reader@db.internal/estaciona"
+    if mode:
+        url += f"?sslmode={mode}"
+    with pytest.raises(ValueError, match="verify-full"):
+        train.check_database_tls(url)
+
+
+def test_forecast_database_on_a_declared_private_network(monkeypatch):
+    remote = "postgresql://reader@db/estaciona?sslmode={}"
+    for mode in ("disable", "require", "verify-ca", "verify-full"):
+        train.check_database_tls(remote.format(mode), "private")
+    for mode in ("prefer", "allow"):
+        with pytest.raises(ValueError, match="verify-full"):
+            train.check_database_tls(remote.format(mode), "private")
+    with pytest.raises(ValueError, match="ML_DATABASE_NETWORK"):
+        train.check_database_tls(remote.format("verify-full"), "public")
+    # The engine is never created for a refused URL.
+    monkeypatch.setenv("ML_DATABASE_URL", "postgresql://reader@db/estaciona")
+    monkeypatch.delenv("ML_DATABASE_NETWORK", raising=False)
+    with patch.object(train, "create_engine") as create:
+        with pytest.raises(ValueError, match="verify-full"):
+            train.get_db_engine()
+    create.assert_not_called()

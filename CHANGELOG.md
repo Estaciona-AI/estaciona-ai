@@ -31,9 +31,12 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
   point the server's `DATABASE_URL` to that role.
 - **Secrets are checked at startup.** `JWT_SECRET` and `PLATE_SECRET_PEPPER`
   need at least 32 bytes. Each secret, and `DATABASE_URL`, can come from a
-  private file (`NAME_FILE`). A remote database needs `sslmode=verify-full`
-  (or `require`/`verify-ca`); `prefer` and `allow` are refused, and `disable`
-  is accepted only when set explicitly.
+  private file (`NAME_FILE`). A remote database needs `sslmode=verify-full`,
+  which checks the certificate and host name. `disable`, `require` and
+  `verify-ca` are accepted only with `DATABASE_NETWORK=private`, declaring a
+  private container network (Docker Compose sets it); `prefer` and `allow`
+  are refused. The forecast worker applies the same rule to
+  `ML_DATABASE_URL`, with `ML_DATABASE_NETWORK`.
 - **Docker Compose layout.** The database reads `infra/env/postgres.env`, the
   server reads `infra/env/server.env` and its secrets from files in
   `SECRETS_DIR` (see the header of `infra/docker-compose.yml`). The server
