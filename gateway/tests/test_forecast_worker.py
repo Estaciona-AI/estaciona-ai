@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy import text
 
 import gateway
 from ml import train, worker
@@ -74,6 +75,36 @@ def test_model_is_trained_only_when_missing_or_invalid(tmp_path, trainings):
         handle.write("\n")
     worker.ensure_model(engine, str(tmp_path))
     assert len(trainings) == 2
+
+    # A spot added to the map changes capacity: never serve the old artifact.
+    with engine.begin() as connection:
+        connection.execute(text("INSERT INTO spots VALUES ('s6', TRUE)"))
+    retrained = worker.ensure_model(engine, str(tmp_path))
+    assert len(trainings) == 3
+    assert retrained.manifest["context"]["capacity"] == 7
+    engine.dispose()
+
+
+def test_a_deployment_change_while_running_retrains_before_publishing(
+    tmp_path, trainings, monkeypatch
+):
+    monkeypatch.delenv("FORECAST_PROFILE", raising=False)
+    engine = campus_engine(days=42)
+    first = worker.ensure_model(engine, str(tmp_path))
+    profile = tmp_path / "profile.json"
+    profile.write_text(json.dumps({"timezone": "America/Manaus"}))
+    monkeypatch.setenv("FORECAST_PROFILE", str(profile))
+    # The loop finds the stored artifact stale, retrains, then publishes.
+    published, _, _ = run_loop(
+        engine, str(tmp_path), str(tmp_path / "outbox.db"), utc(2026, 10, 24, 12, 0), 1
+    )
+    assert len(trainings) == 2
+    assert len(published) == 1
+    manifest = json.loads((tmp_path / train.MANIFEST_FILE).read_text())
+    assert (
+        manifest["context"]["profile_sha256"]
+        != (first.manifest["context"]["profile_sha256"])
+    )
     engine.dispose()
 
 
@@ -119,12 +150,14 @@ def run_loop(engine, models_dir, outbox, start, cycles):
 def test_loop_publishes_hourly_and_retrains_daily(tmp_path, trainings, monkeypatch):
     monkeypatch.delenv("FORECAST_PROFILE", raising=False)
     engine = campus_engine(days=42)
-    # 02:50 in São Paulo: publish now, at 03:05, then retrain once before 04:05.
+    # 02:50 in São Paulo: publish now and at 03:05, retrain at 03:30 sharp
+    # (not at the next publication), then publish at 04:05.
     published, sleeps, sync_event = run_loop(
         engine, str(tmp_path), str(tmp_path / "outbox.db"), utc(2026, 10, 24, 5, 50), 4
     )
-    assert sleeps == [15 * 60, 3600, 3600, 3600]
-    assert [payload["type"] for payload in published] == ["TREND_PREDICTION_V2"] * 4
+    assert sleeps == [15 * 60, 25 * 60, 35 * 60, 3600]
+    # Waking up to retrain publishes nothing off the hourly schedule.
+    assert [payload["type"] for payload in published] == ["TREND_PREDICTION_V2"] * 3
     assert len(trainings) == 2  # Missing artifact at start, then the daily retrain.
     assert sync_event.is_set()
     engine.dispose()
@@ -144,10 +177,12 @@ def test_failed_retrain_keeps_serving_the_previous_model(
         raise RuntimeError("retrain fixture failure")
 
     monkeypatch.setattr(worker, "train_occupancy_model", fail)
-    # Publish at 03:20 in São Paulo, then fail the 03:30 retrain before 04:05.
-    published, _, _ = run_loop(
-        engine, str(tmp_path), str(tmp_path / "outbox.db"), utc(2026, 10, 24, 6, 20), 2
+    # Publish at 03:20 in São Paulo, fail the 03:30 retrain, publish at 04:05
+    # with the previous model.
+    published, sleeps, _ = run_loop(
+        engine, str(tmp_path), str(tmp_path / "outbox.db"), utc(2026, 10, 24, 6, 20), 3
     )
+    assert sleeps[:2] == [10 * 60, 35 * 60]
     assert len(failures) == 1
     assert len(published) == 2
     engine.dispose()
