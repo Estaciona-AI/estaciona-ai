@@ -26,7 +26,7 @@ from .train import get_db_engine, train_occupancy_model
 INFERENCE_MINUTE = 5
 # Local time of the daily retrain.
 RETRAIN_HOUR, RETRAIN_MINUTE = 3, 30
-READ_TABLES = ("physical_occupancy_hourly", "spots")
+READ_TABLES = ("physical_occupancy_hourly", "site_map_revisions", "spots")
 WRITABLE_TABLES = text("""
     SELECT DISTINCT c.relname
     FROM pg_class c
