@@ -59,6 +59,7 @@ pub struct ParkingGraph {
     edges: HashMap<NodeId, Vec<Edge>>,
     name_to_id: HashMap<String, NodeId>,
     next_id: usize,
+    entrances: Vec<String>,
 }
 
 impl ParkingGraph {
@@ -68,7 +69,30 @@ impl ParkingGraph {
             edges: HashMap::new(),
             name_to_id: HashMap::new(),
             next_id: 0,
+            entrances: Vec::new(),
         }
+    }
+
+    /// Where drivers arrive; recommendations start at the nearest one.
+    pub fn mark_entrance(&mut self, name: &str) {
+        if self.name_to_id.contains_key(name) && !self.entrances.iter().any(|e| e == name) {
+            self.entrances.push(name.to_owned());
+        }
+    }
+
+    /// The cheapest route from any entrance, with its cost.
+    pub fn route_from_nearest_entrance(&self, target: &str) -> Option<(u32, Vec<String>)> {
+        self.entrances
+            .iter()
+            .filter_map(|entrance| {
+                let cost = self.calculate_cost(entrance, target)?;
+                Some((cost, entrance))
+            })
+            .min_by_key(|(cost, entrance)| (*cost, (*entrance).clone()))
+            .and_then(|(cost, entrance)| {
+                self.calculate_route(entrance, target)
+                    .map(|route| (cost, route))
+            })
     }
 
     pub fn add_node(&mut self, name: &str, x: f32, y: f32) -> Result<NodeId, DuplicateNodeName> {

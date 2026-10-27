@@ -503,6 +503,7 @@ mod origin_handshake_tests {
             crate::installation::test_support::package(SiteConfig {
                 directory: std::env::temp_dir(),
                 parkings: vec![ParkingLotConfig {
+                    name: "Test lot".into(),
                     path: vec![PathNode { x: 0.0, z: 0.0 }, PathNode { x: 1.0, z: 0.0 }],
                 }],
                 spots: Vec::new(),

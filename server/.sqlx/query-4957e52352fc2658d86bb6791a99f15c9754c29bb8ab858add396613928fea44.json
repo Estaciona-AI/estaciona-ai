@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id \n        FROM spots \n        WHERE status = 'free' AND is_active\n          AND observation_timestamp > NOW() - make_interval(secs => $1)\n          AND id NOT IN ('A-01', 'A-02', 'A-03', 'A-04')\n        ",
+  "query": "SELECT id FROM spots WHERE status = 'free' AND is_active AND reserved_for = ANY($1) AND observation_timestamp > NOW() - make_interval(secs => $2) ORDER BY id",
   "describe": {
     "columns": [
       {
@@ -17,6 +17,7 @@
     ],
     "parameters": {
       "Left": [
+        "TextArray",
         "Float8"
       ]
     },
@@ -24,5 +25,5 @@
       false
     ]
   },
-  "hash": "494734cfacb45aca0369219f11b143648cf57526be371772821dbaa3e9329b63"
+  "hash": "4957e52352fc2658d86bb6791a99f15c9754c29bb8ab858add396613928fea44"
 }

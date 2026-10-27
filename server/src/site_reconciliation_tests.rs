@@ -9,6 +9,7 @@ fn site(spots: &[(&str, f64)]) -> SiteConfig {
     SiteConfig {
         directory: std::env::temp_dir(),
         parkings: vec![ParkingLotConfig {
+            name: "Test lot".into(),
             path: vec![PathNode { x: 0.0, z: 0.0 }, PathNode { x: 1.0, z: 0.0 }],
         }],
         spots: spots
@@ -20,6 +21,8 @@ fn site(spots: &[(&str, f64)]) -> SiteConfig {
                     y: 0.0,
                     z: 1.0,
                 },
+                reserved_for: None,
+                parking: None,
             })
             .collect(),
     }
@@ -419,4 +422,43 @@ async fn navigation_collision_does_not_reconcile_any_database_changes(pool: PgPo
             .unwrap();
         assert_eq!(after_revisions, revisions);
     }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn sector_and_kept_spots_come_from_the_map(pool: PgPool) {
+    let mut map = site(&[("north-1", 0.5), ("south-1", 2.0), ("kept", 1.0)]);
+    map.parkings.push(ParkingLotConfig {
+        name: "South".into(),
+        path: vec![PathNode { x: 2.0, z: 0.0 }, PathNode { x: 3.0, z: 0.0 }],
+    });
+    map.spots[1].parking = Some("South".into());
+    map.spots[2].reserved_for = Some(crate::site_config::ReservedFor::Elderly);
+    let first = crate::site_reconciliation::apply(&pool, &map)
+        .await
+        .unwrap();
+    let rows: Vec<(String, String, Option<String>)> =
+        sqlx::query_as("SELECT id, parking_lot, reserved_for FROM spots ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        rows,
+        [
+            ("kept".into(), "Test lot".into(), Some("elderly".into())),
+            ("north-1".into(), "Test lot".into(), None),
+            ("south-1".into(), "South".into(), None),
+        ]
+    );
+    // Changing who a spot is kept for is a new map revision and reaches the row.
+    map.spots[2].reserved_for = Some(crate::site_config::ReservedFor::Pcd);
+    let second = crate::site_reconciliation::apply(&pool, &map)
+        .await
+        .unwrap();
+    assert!(second > first);
+    let kept: Option<String> =
+        sqlx::query_scalar("SELECT reserved_for FROM spots WHERE id = 'kept'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(kept.as_deref(), Some("pcd"));
 }

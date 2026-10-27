@@ -503,8 +503,12 @@ async fn retired_spot_rejects_admin_mutation_without_releasing_history(pool: PgP
 
 async fn assert_recommendation_ignores_retired(pool: PgPool, branch: &str) {
     let f = Fixture::new(pool).await.unwrap();
-    let retired = if branch == "priority" { "A-01" } else { "B-07" };
-    sqlx::query("INSERT INTO spots (id,status,x,y,is_active,observation_timestamp) VALUES ($1,'free',1,0,FALSE,NOW() - INTERVAL '30 seconds'),('C-01','free',10,0,TRUE,NOW() - INTERVAL '30 seconds')").bind(retired).execute(f.state.installation.pool()).await.unwrap();
+    let retired = if branch == "priority" {
+        "KEPT-7"
+    } else {
+        "B-07"
+    };
+    sqlx::query("INSERT INTO spots (id,status,x,y,is_active,observation_timestamp,reserved_for) VALUES ($1,'free',1,0,FALSE,NOW() - INTERVAL '30 seconds',$2),('C-01','free',10,0,TRUE,NOW() - INTERVAL '30 seconds',$2)").bind(retired).bind((branch == "priority").then_some("pcd")).execute(f.state.installation.pool()).await.unwrap();
     if branch == "priority" {
         let pcd = f
             .state
@@ -534,6 +538,7 @@ async fn assert_recommendation_ignores_retired(pool: PgPool, branch: &str) {
     }
     let mut graph = ParkingGraph::new();
     let cam = graph.add_node("cam-01", 0.0, 0.0).unwrap();
+    graph.mark_entrance("cam-01");
     let old = graph.add_node(retired, 1.0, 0.0).unwrap();
     let current = graph.add_node("C-01", 10.0, 0.0).unwrap();
     graph.add_edge(cam, old, 1, true);
@@ -568,6 +573,7 @@ async fn recommendation_fixture(pool: PgPool) -> Fixture {
     let f = Fixture::new(pool).await.unwrap();
     let mut graph = ParkingGraph::new();
     let camera = graph.add_node("cam-01", 0.0, 0.0).unwrap();
+    graph.mark_entrance("cam-01");
     let spot = graph.add_node(&f.spot_id, 1.0, 0.0).unwrap();
     graph.add_edge(camera, spot, 1, true);
     *f.state.installation.graph.write().await = graph;
@@ -657,7 +663,7 @@ async fn free_spots_query_failure_is_unavailable_instead_of_full(pool: PgPool) {
         "ALTER TABLE spots RENAME TO r08_original_spots;
          CREATE FUNCTION r08_free_read_allowed() RETURNS BOOLEAN
          LANGUAGE plpgsql VOLATILE AS $$ BEGIN
-             IF strpos(current_query(), 'AND id NOT IN') > 0 THEN
+             IF strpos(current_query(), 'AND reserved_for IS NULL') > 0 THEN
                  RAISE EXCEPTION 'injected R08 free spots failure';
              END IF;
              RETURN TRUE;
@@ -701,6 +707,7 @@ async fn add_preferred_spot(f: &Fixture, spot_id: &str) {
         .unwrap();
     let mut graph = ParkingGraph::new();
     let camera = graph.add_node("cam-01", 0.0, 0.0).unwrap();
+    graph.mark_entrance("cam-01");
     let ordinary = graph.add_node(&f.spot_id, 1.0, 0.0).unwrap();
     let preferred = graph.add_node(spot_id, 10.0, 0.0).unwrap();
     graph.add_edge(camera, ordinary, 1, true);
@@ -711,9 +718,13 @@ async fn add_preferred_spot(f: &Fixture, spot_id: &str) {
 #[sqlx::test(migrations = "./migrations")]
 async fn valid_priority_still_takes_precedence_over_distance(pool: PgPool) {
     let f = recommendation_fixture(pool).await;
-    add_preferred_spot(&f, "A-01").await;
+    add_preferred_spot(&f, "KEPT-1").await;
+    sqlx::query("UPDATE spots SET reserved_for = 'pcd' WHERE id = 'KEPT-1'")
+        .execute(f.state.installation.pool())
+        .await
+        .unwrap();
     declare(&f, f.owner, None, Some(true)).await;
-    assert_recommended_spot(&f, "A-01").await;
+    assert_recommended_spot(&f, "KEPT-1").await;
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -1072,7 +1083,8 @@ async fn recommended_for(f: &Fixture, user: Uuid) -> (StatusCode, serde_json::Va
 #[sqlx::test(migrations = "./migrations")]
 async fn encrypted_eligibility_selects_reserved_spots(pool: PgPool) {
     let f = Fixture::new(pool).await.unwrap();
-    sqlx::query("INSERT INTO spots (id,status,x,y,observation_timestamp) VALUES ('A-01','free',5,0,NOW() - INTERVAL '30 seconds'),('A-03','free',5,0,NOW() - INTERVAL '30 seconds')")
+    // The map keeps these spots; their names carry no meaning.
+    sqlx::query("INSERT INTO spots (id,status,x,y,observation_timestamp,reserved_for) VALUES ('Z-PCD','free',5,0,NOW() - INTERVAL '30 seconds','pcd'),('Z-SENIOR','free',5,0,NOW() - INTERVAL '30 seconds','elderly')")
         .execute(f.state.installation.pool())
         .await
         .unwrap();
@@ -1083,7 +1095,8 @@ async fn encrypted_eligibility_selects_reserved_spots(pool: PgPool) {
     declare(&f, f.other, Some(sixty + Duration::days(1)), Some(true)).await;
     let mut graph = ParkingGraph::new();
     let camera = graph.add_node("cam-01", 0.0, 0.0).unwrap();
-    for spot in [f.spot_id.as_str(), "A-01", "A-03"] {
+    graph.mark_entrance("cam-01");
+    for spot in [f.spot_id.as_str(), "Z-PCD", "Z-SENIOR"] {
         let node = graph.add_node(spot, 1.0, 0.0).unwrap();
         graph.add_edge(camera, node, 1, true);
     }
@@ -1091,12 +1104,12 @@ async fn encrypted_eligibility_selects_reserved_spots(pool: PgPool) {
 
     assert_eq!(
         recommended_for(&f, f.owner).await.1["recommended_spot"],
-        "A-03"
+        "Z-SENIOR"
     );
     // One day short of 60 is not elderly; the disability declaration still applies.
     assert_eq!(
         recommended_for(&f, f.other).await.1["recommended_spot"],
-        "A-01"
+        "Z-PCD"
     );
     assert_eq!(
         recommended_for(&f, f.admin).await.1["recommended_spot"],
@@ -1165,6 +1178,7 @@ async fn recommendation_skips_a_nearer_spot_whose_camera_went_quiet(pool: PgPool
     .unwrap();
     let mut graph = ParkingGraph::new();
     let camera = graph.add_node("cam-01", 0.0, 0.0).unwrap();
+    graph.mark_entrance("cam-01");
     let near = graph.add_node(&f.spot_id, 1.0, 0.0).unwrap();
     let far = graph.add_node("R08-FAR", 10.0, 0.0).unwrap();
     graph.add_edge(camera, near, 1, true);
@@ -1254,4 +1268,61 @@ async fn snapshots_show_unknown_but_keep_reservations(pool: PgPool) {
     assert_eq!(rows["R08-OLD"], "unknown");
     assert_eq!(rows["R08-SEEN"], "occupied");
     assert_eq!(rows[&f.spot_id], "reserved");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn closest_spot_is_measured_from_the_nearest_of_two_entrances(pool: PgPool) {
+    let f = Fixture::new(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO spots (id,status,x,y,observation_timestamp) \
+         VALUES ('SOUTH-1','free',100,0,NOW() - INTERVAL '30 seconds')",
+    )
+    .execute(f.state.installation.pool())
+    .await
+    .unwrap();
+    let mut graph = ParkingGraph::new();
+    let north = graph.add_node("cam-01", 0.0, 0.0).unwrap();
+    let south = graph.add_node("entrance-1", 100.0, 0.0).unwrap();
+    graph.mark_entrance("cam-01");
+    graph.mark_entrance("entrance-1");
+    // The fixture spot is far from the north entrance, SOUTH-1 next to the south one.
+    let far = graph.add_node(&f.spot_id, 0.0, 50.0).unwrap();
+    let near = graph.add_node("SOUTH-1", 100.0, 1.0).unwrap();
+    graph.add_edge(north, far, 50, true);
+    graph.add_edge(south, near, 1, true);
+    *f.state.installation.graph.write().await = graph;
+    let (status, body) = recommended_for(&f, f.owner).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["recommended_spot"], "SOUTH-1");
+    assert_eq!(body["route"], serde_json::json!(["entrance-1", "SOUTH-1"]));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn spots_kept_by_the_map_are_never_offered_to_everyone(pool: PgPool) {
+    let f = Fixture::new(pool).await.unwrap();
+    // Named like an ordinary spot, kept for PcD by the map; nearer than the fixture spot.
+    sqlx::query(
+        "INSERT INTO spots (id,status,x,y,observation_timestamp,reserved_for) \
+         VALUES ('B-02','free',1,0,NOW() - INTERVAL '30 seconds','pcd')",
+    )
+    .execute(f.state.installation.pool())
+    .await
+    .unwrap();
+    let mut graph = ParkingGraph::new();
+    let camera = graph.add_node("cam-01", 0.0, 0.0).unwrap();
+    graph.mark_entrance("cam-01");
+    for (spot, cost) in [("B-02", 1), (f.spot_id.as_str(), 5)] {
+        let node = graph.add_node(spot, 1.0, 0.0).unwrap();
+        graph.add_edge(camera, node, cost, true);
+    }
+    *f.state.installation.graph.write().await = graph;
+    assert_eq!(
+        recommended_for(&f, f.owner).await.1["recommended_spot"],
+        f.spot_id
+    );
+    declare(&f, f.other, None, Some(true)).await;
+    assert_eq!(
+        recommended_for(&f, f.other).await.1["recommended_spot"],
+        "B-02"
+    );
 }

@@ -14,8 +14,12 @@ pub struct PathNode {
     pub z: f64,
 }
 
+/// A parking lot (sector) of the site. The first point of its path is its
+/// entrance: recommendations start at the nearest entrance.
 #[derive(Debug, Deserialize)]
 pub struct ParkingLotConfig {
+    #[serde(default)]
+    pub name: String,
     pub path: Vec<PathNode>,
 }
 
@@ -26,11 +30,36 @@ pub struct Coords3D {
     pub z: f64,
 }
 
+/// Who a spot is kept for, as the installation's map declares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReservedFor {
+    /// People with a declared disability (PcD).
+    Pcd,
+    /// People aged 60 or more.
+    Elderly,
+}
+
+impl ReservedFor {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pcd => "pcd",
+            Self::Elderly => "elderly",
+        }
+    }
+}
+
+// Maps carry drawing fields (polygons) the server does not read.
 #[derive(Debug, Deserialize)]
 pub struct Spot3DDef {
     pub id: String,
     #[serde(rename = "center3D")]
     pub center_3d: Coords3D,
+    #[serde(default)]
+    pub reserved_for: Option<ReservedFor>,
+    /// Name of the parking lot (sector) it belongs to; the first by default.
+    #[serde(default)]
+    pub parking: Option<String>,
 }
 
 #[derive(Debug)]
@@ -49,6 +78,7 @@ impl SiteConfig {
         let parkings: Vec<ParkingLotConfig> = serde_json::from_value(raw).map_err(invalid_data)?;
         let spots: Vec<Spot3DDef> = read_json(&directory.join("spots_3d.json"))?;
         validate_spots(&spots)?;
+        validate_spot_lots(&spots, &parkings)?;
         crate::site_graph::validate_names(&parkings, &spots).map_err(invalid_data)?;
         Ok(Self {
             directory,
@@ -56,6 +86,21 @@ impl SiteConfig {
             spots,
         })
     }
+}
+
+/// Every sector a spot names must be one of the parking lots.
+fn validate_spot_lots(spots: &[Spot3DDef], parkings: &[ParkingLotConfig]) -> io::Result<()> {
+    for spot in spots {
+        if let Some(parking) = &spot.parking
+            && !parkings.iter().any(|lot| &lot.name == parking)
+        {
+            return Err(invalid_data(format!(
+                "Spot {} names parking lot {parking:?}, which config.json does not have",
+                spot.id
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn validate_spots(spots: &[Spot3DDef]) -> io::Result<()> {
@@ -128,6 +173,13 @@ fn validate_parking_config(payload: &Value) -> io::Result<()> {
             return Err(invalid_data("Invalid parking lot configuration"));
         }
     }
+    let mut names = std::collections::HashSet::new();
+    if !lots
+        .iter()
+        .all(|lot| names.insert(lot.get("name").and_then(Value::as_str)))
+    {
+        return Err(invalid_data("Duplicate parking lot name"));
+    }
     Ok(())
 }
 
@@ -138,6 +190,8 @@ pub fn save_parking_config(directory: &Path, payload: &Value) -> io::Result<()> 
     let spots: Vec<Spot3DDef> =
         read_json(&directory.join("spots_3d.json")).map_err(io::Error::other)?;
     validate_spots(&spots).map_err(io::Error::other)?;
+    // A new lot list must still hold the lots stored spots refer to.
+    validate_spot_lots(&spots, &parkings)?;
     crate::site_graph::validate_names(&parkings, &spots).map_err(invalid_data)?;
     let content = serde_json::to_string_pretty(payload).map_err(invalid_data)?;
     if content.len() > MAX_MAP_BYTES {
@@ -475,5 +529,67 @@ mod tests {
             before
         );
         assert_no_pending_files(&fixture.0);
+    }
+
+    #[test]
+    fn spots_declare_their_sector_and_who_they_are_kept_for() {
+        let fixture = Fixture::new();
+        fixture.seed();
+        fixture.write(
+            "config.json",
+            &serde_json::json!([
+                {"name": "North", "path": [{"x": 0, "z": 0}, {"x": 1, "z": 0}]},
+                {"name": "South", "path": [{"x": 9, "z": 0}, {"x": 10, "z": 0}]}
+            ]),
+        );
+        fixture.write(
+            "spots_3d.json",
+            &serde_json::json!([
+                {"id": "S-1", "center3D": {"x": 9, "y": 0, "z": 1}, "parking": "South",
+                 "reserved_for": "elderly", "polygon3D": []}
+            ]),
+        );
+        let site = SiteConfig::load(&fixture.0).unwrap();
+        assert_eq!(site.parkings[1].name, "South");
+        assert_eq!(site.spots[0].parking.as_deref(), Some("South"));
+        assert_eq!(site.spots[0].reserved_for, Some(ReservedFor::Elderly));
+
+        for spot in [
+            serde_json::json!({"id": "S-1", "center3D": {"x": 9, "y": 0, "z": 1}, "parking": "West"}),
+            serde_json::json!({"id": "S-1", "center3D": {"x": 9, "y": 0, "z": 1}, "reserved_for": "staff"}),
+        ] {
+            fixture.write("spots_3d.json", &serde_json::json!([spot]));
+            assert_eq!(
+                SiteConfig::load(&fixture.0).unwrap_err().kind(),
+                io::ErrorKind::InvalidData,
+                "{spot}"
+            );
+        }
+    }
+
+    #[test]
+    fn lot_names_are_unique_and_a_saved_list_keeps_the_sectors_in_use() {
+        let fixture = Fixture::new();
+        fixture.seed();
+        let lots = |names: &[&str]| {
+            serde_json::json!(names
+                .iter()
+                .map(|name| serde_json::json!({"name": name, "path": [{"x": 0, "z": 0}, {"x": 1, "z": 0}]}))
+                .collect::<Vec<_>>())
+        };
+        assert_eq!(
+            save_parking_config(&fixture.0, &lots(&["Same", "Same"]))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        save_parking_config(&fixture.0, &lots(&["North", "South"])).unwrap();
+        fixture.write(
+            "spots_3d.json",
+            &serde_json::json!([{"id": "S-1", "center3D": {"x": 9, "y": 0, "z": 1}, "parking": "South"}]),
+        );
+        let error = save_parking_config(&fixture.0, &lots(&["North"])).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("South"));
     }
 }
