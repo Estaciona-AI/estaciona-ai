@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def catalog():
     manifest = json.loads((ROOT / "v1/manifest.json").read_text())
-    assert manifest["version"] == "1.4.0"
+    assert manifest["version"] == "2.0.0"
     assert manifest["wire_version"] == 1
     return json.loads((ROOT / manifest["catalog"]).read_text())
 

@@ -19,7 +19,12 @@ use crate::ws::messages::{
 
 mod catalog;
 
-pub const VERSION: &str = "1.4.0";
+/// Semantic version of the wire contract. A change that could break a strict
+/// consumer or producer of the bundle released on `main` needs a new major
+/// version (shared/contract_compat.py enforces it in CI). The HTTP prefix
+/// stays `/api/v1`: each installation serves one generation of its apps,
+/// deployed together with the server.
+pub const VERSION: &str = "2.0.0";
 
 pub fn physical_state_schema(_: &mut SchemaGenerator) -> Schema {
     json_schema!({"type":"string","enum":["free","occupied"]})
