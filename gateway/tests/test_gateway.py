@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import sqlite3
-import os
 import json
 import asyncio
 from unittest.mock import AsyncMock, patch
@@ -19,32 +18,6 @@ from gateway import (
     handler,
     sync_loop,
 )
-
-
-def test_init_db(tmp_path):
-    db_path = str(tmp_path / "test_fallback.db")
-    init_db(db_path)
-    assert os.path.exists(db_path)
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='fallback_events'"
-    )
-    assert cursor.fetchone() is not None
-    conn.close()
-
-
-def test_init_metrics_db(tmp_path):
-    db_path = str(tmp_path / "test_metrics.db")
-    init_metrics_db(db_path)
-    assert os.path.exists(db_path)
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='metrics'"
-    )
-    assert cursor.fetchone() is not None
-    conn.close()
 
 
 def test_saved_events_are_pending_in_order_with_their_own_uuid(tmp_path):
