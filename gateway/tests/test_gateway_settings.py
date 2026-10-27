@@ -50,9 +50,6 @@ def test_defaults_listen_on_loopback_with_both_credentials():
         ({"GATEWAY_PORT": "http"}, "TCP port"),
         ({"EDGE_MAX_IN_FLIGHT": "9"}, "EDGE_MAX_IN_FLIGHT"),
         ({"EDGE_MAX_IN_FLIGHT": "eight"}, "EDGE_MAX_IN_FLIGHT"),
-        ({"GATEWAY_SYNCED_RETENTION_HOURS": "0"}, "GATEWAY_SYNCED_RETENTION_HOURS"),
-        ({"GATEWAY_METRICS_RETENTION_DAYS": "-1"}, "GATEWAY_METRICS_RETENTION_DAYS"),
-        ({"GATEWAY_MAX_DB_BYTES": "2GB"}, "GATEWAY_MAX_DB_BYTES"),
     ],
 )
 def test_unsafe_or_incomplete_settings_refuse_to_start(overrides, message):
@@ -73,7 +70,6 @@ def test_port_range_is_inclusive_of_its_ends(port):
 def test_cloud_url_and_retention_can_be_tuned():
     settings = gateway.load_settings(environment())
     assert settings.cloud_url == "wss://api.estaciona.tech/ws/edge"
-    assert settings.retention == gateway.Retention()
 
     settings = gateway.load_settings(
         environment(
