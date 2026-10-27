@@ -565,4 +565,52 @@ mod tests {
         graph.add_edge(unmarked, spot, 1, true);
         assert_eq!(graph.route_from_nearest_entrance("spot").unwrap().0, 20);
     }
+
+    #[test]
+    fn has_edge_matches_only_existing_directed_edges() {
+        let mut graph = build_test_graph();
+        let one_way = graph.add_node("saida", 3.0, 0.0).unwrap();
+        let spot = graph.name_to_id["vaga-1"];
+        graph.add_edge(spot, one_way, 5, false);
+
+        assert!(graph.has_edge("entrada", "meio-1"));
+        assert!(graph.has_edge("meio-1", "entrada"));
+        assert!(graph.has_edge("vaga-1", "saida"));
+        assert!(!graph.has_edge("saida", "vaga-1"));
+        assert!(!graph.has_edge("entrada", "vaga-1"));
+        assert!(!graph.has_edge("fantasma", "entrada"));
+        assert!(!graph.has_edge("entrada", "fantasma"));
+    }
+
+    #[test]
+    fn set_edge_status_blocks_the_reverse_direction_too() {
+        let mut graph = build_test_graph();
+
+        graph.set_edge_status("entrada", "meio-1", false);
+
+        assert_eq!(
+            graph.calculate_route("vaga-1", "entrada").unwrap(),
+            vec!["vaga-1", "meio-2", "entrada"]
+        );
+        assert_eq!(graph.calculate_cost("vaga-1", "entrada"), Some(30));
+    }
+
+    #[test]
+    fn revision_tracks_topology_but_not_edge_status() {
+        let mut graph = build_test_graph();
+        let original = graph.revision();
+        assert_eq!(original.len(), 64);
+        assert!(original.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_eq!(build_test_graph().revision(), original);
+
+        graph.set_edge_status("entrada", "meio-1", false);
+        assert_eq!(graph.revision(), original);
+
+        let extra = graph.add_node("vaga-2", 3.0, 0.0).unwrap();
+        assert_ne!(graph.revision(), original);
+        let spot = graph.name_to_id["vaga-1"];
+        let with_node = graph.revision();
+        graph.add_edge(spot, extra, 5, true);
+        assert_ne!(graph.revision(), with_node);
+    }
 }
