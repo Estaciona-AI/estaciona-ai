@@ -4,7 +4,8 @@
       "enum": [
         "invalid_evaluation_window",
         "non_finite_values",
-        "evaluation_failed"
+        "evaluation_failed",
+        "no_prior_forecast"
       ],
       "type": "string"
     },
