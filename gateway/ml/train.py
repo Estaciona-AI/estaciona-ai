@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 import numpy as np
 import lightgbm as lgb
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, make_url, text
 from dotenv import load_dotenv
 
 if __package__:
@@ -48,6 +48,31 @@ else:
 load_dotenv(os.path.join(os.path.dirname(__file__), "../../.env"))
 
 
+LOCAL_DATABASE_HOSTS = ("localhost", "127.0.0.1", "::1")
+PRIVATE_NETWORK_SSL_MODES = ("disable", "require", "verify-ca", "verify-full")
+
+
+def check_database_tls(url, network=None):
+    """The server's policy: a remote database needs sslmode=verify-full unless
+    ML_DATABASE_NETWORK=private declares a private network. libpq defaults to
+    the opportunistic "prefer", which is never enough for a remote host."""
+    if network not in (None, "private"):
+        raise ValueError('ML_DATABASE_NETWORK accepts only "private"')
+    parsed = make_url(url)
+    host = parsed.query.get("host") or parsed.host or ""
+    if isinstance(host, tuple):
+        host = host[0]
+    if host.startswith("/") or host.strip("[]") in LOCAL_DATABASE_HOSTS:
+        return
+    mode = parsed.query.get("sslmode", "prefer")
+    allowed = PRIVATE_NETWORK_SSL_MODES if network == "private" else ("verify-full",)
+    if mode not in allowed:
+        raise ValueError(
+            "ML_DATABASE_URL: a remote database needs sslmode=verify-full, "
+            "or ML_DATABASE_NETWORK=private on a private container network"
+        )
+
+
 def get_db_engine():
     # Never fall back to DATABASE_URL: that is the owner credential of the server.
     db_url = os.environ.get("ML_DATABASE_URL")
@@ -55,6 +80,7 @@ def get_db_engine():
         raise ValueError("ML_DATABASE_URL must name the read-only forecast role")
     if db_url.startswith("postgres://"):
         db_url = db_url.replace("postgres://", "postgresql://", 1)
+    check_database_tls(db_url, os.environ.get("ML_DATABASE_NETWORK"))
     return create_engine(db_url)
 
 

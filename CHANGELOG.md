@@ -31,9 +31,12 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
   point the server's `DATABASE_URL` to that role.
 - **Secrets are checked at startup.** `JWT_SECRET` and `PLATE_SECRET_PEPPER`
   need at least 32 bytes. Each secret, and `DATABASE_URL`, can come from a
-  private file (`NAME_FILE`). A remote database needs `sslmode=verify-full`
-  (or `require`/`verify-ca`); `prefer` and `allow` are refused, and `disable`
-  is accepted only when set explicitly.
+  private file (`NAME_FILE`). A remote database needs `sslmode=verify-full`,
+  which checks the certificate and host name. `disable`, `require` and
+  `verify-ca` are accepted only with `DATABASE_NETWORK=private`, declaring a
+  private container network (Docker Compose sets it); `prefer` and `allow`
+  are refused. The forecast worker applies the same rule to
+  `ML_DATABASE_URL`, with `ML_DATABASE_NETWORK`.
 - **Docker Compose layout.** The database reads `infra/env/postgres.env`, the
   server reads `infra/env/server.env` and its secrets from files in
   `SECRETS_DIR` (see the header of `infra/docker-compose.yml`). The server
@@ -131,6 +134,13 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
   `ML_DATABASE_URL`. `ML_DATABASE_URL` is now required by the worker and must
   name the read-only role; it no longer falls back to `DATABASE_URL`.
 
+- Secret files must also be owned by the user the server runs as; a private
+  file of another account is refused.
+- The installation Docker Compose file takes `ESTACIONA_INSTANCE` and the
+  published ports (`DB_HOST_PORT`, `SERVER_HOST_PORT`, `HTTP_PORT`,
+  `HTTPS_PORT`), so two installations can run on one host. The defaults keep
+  the previous container, volume and port names.
+
 ### Removed
 
 - Local registration, password login and the `--create-admin` command, with
@@ -156,6 +166,9 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
   `GATEWAY_MAX_DB_BYTES` (2 GiB) new local events are refused with close code
   1013 and stay in the producer's outbox. Pending deliveries use a partial
   index.
+- A back-channel logout that arrives while a sign-in for the same provider
+  session or account is still completing now ends it as well: the callback
+  refuses an ID token issued before the logout.
 - Forecast timestamps were one hour late: the first point is now the current
   hour, the first one not yet observed. Predicted counts are rounded instead of
   truncated.

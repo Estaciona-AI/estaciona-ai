@@ -21,6 +21,7 @@ const BUSINESS_TABLES: &[&str] = &[
     "edge_gateways",
     "edge_path_state",
     "oidc_login_attempts",
+    "oidc_logout_marks",
     "physical_occupancy_hourly",
     "reservations",
     "site_map_revisions",

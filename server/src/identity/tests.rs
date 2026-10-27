@@ -289,13 +289,18 @@ impl Fixture {
 
     /// Signs in with these roles and returns the session cookie pair.
     async fn sign_in(&self, roles: &[&str]) -> String {
+        self.sign_in_with(roles, json!({})).await
+    }
+
+    /// Signs in with ID token claims changed, e.g. another provider session.
+    async fn sign_in_with(&self, roles: &[&str], changes: Value) -> String {
         let started = self.start("/app.html").await;
         let code = Uuid::new_v4().to_string();
-        self.grant(
-            &code,
-            &started,
-            self.provider.id_claims(&started.nonce, roles),
-        );
+        let mut claims = self.provider.id_claims(&started.nonce, roles);
+        for (key, value) in changes.as_object().unwrap() {
+            claims[key] = value.clone();
+        }
+        self.grant(&code, &started, claims);
         let response = self
             .callback(&code, &started.state, &started.sign_in_cookie)
             .await;
@@ -620,8 +625,11 @@ async fn back_channel_logout_ends_the_named_session_only_when_valid(pool: PgPool
     assert_eq!(post(f.provider.logout(json!({}))).await, 200);
     assert_eq!(f.me(&session).await.status().as_u16(), 401);
 
-    // Without a session ID, the subject's sessions end.
-    let second = f.sign_in(&["user"]).await;
+    // Without a session ID, the subject's sessions end. A sign-in after a
+    // logout gets a new provider session, as the provider issues one.
+    let second = f
+        .sign_in_with(&["user"], json!({"sid": "provider-session-2"}))
+        .await;
     let by_subject = f.provider.logout(json!({"sid": null, "sub": "subject-1"}));
     assert_eq!(post(by_subject).await, 200);
     assert_eq!(f.me(&second).await.status().as_u16(), 401);
@@ -758,4 +766,120 @@ async fn an_unreachable_provider_blocks_sign_in_only_until_it_answers() {
         identity.verify_logout("a.b.c").await.err(),
         Some(super::IdentityError::Discovery)
     );
+}
+
+async fn post_logout(f: &Fixture, token: String) -> u16 {
+    f.http
+        .post(format!("{}/auth/backchannel-logout", f.base))
+        .form(&[("logout_token", token)])
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16()
+}
+
+async fn live_sessions(pool: &PgPool, sid: &str) -> i64 {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM auth_sessions WHERE idp_session_id=$1 AND revoked_at IS NULL",
+    )
+    .bind(sid)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_logout_received_while_sign_in_completes_refuses_the_older_token(pool: PgPool) {
+    let f = fixture(pool.clone()).await;
+    let started = f.start("/app.html").await;
+    // The provider issued the token, then ended that session before the
+    // browser came back with the code.
+    f.grant(
+        "in-flight",
+        &started,
+        f.provider.id_claims(&started.nonce, &["admin"]),
+    );
+    assert_eq!(post_logout(&f, f.provider.logout(json!({}))).await, 200);
+    let response = f
+        .callback("in-flight", &started.state, &started.sign_in_cookie)
+        .await;
+    assert_eq!(response.status().as_u16(), 401);
+    assert!(cookie(&response, "__Host-estaciona_session").is_none());
+    assert_eq!(live_sessions(&pool, "provider-session-1").await, 0);
+
+    // A new provider session, or a token issued after the logout, signs in.
+    let session = f
+        .sign_in_with(&["user"], json!({"sid": "provider-session-2"}))
+        .await;
+    assert_eq!(f.me(&session).await.status().as_u16(), 200);
+    let later = chrono::Utc::now().timestamp() + 5;
+    let session = f.sign_in_with(&["user"], json!({"iat": later})).await;
+    assert_eq!(f.me(&session).await.status().as_u16(), 200);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn an_account_logout_refuses_every_token_issued_before_it(pool: PgPool) {
+    let f = fixture(pool.clone()).await;
+    let started = f.start("/app.html").await;
+    f.grant(
+        "in-flight",
+        &started,
+        f.provider.id_claims(&started.nonce, &["user"]),
+    );
+    let by_subject = f.provider.logout(json!({"sid": null, "sub": "subject-1"}));
+    assert_eq!(post_logout(&f, by_subject).await, 200);
+    let response = f
+        .callback("in-flight", &started.state, &started.sign_in_cookie)
+        .await;
+    assert_eq!(response.status().as_u16(), 401);
+    let users: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM auth_sessions")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(users, 0);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn concurrent_logout_and_callback_never_leave_the_ended_session_alive(pool: PgPool) {
+    let f = fixture(pool.clone()).await;
+    for round in 0..12 {
+        let sid = format!("provider-session-race-{round}");
+        let started = f.start("/app.html").await;
+        let mut claims = f.provider.id_claims(&started.nonce, &["user"]);
+        claims["sid"] = json!(sid);
+        let code = format!("race-{round}");
+        f.grant(&code, &started, claims);
+        let logout = f.provider.logout(json!({"sid": sid}));
+        let (callback, logged_out) = tokio::join!(
+            f.callback(&code, &started.state, &started.sign_in_cookie),
+            post_logout(&f, logout),
+        );
+        assert_eq!(logged_out, 200, "round {round}");
+        assert!(
+            matches!(callback.status().as_u16(), 303 | 401),
+            "round {round}"
+        );
+        assert_eq!(live_sessions(&pool, &sid).await, 0, "round {round}");
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn expired_logout_marks_are_cleaned_up(pool: PgPool) {
+    let f = fixture(pool.clone()).await;
+    assert_eq!(post_logout(&f, f.provider.logout(json!({}))).await, 200);
+    let expired = sqlx::query(
+        "UPDATE oidc_logout_marks SET expires_at = NOW() - INTERVAL '1 second' \
+         WHERE kind = 'sid' AND value = 'provider-session-1'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(expired.rows_affected(), 1, "the logout left its mark");
+    crate::sessions::cleanup_expired(&pool).await.unwrap();
+    let marks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM oidc_logout_marks")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(marks, 0);
 }

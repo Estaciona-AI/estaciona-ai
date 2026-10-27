@@ -77,14 +77,25 @@ fn signing_secret(
     Ok(value)
 }
 
-/// Plain or opportunistic TLS (`prefer`, `allow`) is accepted only for a local
-/// database. A remote one needs `verify-full` (or `verify-ca`/`require`), or an
-/// explicit `disable` for a private container network.
+/// A local database (loopback or socket) may use any `sslmode`. A remote one
+/// needs `sslmode=verify-full`, which checks the server's certificate and
+/// name, unless `DATABASE_NETWORK=private` states that the path is a private
+/// network (a container network): then `disable`, `require` and `verify-ca`
+/// are also accepted. Opportunistic modes (`prefer`, `allow`) never are.
 fn database(
     get: &mut impl FnMut(&str) -> Option<OsString>,
 ) -> Result<PgConnectOptions, ConfigError> {
     let url = secret(get, "DATABASE_URL", "DATABASE_URL_FILE")?;
     let options = PgConnectOptions::from_str(&url).map_err(|_| ConfigError("DATABASE_URL"))?;
+    let private_network = match get("DATABASE_NETWORK") {
+        None => false,
+        Some(value) if value == "private" => true,
+        Some(_) => {
+            return Err(ConfigError(
+                "DATABASE_NETWORK (only \"private\" is accepted)",
+            ));
+        }
+    };
     let host = options
         .get_host()
         .trim_start_matches('[')
@@ -93,9 +104,15 @@ fn database(
         || host.starts_with('/')
         || host == "localhost"
         || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback());
-    if !local && matches!(options.get_ssl_mode(), PgSslMode::Prefer | PgSslMode::Allow) {
+    let accepted = local
+        || match options.get_ssl_mode() {
+            PgSslMode::VerifyFull => true,
+            PgSslMode::Disable | PgSslMode::Require | PgSslMode::VerifyCa => private_network,
+            PgSslMode::Prefer | PgSslMode::Allow => false,
+        };
+    if !accepted {
         return Err(ConfigError(
-            "DATABASE_URL (a remote database needs sslmode=verify-full, or sslmode=disable on a private container network)",
+            "DATABASE_URL (a remote database needs sslmode=verify-full, or DATABASE_NETWORK=private on a private container network)",
         ));
     }
     Ok(options)
@@ -339,30 +356,38 @@ mod tests {
     }
 
     #[test]
-    fn remote_databases_need_explicit_tls_or_an_explicit_private_network() {
-        let accepts = |url: &str| {
+    fn remote_databases_need_verified_tls_or_a_declared_private_network() {
+        let accepts = |url: &str, network: Option<&str>| {
             let mut data = values();
             data.insert("DATABASE_URL", url.into());
+            if let Some(network) = network {
+                data.insert("DATABASE_NETWORK", network.into());
+            }
             RuntimeConfig::parse(|key| data.get(key).cloned()).is_ok()
         };
+        // Local databases, any mode.
         for url in [
             "postgres://u:p@127.0.0.1/db",
-            "postgres://u:p@localhost/db",
-            "postgres://u:p@[::1]/db",
+            "postgres://u:p@localhost/db?sslmode=disable",
+            "postgres://u:p@[::1]/db?sslmode=prefer",
             "postgres://u:p@localhost/db?host=/run/postgresql",
-            "postgres://u:p@db.internal/db?sslmode=verify-full",
-            "postgres://u:p@db.internal/db?sslmode=require",
-            "postgres://u:p@db/db?sslmode=disable",
         ] {
-            assert!(accepts(url), "{url}");
+            assert!(accepts(url, None), "{url}");
         }
-        for url in [
-            "postgres://u:p@db.internal/db",
-            "postgres://u:p@db.internal/db?sslmode=prefer",
-            "postgres://u:p@10.0.0.5/db?sslmode=allow",
-        ] {
-            assert!(!accepts(url), "{url}");
+        // Remote: only a verified certificate and name, unless declared private.
+        let remote = |mode: &str| format!("postgres://u:p@db.internal/db?sslmode={mode}");
+        assert!(accepts(&remote("verify-full"), None));
+        for mode in ["disable", "require", "verify-ca", "prefer", "allow"] {
+            assert!(!accepts(&remote(mode), None), "{mode}");
         }
+        assert!(!accepts("postgres://u:p@10.0.0.5/db", None));
+        for mode in ["disable", "require", "verify-ca", "verify-full"] {
+            assert!(accepts(&remote(mode), Some("private")), "{mode}");
+        }
+        for mode in ["prefer", "allow"] {
+            assert!(!accepts(&remote(mode), Some("private")), "{mode}");
+        }
+        assert!(!accepts(&remote("verify-full"), Some("public")));
     }
 
     #[test]
