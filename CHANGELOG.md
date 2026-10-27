@@ -72,6 +72,13 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
   observation is older than `OBSERVATION_STALE_AFTER_SECS` (120 s) or that no
   camera has seen yet is `unknown` in snapshots and updates. It cannot be
   reserved (409) or recommended until a camera reports it again.
+- **Maps declare kept spots, sectors and entrances.** Spot names no longer
+  imply anything: mark spots kept for people with a disability or aged 60 and
+  over with `"reserved_for": "pcd"` or `"elderly"` in `spots_3d.json` (the
+  Centro map's A-01/A-02 and A-03/A-04 need it). A spot may name its parking
+  lot with `"parking"`; the first lot is the default and the stored sector. The
+  first point of each lot's path is an entrance (`cam-01` for the first lot,
+  `entrance-N` for the others) and recommendations start at the nearest one.
 
 ### Added
 
