@@ -28,7 +28,7 @@ impl Fixture {
                 .await?;
         }
         let spot_id = format!("R01-{}", Uuid::new_v4());
-        sqlx::query("INSERT INTO spots (id, status, x, y) VALUES ($1, 'free', 0, 0)")
+        sqlx::query("INSERT INTO spots (id, status, x, y, observation_timestamp) VALUES ($1, 'free', 0, 0, NOW() - INTERVAL '30 seconds')")
             .bind(&spot_id)
             .execute(pool)
             .await?;

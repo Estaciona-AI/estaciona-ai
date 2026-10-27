@@ -286,6 +286,11 @@ def server(tmp_path):
                 hashlib.sha256(KEY.encode()).digest(),
             ),
         )
+        # A camera saw the mapped spot moments ago: free and reservable. A spot
+        # without a recent observation is unknown and cannot be reserved.
+        instance.query(
+            "UPDATE spots SET observation_timestamp = NOW() - INTERVAL '30 seconds'"
+        )
         for camera_id in ("test-camera", "session-camera"):
             instance.query(
                 "INSERT INTO edge_camera_grants (gateway_id, camera_id, spot_update, car_detected) "
@@ -359,7 +364,7 @@ def test_gateway_recovers_a_lost_ack_after_both_processes_restart(
     outbox, metrics = str(tmp_path / "outbox.db"), str(tmp_path / "metrics.db")
     gateway.init_db(outbox)
     gateway.init_metrics_db(metrics)
-    event_id = gateway.save_event(outbox, json.dumps(message("unused")["payload"]))
+    event_id = gateway.save_event(outbox, json.dumps(message(str(uuid4()))["payload"]))
     gateway.save_metric(metrics, "cam", "R02-A", "occupied", "t0", "t1", "t2", event_id)
     frames, acks = [], []
     current_key = KEY
@@ -629,7 +634,7 @@ def test_a_replay_after_retention_is_answered_as_a_duplicate(server, tmp_path, c
     outbox, metrics = str(tmp_path / "outbox.db"), str(tmp_path / "metrics.db")
     gateway.init_db(outbox)
     gateway.init_metrics_db(metrics)
-    payload = json.dumps(message("unused")["payload"])
+    payload = json.dumps(message(str(uuid4()))["payload"])
     event_id = gateway.save_event(outbox, payload)
 
     async def deliver():

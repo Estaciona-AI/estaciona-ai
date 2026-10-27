@@ -114,6 +114,11 @@ async fn removing_active_reservation_rejects_the_whole_revision(pool: PgPool) {
     crate::site_reconciliation::apply(&pool, &site(&[("R07-A", 2.0), ("R07-B", 3.0)]))
         .await
         .unwrap();
+    // A camera reported the spot moments ago, so it may be reserved.
+    sqlx::query("UPDATE spots SET observation_timestamp = NOW() - INTERVAL '30 seconds'")
+        .execute(&pool)
+        .await
+        .unwrap();
     let owner = user(&pool).await;
     let claim = crate::reservation_store::create(
         &pool,
@@ -270,6 +275,11 @@ async fn invalid_map_does_not_change_current_revision(pool: PgPool) {
 #[sqlx::test(migrations = "./migrations")]
 async fn reconciliation_waits_for_in_flight_reservation_then_refuses_retirement(pool: PgPool) {
     crate::site_reconciliation::apply(&pool, &site(&[("R07-A", 2.0)]))
+        .await
+        .unwrap();
+    // A camera reported the spot moments ago, so it may be reserved.
+    sqlx::query("UPDATE spots SET observation_timestamp = NOW() - INTERVAL '30 seconds'")
+        .execute(&pool)
         .await
         .unwrap();
     let owner = user(&pool).await;

@@ -322,7 +322,8 @@
           "enum": [
             "free",
             "occupied",
-            "reserved"
+            "reserved",
+            "unknown"
           ],
           "type": "string"
         },

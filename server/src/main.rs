@@ -11,6 +11,7 @@ mod edge_cli;
 mod edge_delivery;
 mod edge_operations;
 mod edge_state;
+mod freshness;
 mod identity;
 pub mod installation;
 mod lpr;
@@ -215,6 +216,7 @@ async fn main() {
         runtime.expect("administrative commands return before runtime initialization");
     let ws_origin_policy = config.ws_origins;
     let lpr_mode = config.lpr_mode;
+    freshness::configure(config.observation_stale_after_secs);
     // Accounts are created and signed in at the identity provider only. Its
     // metadata loads in the background: an outage there blocks sign-in only.
     let identity = match identity::IdentityProvider::new(config.identity) {
@@ -235,6 +237,7 @@ async fn main() {
     )
     .await
     .expect("Failed to reconcile installation map");
+    freshness::spawn_sweeper(parking_state.clone());
 
     tracing::info!(organization_id = %parking_state.installation.identity().organization_id(),
         installation_id = %parking_state.installation.identity().installation_id(),
