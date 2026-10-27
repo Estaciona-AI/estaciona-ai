@@ -68,6 +68,20 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
   profile's `sha256` (or `VISION_MODEL_SHA256` for the legacy client).
   TensorRT engine names now include the model digest, so engines are rebuilt
   once after this upgrade.
+- **A production server needs the restricted database role.** It refuses to
+  start when its role is a superuser, can create databases or roles, bypasses
+  row security, can create objects in `public` or owns application tables.
+  New Docker Compose volumes create `estaciona_owner` (no superuser powers) and
+  `estaciona_app` from `ESTACIONA_OWNER_PASSWORD` and `ESTACIONA_APP_PASSWORD`
+  in `infra/env/postgres.env`; `POSTGRES_USER` is now only the container
+  superuser. An existing volume keeps its roles: create a non-superuser owner,
+  transfer the database and schema to it, and point `migration_database_url`
+  to it.
+- **Installation administrators sign in with a one-time code.** The realm's
+  browser flow asks holders of the realm role `estaciona-mfa` (given with every
+  admin role by `tools/identity/provision.py`) to set up and use TOTP. A realm
+  imported before this release keeps its flow: import the new flow and role,
+  or recreate the realm, and give `estaciona-mfa` to existing administrators.
 - **Apps must handle the spot status `unknown`.** A spot whose latest
   observation is older than `OBSERVATION_STALE_AFTER_SECS` (120 s) or that no
   camera has seen yet is `unknown` in snapshots and updates. It cannot be

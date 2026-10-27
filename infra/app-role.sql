@@ -2,27 +2,41 @@
 -- Run as the database owner (the role that runs --installation-init and
 -- --migrate) in the application database, after --installation-init. Safe to
 -- repeat, and repeat it after a release adds tables owned by another role.
--- Set the password separately, outside version control:
+-- An owner without role powers (infra/db-init) cannot create or alter roles:
+-- db-init then creates estaciona_app, and this script only checks it. A role
+-- that can manage roles creates it here; set its password separately, outside
+-- version control:
 --   ALTER ROLE estaciona_app PASSWORD '...';
 -- The server then uses this role in DATABASE_URL; --migrate keeps the owner.
 
 DO $$
+DECLARE
+    manages_roles BOOLEAN;
 BEGIN
     IF to_regclass('public._sqlx_migrations') IS NULL
         OR to_regclass('public.installation_binding') IS NULL THEN
         RAISE EXCEPTION 'Run --installation-init before granting the runtime role';
     END IF;
+    SELECT rolsuper OR rolcreaterole INTO manages_roles
+        FROM pg_roles WHERE rolname = current_user;
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'estaciona_app') THEN
+        IF NOT manages_roles THEN
+            RAISE EXCEPTION 'Create estaciona_app first (infra/db-init does) or run as a role that can create roles';
+        END IF;
         CREATE ROLE estaciona_app LOGIN;
+    END IF;
+    IF manages_roles THEN
+        ALTER ROLE estaciona_app
+            NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+    ELSIF EXISTS (
+        SELECT 1 FROM pg_roles WHERE rolname = 'estaciona_app'
+            AND (rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls)
+    ) THEN
+        RAISE EXCEPTION 'estaciona_app holds more than row privileges';
     END IF;
 END
 $$;
 
-ALTER ROLE estaciona_app
-    NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
-
--- Only the owner creates objects in public (PostgreSQL 15 default, also enforced
--- on databases created by older versions).
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 REVOKE ALL ON SCHEMA public FROM estaciona_app;
 GRANT USAGE ON SCHEMA public TO estaciona_app;

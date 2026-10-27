@@ -31,6 +31,100 @@
   "eventsExpiration": 7776000,
   "adminEventsEnabled": true,
   "adminEventsDetailsEnabled": false,
+  "roles": {
+    "realm": [
+      {
+        "name": "estaciona-mfa",
+        "description": "Signs in with a one-time code too; given with every installation admin role by tools/identity/provision.py."
+      }
+    ]
+  },
+  "otpPolicyType": "totp",
+  "otpPolicyAlgorithm": "HmacSHA256",
+  "otpPolicyDigits": 6,
+  "otpPolicyPeriod": 30,
+  "browserFlow": "estaciona browser",
+  "authenticatorConfig": [
+    {
+      "alias": "estaciona-mfa role",
+      "config": {
+        "condUserRole": "estaciona-mfa",
+        "negate": "false"
+      }
+    }
+  ],
+  "authenticationFlows": [
+    {
+      "alias": "estaciona browser",
+      "description": "Browser sign-in; accounts holding estaciona-mfa also give a one-time code.",
+      "providerId": "basic-flow",
+      "topLevel": true,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticator": "auth-cookie",
+          "authenticatorFlow": false,
+          "requirement": "ALTERNATIVE",
+          "priority": 10,
+          "userSetupAllowed": false
+        },
+        {
+          "authenticatorFlow": true,
+          "flowAlias": "estaciona forms",
+          "requirement": "ALTERNATIVE",
+          "priority": 20,
+          "userSetupAllowed": false
+        }
+      ]
+    },
+    {
+      "alias": "estaciona forms",
+      "description": "Password, then a one-time code when required.",
+      "providerId": "basic-flow",
+      "topLevel": false,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticator": "auth-username-password-form",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 10,
+          "userSetupAllowed": false
+        },
+        {
+          "authenticatorFlow": true,
+          "flowAlias": "estaciona admin otp",
+          "requirement": "CONDITIONAL",
+          "priority": 20,
+          "userSetupAllowed": false
+        }
+      ]
+    },
+    {
+      "alias": "estaciona admin otp",
+      "description": "Administrators set up and then always use a one-time code.",
+      "providerId": "basic-flow",
+      "topLevel": false,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticator": "conditional-user-role",
+          "authenticatorConfig": "estaciona-mfa role",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 10,
+          "userSetupAllowed": false
+        },
+        {
+          "authenticator": "auth-otp-form",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 20,
+          "userSetupAllowed": true
+        }
+      ]
+    }
+  ],
   "components": {
     "org.keycloak.keys.KeyProvider": [
       {
