@@ -84,6 +84,20 @@ def get_db_engine():
     return create_engine(db_url)
 
 
+def deployment_context(engine, capacity):
+    """What an artifact must match to be served: the installation whose
+    database it read and the site profile (which depends on capacity)."""
+    with engine.connect() as connection:
+        installation = connection.execute(
+            text("SELECT installation_id FROM installation_binding")
+        ).scalar_one_or_none()
+    return {
+        "installation_id": None if installation is None else str(installation),
+        "profile_sha256": profile_from_env(capacity).digest(),
+        "capacity": capacity,
+    }
+
+
 # Occupancy model: LightGBM on occupancy rate, one row per forecast horizon.
 LOOKBACK = 4 * WEEK
 SIM_VARIANTS = 16
@@ -299,6 +313,7 @@ def train_occupancy_model(engine=None, models_dir=None, variants=SIM_VARIANTS):
         "real_hours": real_hours,
         "source": "blended" if real_hours else "synthetic_prior",
         "profile": {"specified": profile.specified, "sha256": profile.digest()},
+        "context": deployment_context(engine, capacity),
         "simulator": {"variants": variants, "days": SIM_DAYS, "seed": SIM_SEED},
         "evaluation": evaluation,
         "serving": serving,

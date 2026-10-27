@@ -144,6 +144,7 @@ def test_worker_publishes_through_its_own_edge_credential(
                 str(tmp_path / "forecast_metrics.db"),
                 server.url,
                 FORECAST_KEY,
+                str(tmp_path / "forecast_ledger.db"),
             )
         )
         try:
@@ -158,6 +159,11 @@ def test_worker_publishes_through_its_own_edge_credential(
     (stored,) = server.query("SELECT payload FROM edge_forecast_state WHERE singleton")
     assert stored[0]["type"] == "TREND_PREDICTION_V2"
     assert stored[0]["max_capacity"] == published["max_capacity"] == 1
+    # The first forecast has nothing issued a day earlier to be scored by,
+    # and the server accepts saying so.
+    assert stored[0]["evaluation"]["reason"] == "no_prior_forecast"
+    with closing(sqlite3.connect(tmp_path / "forecast_ledger.db")) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM forecasts").fetchone() == (1,)
 
     def hours(forecast):
         # The server re-serializes UTC instants with a Z suffix.

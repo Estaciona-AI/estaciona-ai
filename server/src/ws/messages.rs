@@ -77,6 +77,8 @@ pub enum EvaluationFailure {
     InvalidEvaluationWindow,
     NonFiniteValues,
     EvaluationFailed,
+    // No forecast was issued 24 h before; only issued forecasts are scored.
+    NoPriorForecast,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]

@@ -18,7 +18,7 @@ from sqlalchemy import text
 
 import gateway
 
-from .inference import PredictiveEngine
+from .inference import ForecastLedger, PredictiveEngine, StaleArtifact
 from .site_calendar import profile_from_env
 from .train import get_db_engine, train_occupancy_model
 
@@ -26,7 +26,12 @@ from .train import get_db_engine, train_occupancy_model
 INFERENCE_MINUTE = 5
 # Local time of the daily retrain.
 RETRAIN_HOUR, RETRAIN_MINUTE = 3, 30
-READ_TABLES = ("physical_occupancy_hourly", "site_map_revisions", "spots")
+READ_TABLES = (
+    "installation_binding",
+    "physical_occupancy_hourly",
+    "site_map_revisions",
+    "spots",
+)
 WRITABLE_TABLES = text("""
     SELECT DISTINCT c.relname
     FROM pg_class c
@@ -81,18 +86,19 @@ def next_retrain(now, zone):
     return run.astimezone(timezone.utc)
 
 
-def retrain(engine, models_dir):
+def retrain(engine, models_dir, ledger=None):
     train_occupancy_model(engine, models_dir)
-    return PredictiveEngine(models_dir, engine)
+    return PredictiveEngine(models_dir, engine, ledger)
 
 
-def ensure_model(engine, models_dir):
-    """Serve the stored artifact, or train one when it is missing or invalid."""
+def ensure_model(engine, models_dir, ledger=None):
+    """Serve the stored artifact, or train one when it is missing, invalid or
+    trained for another installation, site profile or capacity."""
     try:
-        return PredictiveEngine(models_dir, engine)
+        return PredictiveEngine(models_dir, engine, ledger)
     except (OSError, ValueError) as error:
         log("INFO", f"FORECAST_MODEL_UNAVAILABLE reason={error}")
-    return retrain(engine, models_dir)
+    return retrain(engine, models_dir, ledger)
 
 
 async def forecast_loop(
@@ -101,41 +107,54 @@ async def forecast_loop(
     outbox,
     sync_event,
     *,
+    ledger=None,
     clock=lambda: datetime.now(timezone.utc),
     sleep=asyncio.sleep,
 ):
-    predictor = await asyncio.to_thread(ensure_model, engine, models_dir)
+    predictor = await asyncio.to_thread(ensure_model, engine, models_dir, ledger)
     capacity = await asyncio.to_thread(predictor.get_capacity)
     zone = profile_from_env(capacity).timezone
     retrain_at = next_retrain(clock(), zone)
+    publish_at = clock()
     while True:
         if clock() >= retrain_at:
             try:
-                predictor = await asyncio.to_thread(retrain, engine, models_dir)
+                predictor = await asyncio.to_thread(retrain, engine, models_dir, ledger)
                 log("INFO", "FORECAST_MODEL_RETRAINED")
             except Exception as error:
                 # The previous model keeps serving until a retrain succeeds.
                 log("ERROR", f"FORECAST_RETRAIN_FAILED reason={error}")
             retrain_at = next_retrain(clock(), zone)
-        try:
-            payload = await asyncio.to_thread(predictor.predict_trends)
-            await asyncio.to_thread(
-                gateway.save_event, outbox, json.dumps(payload, allow_nan=False)
-            )
-            sync_event.set()
-            log("INFO", "TREND_PREDICTION_QUEUED")
-        except Exception as error:
-            log("ERROR", f"PREDICTION_FAILED reason={error}")
-        await sleep(max(0.0, (next_inference(clock()) - clock()).total_seconds()))
+        if clock() >= publish_at:
+            try:
+                payload = await asyncio.to_thread(predictor.predict_trends)
+                await asyncio.to_thread(
+                    gateway.save_event, outbox, json.dumps(payload, allow_nan=False)
+                )
+                sync_event.set()
+                log("INFO", "TREND_PREDICTION_QUEUED")
+            except StaleArtifact as error:
+                # The map, profile or installation changed: retrain right away.
+                log("INFO", f"FORECAST_MODEL_STALE reason={error}")
+                retrain_at = clock()
+                continue
+            except Exception as error:
+                log("ERROR", f"PREDICTION_FAILED reason={error}")
+            publish_at = next_inference(clock())
+        # Wake for whichever comes first: the retrain keeps its own time.
+        wake = min(publish_at, retrain_at)
+        await sleep(max(0.0, (wake - clock()).total_seconds()))
 
 
-async def run(engine, models_dir, outbox, metrics, cloud_url, api_key):
+async def run(engine, models_dir, outbox, metrics, cloud_url, api_key, ledger):
     gateway.init_db(outbox)
     gateway.init_metrics_db(metrics)
     sync_event = asyncio.Event()
     await asyncio.gather(
         gateway.sync_loop(outbox, metrics, cloud_url, api_key, sync_event),
-        forecast_loop(engine, models_dir, outbox, sync_event),
+        forecast_loop(
+            engine, models_dir, outbox, sync_event, ledger=ForecastLedger(ledger)
+        ),
         gateway.retention_loop(outbox, metrics),
     )
 
@@ -155,6 +174,7 @@ def main():
             "forecast_metrics.db",
             cloud_url,
             api_key,
+            "forecast_ledger.db",
         )
     )
 

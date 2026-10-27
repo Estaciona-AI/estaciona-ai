@@ -9,8 +9,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+from sqlalchemy import text
 
-from ml import backtest, history, site_calendar, train
+from ml import backtest, history, inference, site_calendar, train
 from ml.inference import PredictiveEngine
 
 from forecast_db import history_engine
@@ -184,7 +185,9 @@ def test_training_publishes_a_verifiable_artifact_and_serves_v2(
     origin = pd.Timestamp.now(tz="UTC").floor("h")
     assert forecast[0]["timestamp"] == origin.isoformat()
     assert all(0 <= item["occupancy"] <= 6 for item in forecast)
-    assert payload["evaluation"]["status"] in ("available", "partial")
+    # Nothing was issued a day earlier, so nothing out of sample can be scored.
+    assert payload["evaluation"]["status"] == "unavailable"
+    assert payload["evaluation"]["reason"] == "no_prior_forecast"
 
     schema_path = Path(__file__).parents[2] / "shared/v1/gateway-to-server.schema.json"
     schema = json.loads(schema_path.read_text())
@@ -228,4 +231,40 @@ def test_tampered_or_incompatible_artifacts_are_refused(tmp_path, small_training
         handle.write("\n")
     with pytest.raises(ValueError, match="manifest"):
         PredictiveEngine(str(tmp_path), engine)
+    engine.dispose()
+
+
+def test_an_artifact_is_served_only_where_it_was_trained(tmp_path, small_training):
+    """Review R10: another installation, site profile or capacity retrains."""
+    engine = campus_engine(days=42)
+    train.train_occupancy_model(engine, str(tmp_path), variants=2)
+    PredictiveEngine(str(tmp_path), engine)  # Same deployment: served.
+
+    elsewhere = campus_engine(days=42)
+    with elsewhere.begin() as connection:
+        connection.execute(
+            text("UPDATE installation_binding SET installation_id = 'other'")
+        )
+    with pytest.raises(inference.StaleArtifact):
+        PredictiveEngine(str(tmp_path), elsewhere)
+
+    with engine.begin() as connection:
+        connection.execute(text("INSERT INTO spots VALUES ('new-spot', TRUE)"))
+    with pytest.raises(inference.StaleArtifact):
+        PredictiveEngine(str(tmp_path), engine)
+    engine.dispose()
+    elsewhere.dispose()
+
+
+def test_a_profile_change_makes_the_artifact_stale(
+    tmp_path, small_training, monkeypatch
+):
+    engine = campus_engine(days=42)
+    train.train_occupancy_model(engine, str(tmp_path), variants=2)
+    predictor = PredictiveEngine(str(tmp_path), engine)
+    profile = tmp_path / "profile.json"
+    profile.write_text(json.dumps({"timezone": "America/Manaus"}))
+    monkeypatch.setenv("FORECAST_PROFILE", str(profile))
+    with pytest.raises(inference.StaleArtifact):
+        predictor.predict_trends()
     engine.dispose()

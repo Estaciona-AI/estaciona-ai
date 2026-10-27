@@ -160,6 +160,16 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
 
 ### Fixed
 
+- Forecast quality metrics are now out of sample: each forecast is recorded
+  when issued (`forecast_ledger.db` next to the worker) and scored a day later
+  against what was observed; until then the evaluation is unavailable with
+  reason `no_prior_forecast`. Before, the current model rebuilt the forecast
+  of 24 hours earlier, possibly from hours it was trained on.
+- A forecast artifact is served only for the installation, site profile and
+  capacity it was trained for; otherwise the worker retrains it. Run
+  `infra/forecast-reader.sql` again: the reader also reads
+  `installation_binding`. The daily retrain runs at 03:30 site time instead of
+  at the next hourly forecast.
 - The gateway's local database no longer grows without bound: confirmed events
   are deleted 24 hours after they arrived and metrics after 7 days, in small
   batches every five minutes; pending events are never deleted. Above
