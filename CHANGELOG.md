@@ -82,6 +82,10 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
   admin role by `tools/identity/provision.py`) to set up and use TOTP. A realm
   imported before this release keeps its flow: import the new flow and role,
   or recreate the realm, and give `estaciona-mfa` to existing administrators.
+- **Apps must handle the spot status `unknown`.** A spot whose latest
+  observation is older than `OBSERVATION_STALE_AFTER_SECS` (120 s) or that no
+  camera has seen yet is `unknown` in snapshots and updates. It cannot be
+  reserved (409) or recommended until a camera reports it again.
 
 ### Added
 

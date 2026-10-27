@@ -362,7 +362,7 @@ def test_websocket_expires_while_initial_snapshot_is_blocked(server, endpoint, r
                 close_timeout=0.5,
             ) as connection:
                 await wait_for_lock_waiter(
-                    server, "spots", "SELECT id, status FROM spots"
+                    server, "spots", "AS status FROM spots WHERE is_active"
                 )
                 # A blocked snapshot must neither postpone expiration nor send data.
                 with pytest.raises(ConnectionClosed):

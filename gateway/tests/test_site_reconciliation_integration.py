@@ -55,10 +55,11 @@ def test_restart_retires_spot_without_deleting_history_or_exposing_it_in_snapsho
             edge_connection(server) as edge,
         ):
             for client in (app, dashboard):
+                # Added to the map, never seen by a camera: not shown as free.
                 assert json.loads(await asyncio.wait_for(client.recv(), timeout=3)) == {
                     "type": "SPOT_UPDATE",
                     "spot_id": "R07-B",
-                    "status": "free",
+                    "status": "unknown",
                 }
             await receive_ready(edge)
             ack = await deliver(edge)

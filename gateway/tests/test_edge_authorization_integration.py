@@ -247,7 +247,7 @@ def test_forbidden_durable_event_is_terminal_and_next_authorized_event_applies(
         "UPDATE effect_count SET updates = updates + 1; RETURN NEW; END $$; "
         "CREATE TRIGGER count_effect BEFORE UPDATE ON spots FOR EACH ROW EXECUTE FUNCTION count_effect();"
     )
-    payload = message("unused")["payload"]
+    payload = message(str(uuid4()))["payload"]
     if forgery == "camera":
         payload["camera_id"] = "foreign-camera"
     elif forgery == "spot":
@@ -262,7 +262,9 @@ def test_forbidden_durable_event_is_terminal_and_next_authorized_event_applies(
     gateway.init_db(outbox)
     gateway.init_metrics_db(metrics)
     rejected_id = gateway.save_event(outbox, json.dumps(payload))
-    accepted_id = gateway.save_event(outbox, json.dumps(message("unused")["payload"]))
+    accepted_id = gateway.save_event(
+        outbox, json.dumps(message(str(uuid4()))["payload"])
+    )
 
     async def run():
         sync = asyncio.create_task(
@@ -327,7 +329,7 @@ def test_forbidden_durable_event_is_terminal_and_next_authorized_event_applies(
 @pytest.mark.parametrize("forgery", ["camera", "spot"])
 def test_forbidden_legacy_spot_update_closes_without_mutation(server, forgery):
     add_other_spot(server)
-    payload = message("unused")["payload"]
+    payload = message(str(uuid4()))["payload"]
     payload["camera_id" if forgery == "camera" else "spot_id"] = (
         "foreign-camera" if forgery == "camera" else "R05-OTHER"
     )
@@ -394,7 +396,7 @@ def test_authentication_database_failure_keeps_outbox_pending_until_retry(
     outbox, metrics = str(tmp_path / "outbox.db"), str(tmp_path / "metrics.db")
     gateway.init_db(outbox)
     gateway.init_metrics_db(metrics)
-    event_id = gateway.save_event(outbox, json.dumps(message("unused")["payload"]))
+    event_id = gateway.save_event(outbox, json.dumps(message(str(uuid4()))["payload"]))
     gateway.save_metric(
         metrics, "test-camera", "R02-A", "occupied", "t0", "t1", "t2", event_id
     )
