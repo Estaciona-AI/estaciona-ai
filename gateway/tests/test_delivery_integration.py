@@ -219,8 +219,11 @@ class Server:
                 ]
             self.container_id = subprocess.check_output(args, text=True).strip()
         else:
-            # Refuse unrelated listeners; never signal them.
+            # Refuse unrelated listeners; never signal them. SO_REUSEADDR lets
+            # the previous test's connections linger in TIME_WAIT, while Linux
+            # still refuses the bind when anything listens on the port.
             with socket.socket() as probe:
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 probe.bind(("0.0.0.0", 8000))
             self.process = subprocess.Popen(
                 [self.binary],
