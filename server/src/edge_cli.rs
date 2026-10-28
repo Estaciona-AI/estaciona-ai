@@ -524,6 +524,13 @@ mod tests {
             r#"{"path_update":false,"trend_prediction":false,"cameras":[{"camera_id":"cam","spot_update":true,"car_detected":false,"spots":["A","A"]}]}"#,
             r#"{"path_update":false,"trend_prediction":false,"cameras":[{"camera_id":"cam","spot_update":true,"car_detected":false,"spots":[]},{"camera_id":"cam","spot_update":false,"car_detected":false,"spots":[]}]}"#,
             r#"{"path_update":false,"trend_prediction":false,"cameras":[{"camera_id":"","spot_update":true,"car_detected":false,"spots":[]}]}"#,
+            r#"{"path_update":false,"trend_prediction":false,"cameras":[{"camera_id":"c\u0000","spot_update":true,"car_detected":false,"spots":[]}]}"#,
+            r#"{"path_update":false,"trend_prediction":false,"cameras":[{"camera_id":"cam","spot_update":true,"car_detected":false,"spots":[" "]}]}"#,
+            r#"{"path_update":false,"trend_prediction":false,"cameras":[{"camera_id":"cam","spot_update":true,"car_detected":false,"spots":["A\u0000"]}]}"#,
+            &format!(
+                r#"{{"path_update":false,"trend_prediction":false,"cameras":[{{"camera_id":"{}","spot_update":true,"car_detected":false,"spots":[]}}]}}"#,
+                "c".repeat(51)
+            ),
         ] {
             fs::write(&policy, text)?;
             assert!(matches!(
@@ -539,11 +546,46 @@ mod tests {
                 Err(CliError::InvalidPolicy)
             ));
         }
-        assert!(!dispatch(&pool, &args(&["--create-admin", "fixture", "unused"])).await?);
+        // Fifty characters is the limit, counted as characters rather than bytes.
+        fs::write(
+            &policy,
+            format!(
+                r#"{{"path_update":false,"trend_prediction":false,"cameras":[{{"camera_id":"{}","spot_update":true,"car_detected":false,"spots":[]}}]}}"#,
+                "é".repeat(50)
+            ),
+        )?;
         assert!(matches!(
-            dispatch(&pool, &args(&["--edge-revoke", "not-a-uuid"])).await,
-            Err(CliError::Usage)
+            dispatch(
+                &pool,
+                &args(&[
+                    "--edge-policy",
+                    &Uuid::new_v4().to_string(),
+                    policy.to_str().unwrap()
+                ])
+            )
+            .await,
+            Err(CliError::Database(_))
         ));
+        assert!(!dispatch(&pool, &args(&["--create-admin", "fixture", "unused"])).await?);
+        let secret = files.path("unexpected");
+        let gateway = Uuid::new_v4().to_string();
+        let secret_path = secret.to_str().unwrap();
+        for command in [
+            &["--edge-revoke", "not-a-uuid"][..],
+            &["--edge-create", "Fixture", "--other-flag", secret_path],
+            &["--edge-create", "Fixture", "--secret-file"],
+            &["--edge-rotate", &gateway, "--other-flag", secret_path],
+            &["--edge-rotate", &gateway, "--secret-file"],
+            &["--edge-revoke"],
+            &["--edge-policy", &gateway],
+            &["--edge-unknown"],
+        ] {
+            assert!(
+                matches!(dispatch(&pool, &args(command)).await, Err(CliError::Usage)),
+                "{command:?}"
+            );
+        }
+        assert!(!secret.exists());
         assert!(matches!(
             dispatch(
                 &pool,
@@ -558,6 +600,23 @@ mod tests {
             Err(CliError::Usage)
         ));
         Ok(())
+    }
+
+    #[test]
+    fn errors_name_the_operation_and_keep_their_cause() {
+        let io = CliError::Io(io::Error::other("fixture"));
+        assert_eq!(
+            io.to_string(),
+            "Edge credential or policy file operation failed"
+        );
+        assert!(std::error::Error::source(&io).is_some());
+        let database = CliError::Database(sqlx::Error::PoolClosed);
+        assert!(std::error::Error::source(&database).is_some());
+        assert_eq!(
+            CliError::Usage.to_string(),
+            "Invalid edge administration command"
+        );
+        assert!(std::error::Error::source(&CliError::Usage).is_none());
     }
 
     #[sqlx::test(migrations = "./migrations")]
