@@ -153,7 +153,7 @@ async fn mismatch_and_wrong_confirmation_do_not_apply_pending_migrations(pool: P
 
 #[sqlx::test(migrations = "./migrations")]
 async fn adopts_existing_data_with_confirmation_and_preserves_it(pool: PgPool) {
-    sqlx::query("INSERT INTO users(id,email,password_hash) VALUES ('00000000-0000-4000-8000-000000000099','synthetic@example.invalid','preserved')").execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO users (id,username) VALUES ('00000000-0000-4000-8000-000000000099','preserved')").execute(&pool).await.unwrap();
     let database: String = sqlx::query_scalar("SELECT current_database()")
         .fetch_one(&pool)
         .await
@@ -169,7 +169,7 @@ async fn adopts_existing_data_with_confirmation_and_preserves_it(pool: PgPool) {
             BindingStatus::Matching
         );
     }
-    let hash: String = sqlx::query_scalar("SELECT password_hash FROM users")
+    let hash: String = sqlx::query_scalar("SELECT username FROM users")
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -237,7 +237,7 @@ async fn adoption_refuses_destructive_historical_migrations(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn startup_rechecks_identity_after_migrations(pool: PgPool) {
+async fn migration_rechecks_identity_after_migrations(pool: PgPool) {
     let expected = identity(2, "test");
     store::bind(&pool, &expected, BindMode::EmptyDatabase)
         .await
@@ -257,7 +257,7 @@ async fn startup_rechecks_identity_after_migrations(pool: PgPool) {
     .await
     .unwrap();
     assert!(matches!(
-        super::startup::prepare(pool.clone(), expected).await,
+        super::startup::migrate(&pool, &expected).await,
         Err(store::StoreError::IdentityMismatch)
     ));
     assert_eq!(
@@ -278,17 +278,88 @@ async fn migration_lock_timeout_releases_connection_for_retry(pool: PgPool) {
         .await
         .unwrap();
     assert!(matches!(
-        super::startup::prepare(pool.clone(), expected).await,
+        super::startup::migrate(&pool, &expected).await,
         Err(store::StoreError::Migration)
     ));
     blocker.rollback().await.unwrap();
-    super::startup::prepare(pool.clone(), expected)
-        .await
-        .unwrap();
+    super::startup::migrate(&pool, &expected).await.unwrap();
     assert_eq!(
         store::check(&pool, &expected).await.unwrap(),
         BindingStatus::Matching
     );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn startup_refuses_a_schema_behind_or_ahead_of_the_binary(pool: PgPool) {
+    const VERSION: i64 = 20261019000000;
+    let expected = identity(2, "test");
+    store::bind(&pool, &expected, BindMode::EmptyDatabase)
+        .await
+        .unwrap();
+    super::startup::prepare(pool.clone(), expected)
+        .await
+        .unwrap();
+    let (description, checksum): (String, Vec<u8>) =
+        sqlx::query_as("SELECT description, checksum FROM _sqlx_migrations WHERE version=$1")
+            .bind(VERSION)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let pending = |result| matches!(result, Err(store::StoreError::MigrationPending));
+
+    sqlx::query("UPDATE _sqlx_migrations SET checksum='\\x00' WHERE version=$1")
+        .bind(VERSION)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(pending(
+        super::startup::prepare(pool.clone(), expected).await
+    ));
+    sqlx::query("UPDATE _sqlx_migrations SET checksum=$2, success=false WHERE version=$1")
+        .bind(VERSION)
+        .bind(&checksum)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(pending(
+        super::startup::prepare(pool.clone(), expected).await
+    ));
+    sqlx::query("DELETE FROM _sqlx_migrations WHERE version=$1")
+        .bind(VERSION)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(pending(
+        super::startup::prepare(pool.clone(), expected).await
+    ));
+    // Startup does not repair the schema: the table of the removed version stays.
+    let table: bool =
+        sqlx::query_scalar("SELECT to_regclass('public.physical_occupancy_hourly') IS NOT NULL")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(table);
+    sqlx::query(
+        "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) \
+         VALUES ($1, $2, true, $3, 0), (29991231000000, 'future', true, '\\x00', 0)",
+    )
+    .bind(VERSION)
+    .bind(&description)
+    .bind(&checksum)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(matches!(
+        super::startup::prepare(pool.clone(), expected).await,
+        Err(store::StoreError::SchemaAhead)
+    ));
+    sqlx::query("DELETE FROM _sqlx_migrations WHERE version=29991231000000")
+        .execute(&pool)
+        .await
+        .unwrap();
+    super::startup::prepare(pool.clone(), expected)
+        .await
+        .unwrap();
 }
 
 #[test]

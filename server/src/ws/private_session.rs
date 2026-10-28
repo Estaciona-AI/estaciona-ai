@@ -68,8 +68,18 @@ impl PrivateSession {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_session_matches_only_its_own_connection() {
+        // Closing a socket removes the user's private channel only when it is
+        // still that socket's: a newer connection of the same user must stay.
+        let (session, _messages, _closed) = channel();
+        let (newer, _newer_messages, _newer_closed) = channel();
+        assert!(session.same_channel(&session.clone()));
+        assert!(!session.same_channel(&newer));
+    }
+
     #[tokio::test]
-    async fn r09_saturated_queue_closes_only_its_connection_without_waiting() {
+    async fn saturated_queue_closes_only_its_connection_without_waiting() {
         let (session, mut messages, mut closed) = channel();
         let (other, mut other_messages, other_closed) = channel();
         for _ in 0..32 {
@@ -98,7 +108,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn r09_private_message_limit_counts_bytes_and_rejects_before_enqueueing() {
+    async fn private_message_limit_counts_bytes_and_rejects_before_enqueueing() {
         let (session, mut messages, closed) = channel();
         session.try_send("é".repeat(32768)).unwrap(); // Exactly 64 KiB UTF-8.
         assert_eq!(messages.recv().await.unwrap().len(), 65536);
@@ -111,7 +121,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn r09_closed_receiver_rejects_delivery_and_signals_shutdown() {
+    async fn closed_receiver_rejects_delivery_and_signals_shutdown() {
         let (session, messages, closed) = channel();
         drop(messages);
         assert_eq!(

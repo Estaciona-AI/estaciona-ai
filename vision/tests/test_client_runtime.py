@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import hashlib
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
 import numpy as np
@@ -16,7 +18,7 @@ REAL_VIDEO_CAPTURE = client.cv2.VideoCapture
 
 @pytest.fixture
 def runtime(tmp_path, monkeypatch):
-    monkeypatch.setattr(client, "EDGE_API_KEY", "test-only")
+    monkeypatch.setattr(client, "GATEWAY_LOCAL_KEY", "test-only")
     monkeypatch.setattr(client, "VIDEO_PATH", "fixture.mp4")
     monkeypatch.setattr(
         client, "load_spots", lambda _: {"A": [[0, 0], [9, 0], [9, 9], [0, 9]]}
@@ -147,7 +149,7 @@ def test_legacy_positional_mapping_remains_available(runtime, monkeypatch):
 
 
 def test_headless_option_is_available_without_credentials(monkeypatch, capsys):
-    monkeypatch.setattr(client, "EDGE_API_KEY", None)
+    monkeypatch.setattr(client, "GATEWAY_LOCAL_KEY", None)
     with pytest.raises(SystemExit) as error:
         asyncio.run(client.main(["--help"]))
     assert error.value.code == 0
@@ -189,3 +191,40 @@ def test_headless_reads_real_video_and_persists_observation(
     assert json.loads(socket.send.call_args.args[0])["payload"]["status"] == "occupied"
     assert delivery.outbox.first() is None
     socket.close.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "url", ["ws://192.168.0.20:8001/ws/edge", "http://localhost:8001/ws/edge"]
+)
+def test_legacy_client_refuses_a_plain_gateway_off_this_host(runtime, monkeypatch, url):
+    monkeypatch.setattr(client, "WS_URL", url)
+    connect = Mock()
+    monkeypatch.setattr(client, "connect_ws", connect)
+    with pytest.raises(RuntimeError, match="LOCAL_WS_URL"):
+        asyncio.run(client.main(["--headless"]))
+    connect.assert_not_called()
+
+
+def test_legacy_client_requires_the_local_gateway_key(runtime, monkeypatch):
+    monkeypatch.setattr(client, "GATEWAY_LOCAL_KEY", None)
+    with pytest.raises(RuntimeError, match="GATEWAY_LOCAL_KEY"):
+        asyncio.run(client.main(["--headless"]))
+
+
+def test_default_outbox_is_per_camera_and_created_once(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(client, "DELIVERY", None)
+    monkeypatch.setattr(client, "CAMERA_ID", "cam-07")
+    monkeypatch.delenv("VISION_OUTBOX_PATH", raising=False)
+    delivery = client.local_delivery()
+    key = hashlib.sha256(b"cam-07").hexdigest()[:16]
+    assert delivery.url == client.WS_URL
+    assert delivery.outbox.path == Path("data") / f"vision-outbox-{key}.db"
+    assert (tmp_path / "data" / f"vision-outbox-{key}.db").is_file()
+    assert client.local_delivery() is delivery
+
+
+def test_outbox_path_can_be_set_by_the_environment(tmp_path, monkeypatch):
+    monkeypatch.setattr(client, "DELIVERY", None)
+    monkeypatch.setenv("VISION_OUTBOX_PATH", str(tmp_path / "custom" / "outbox.db"))
+    assert client.local_delivery().outbox.path == tmp_path / "custom" / "outbox.db"

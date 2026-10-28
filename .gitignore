@@ -14,6 +14,8 @@ target/
 # General
 .env
 .env.local
+infra/env/*.env
+infra/identity/env/*.env
 .DS_Store
 Thumbs.db
 **/.idea/

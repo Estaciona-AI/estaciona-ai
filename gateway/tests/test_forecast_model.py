@@ -9,53 +9,82 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 
-from ml import backtest, history, site_calendar, train
+from ml import backtest, history, inference, site_calendar, train
 from ml.inference import PredictiveEngine
+
+from forecast_db import history_engine
 
 
 def hourly_index(days, start="2026-01-05"):
     return pd.date_range(start, periods=days * 24, freq="h", tz="UTC")
 
 
-def physical_engine(spots, rows):
-    engine = create_engine("sqlite://")
-    with engine.begin() as connection:
-        connection.execute(
-            text("CREATE TABLE spots (id TEXT PRIMARY KEY,is_active BOOLEAN)")
-        )
-        connection.execute(
-            text(
-                "CREATE TABLE physical_occupancy_hourly (spot_id TEXT,hour_start TEXT,status TEXT)"
-            )
-        )
-        for spot in spots:
-            connection.execute(
-                text("INSERT INTO spots VALUES (:id,TRUE)"), {"id": spot}
-            )
-        if rows:
-            connection.execute(
-                text(
-                    "INSERT INTO physical_occupancy_hourly VALUES (:spot,:hour,:status)"
-                ),
-                [
-                    {"spot": spot, "hour": hour.isoformat(), "status": status}
-                    for spot, hour, status in rows
-                ],
-            )
-    return engine
-
-
 def test_registering_a_spot_keeps_the_earlier_rate_history():
     hours = pd.date_range("2026-10-01", periods=3, freq="h", tz="UTC")
     rows = [(spot, hour, "occupied") for hour in hours for spot in ("a", "b")]
-    rows += [("c", hours[-1], "free")]  # Spot c starts reporting in the last hour.
-    engine = physical_engine(["a", "b", "c"], rows)
+    rows += [("c", hours[-1], "free")]  # Spot c joins the map in the last hour.
+    revisions = [(hours[0], ["a", "b"]), (hours[-1], ["a", "b", "c"])]
+    engine = history_engine(["a", "b", "c"], rows=rows, revisions=revisions)
     frame = history.physical_history(engine, end=hours[-1] + timedelta(hours=1))
     assert frame["rate"].tolist() == pytest.approx([1.0, 1.0, 2 / 3])
-    # The exact whole-lot count used by the legacy model stays strict.
-    assert frame["occupancy"].isna().tolist() == [True, True, False]
+    # Each hour is complete for the map in force, so its count is exact.
+    assert frame["occupancy"].tolist() == [2, 2, 2]
+    assert frame["expected_spots"].tolist() == [2, 2, 3]
+    engine.dispose()
+
+
+def test_a_stable_tenth_of_the_lot_is_not_the_lot_rate():
+    """Review R04: 40 of 400 mapped spots reporting is not 100% occupancy."""
+    spots = [f"s{index}" for index in range(400)]
+    hours = pd.date_range("2026-10-01", periods=24, freq="h", tz="UTC")
+    rows = [(spot, hour, "occupied") for hour in hours for spot in spots[:40]]
+    engine = history_engine(spots, rows=rows, revisions=[(hours[0], spots)])
+    frame = history.physical_history(engine, end=hours[-1] + timedelta(hours=1))
+    assert frame["observed_spots"].tolist() == [40] * 24
+    assert frame["rate"].isna().all()
+    assert frame["occupancy"].isna().all()
+    engine.dispose()
+
+
+def lost_camera_engine():
+    """Ten mapped spots; from the second day only five keep reporting."""
+    spots = [f"s{index}" for index in range(10)]
+    hours = pd.date_range("2026-10-01", periods=48, freq="h", tz="UTC")
+    rows = [(spot, hour, "free") for hour in hours[:24] for spot in spots]
+    rows += [(spot, hour, "occupied") for hour in hours[24:] for spot in spots[:5]]
+    return history_engine(spots, rows=rows, revisions=[(hours[0], spots)]), hours
+
+
+def test_a_camera_lost_before_the_window_still_lowers_coverage():
+    engine, hours = lost_camera_engine()
+    end = hours[-1] + timedelta(hours=1)
+    # A window that starts after the loss must not take five spots as the lot.
+    late = history.physical_history(engine, start=hours[24], end=end)
+    assert len(late) == 24
+    assert late["rate"].isna().all()
+    engine.dispose()
+
+
+def test_training_and_inference_windows_agree_on_every_shared_hour():
+    engine, hours = lost_camera_engine()
+    end = hours[-1] + timedelta(hours=1)
+    whole = history.physical_history(engine, end=end).set_index("timestamp")
+    for start in (hours[12], hours[24], hours[36]):
+        part = history.physical_history(engine, start=start, end=end)
+        shared = whole.loc[part["timestamp"], "rate"].to_numpy()
+        np.testing.assert_array_equal(part["rate"].to_numpy(), shared)
+    engine.dispose()
+
+
+def test_only_spots_of_the_map_in_force_count():
+    hours = pd.date_range("2026-10-01", periods=1, freq="h", tz="UTC")
+    rows = [(spot, hours[0], "occupied") for spot in ("a", "b", "unmapped")]
+    engine = history_engine(["a", "b"], rows=rows, revisions=[(hours[0], ["a", "b"])])
+    frame = history.physical_history(engine, end=hours[0] + timedelta(hours=1))
+    assert frame[["observed_spots", "expected_spots"]].values.tolist() == [[2, 2]]
+    assert frame["rate"].tolist() == [1.0]
     engine.dispose()
 
 
@@ -65,7 +94,7 @@ def test_hours_need_most_monitored_spots_to_count(observed, has_rate):
     hours = pd.date_range("2026-10-01", periods=2, freq="h", tz="UTC")
     rows = [(spot, hours[0], "free") for spot in spots]
     rows += [(spot, hours[1], "occupied") for spot in spots[:observed]]
-    engine = physical_engine(spots, rows)
+    engine = history_engine(spots, rows=rows)
     frame = history.physical_history(engine, end=hours[-1] + timedelta(hours=1))
     assert np.isfinite(frame["rate"].iloc[1]) == has_rate
     engine.dispose()
@@ -129,7 +158,7 @@ def campus_engine(days, capacity=6):
         for hour, is_busy in zip(hours, busy)
         for index, spot in enumerate(spots)
     ]
-    return physical_engine(spots, rows)
+    return history_engine(spots, rows=rows)
 
 
 @pytest.fixture
@@ -156,7 +185,9 @@ def test_training_publishes_a_verifiable_artifact_and_serves_v2(
     origin = pd.Timestamp.now(tz="UTC").floor("h")
     assert forecast[0]["timestamp"] == origin.isoformat()
     assert all(0 <= item["occupancy"] <= 6 for item in forecast)
-    assert payload["evaluation"]["status"] in ("available", "partial")
+    # Nothing was issued a day earlier, so nothing out of sample can be scored.
+    assert payload["evaluation"]["status"] == "unavailable"
+    assert payload["evaluation"]["reason"] == "no_prior_forecast"
 
     schema_path = Path(__file__).parents[2] / "shared/v1/gateway-to-server.schema.json"
     schema = json.loads(schema_path.read_text())
@@ -171,7 +202,7 @@ def test_training_publishes_a_verifiable_artifact_and_serves_v2(
 
 
 def test_prior_without_real_data_is_labelled_and_never_scored(tmp_path, small_training):
-    engine = physical_engine([f"s{index}" for index in range(6)], [])
+    engine = history_engine([f"s{index}" for index in range(6)])
     manifest = train.train_occupancy_model(engine, str(tmp_path), variants=2)
     assert manifest["source"] == "synthetic_prior"
     assert manifest["real_hours"] == 0
@@ -186,7 +217,7 @@ def test_prior_without_real_data_is_labelled_and_never_scored(tmp_path, small_tr
 
 
 def test_tampered_or_incompatible_artifacts_are_refused(tmp_path, small_training):
-    engine = physical_engine([f"s{index}" for index in range(6)], [])
+    engine = history_engine([f"s{index}" for index in range(6)])
     train.train_occupancy_model(engine, str(tmp_path), variants=1)
     manifest_path = tmp_path / train.MANIFEST_FILE
     original = json.loads(manifest_path.read_text())
@@ -200,4 +231,40 @@ def test_tampered_or_incompatible_artifacts_are_refused(tmp_path, small_training
         handle.write("\n")
     with pytest.raises(ValueError, match="manifest"):
         PredictiveEngine(str(tmp_path), engine)
+    engine.dispose()
+
+
+def test_an_artifact_is_served_only_where_it_was_trained(tmp_path, small_training):
+    """Review R10: another installation, site profile or capacity retrains."""
+    engine = campus_engine(days=42)
+    train.train_occupancy_model(engine, str(tmp_path), variants=2)
+    PredictiveEngine(str(tmp_path), engine)  # Same deployment: served.
+
+    elsewhere = campus_engine(days=42)
+    with elsewhere.begin() as connection:
+        connection.execute(
+            text("UPDATE installation_binding SET installation_id = 'other'")
+        )
+    with pytest.raises(inference.StaleArtifact):
+        PredictiveEngine(str(tmp_path), elsewhere)
+
+    with engine.begin() as connection:
+        connection.execute(text("INSERT INTO spots VALUES ('new-spot', TRUE)"))
+    with pytest.raises(inference.StaleArtifact):
+        PredictiveEngine(str(tmp_path), engine)
+    engine.dispose()
+    elsewhere.dispose()
+
+
+def test_a_profile_change_makes_the_artifact_stale(
+    tmp_path, small_training, monkeypatch
+):
+    engine = campus_engine(days=42)
+    train.train_occupancy_model(engine, str(tmp_path), variants=2)
+    predictor = PredictiveEngine(str(tmp_path), engine)
+    profile = tmp_path / "profile.json"
+    profile.write_text(json.dumps({"timezone": "America/Manaus"}))
+    monkeypatch.setenv("FORECAST_PROFILE", str(profile))
+    with pytest.raises(inference.StaleArtifact):
+        predictor.predict_trends()
     engine.dispose()

@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Guilherme Pedroza
 # SPDX-License-Identifier: Apache-2.0
 
+import hashlib
 import importlib.util
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -17,6 +19,16 @@ def load_detector():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def exported_model(directory, contents=b"fixture"):
+    """A model with the provenance the official export writes next to it."""
+    path = directory / "model.onnx"
+    path.write_bytes(contents)
+    path.with_suffix(".provenance.json").write_text(
+        json.dumps({"onnx_sha256": hashlib.sha256(contents).hexdigest()})
+    )
+    return path
 
 
 def session(rows):
@@ -146,8 +158,7 @@ def test_rejects_ultralytics_output_signature_and_malformed_outputs():
 
 def test_gpu_request_fails_when_runtime_falls_back_to_cpu(tmp_path):
     module = load_detector()
-    path = tmp_path / "model.onnx"
-    path.write_bytes(b"fixture")
+    path = exported_model(tmp_path)
     model = session([])
     model.get_providers.return_value = ["CPUExecutionProvider"]
     runtime = Mock()
@@ -322,8 +333,7 @@ def test_spot_scoped_detector_skips_tiles_and_rejects_other_frame_sizes():
 
 def test_load_detector_derives_spot_tiles_from_mapping(tmp_path):
     module = load_detector()
-    path = tmp_path / "model.onnx"
-    path.write_bytes(b"fixture")
+    path = exported_model(tmp_path)
     runtime = Mock()
     runtime.get_available_providers.return_value = ["CPUExecutionProvider"]
     runtime.InferenceSession.return_value = session([])
@@ -350,8 +360,7 @@ def test_load_detector_derives_spot_tiles_from_mapping(tmp_path):
     ],
 )
 def test_spot_tile_scope_requires_tiling_and_mapping(tmp_path, options):
-    path = tmp_path / "model.onnx"
-    path.write_bytes(b"fixture")
+    path = exported_model(tmp_path)
     runtime = Mock()
     runtime.get_available_providers.return_value = ["CPUExecutionProvider"]
     runtime.InferenceSession.return_value = session([])
@@ -421,8 +430,7 @@ def tensorrt_runtime(active):
 
 
 def test_tensorrt_profile_builds_fp16_engine_batched_to_spot_tiles(tmp_path):
-    path = tmp_path / "model.onnx"
-    path.write_bytes(b"fixture")
+    path = exported_model(tmp_path)
     cache = tmp_path / "engines"
     cache.mkdir()
     runtime = tensorrt_runtime(["TensorrtExecutionProvider", "CUDAExecutionProvider"])
@@ -448,14 +456,14 @@ def test_tensorrt_profile_builds_fp16_engine_batched_to_spot_tiles(tmp_path):
     assert options["trt_profile_opt_shapes"] == shapes
     assert options["trt_profile_max_shapes"] == shapes
     # The cache name ignores profile shapes; layouts must not overwrite each other.
-    assert options["trt_engine_cache_prefix"] == f"rtdetr_b{count}"
+    digest = hashlib.sha256(b"fixture").hexdigest()[:16]
+    assert options["trt_engine_cache_prefix"] == f"rtdetr_{digest}_b{count}"
     assert (metadata["precision"], metadata["batch"]) == ("float16", count)
     assert metadata["providers"][0] == "TensorrtExecutionProvider"
 
 
 def test_tensorrt_without_tiles_uses_single_image_engine(tmp_path):
-    path = tmp_path / "model.onnx"
-    path.write_bytes(b"fixture")
+    path = exported_model(tmp_path)
     runtime = tensorrt_runtime(["TensorrtExecutionProvider", "CUDAExecutionProvider"])
     detector = load_detector().load_detector(
         path, device="cuda", runtime=runtime, provider="tensorrt", engine_cache=tmp_path
@@ -470,8 +478,7 @@ def test_tensorrt_without_tiles_uses_single_image_engine(tmp_path):
 
 
 def test_silent_tensorrt_fallback_is_rejected(tmp_path):
-    path = tmp_path / "model.onnx"
-    path.write_bytes(b"fixture")
+    path = exported_model(tmp_path)
     runtime = tensorrt_runtime(["CUDAExecutionProvider", "CPUExecutionProvider"])
     with pytest.raises(RuntimeError, match="TensorRT"):
         load_detector().load_detector(
@@ -495,8 +502,7 @@ def test_silent_tensorrt_fallback_is_rejected(tmp_path):
     ],
 )
 def test_invalid_accelerator_combinations_fail_before_session(tmp_path, options):
-    path = tmp_path / "model.onnx"
-    path.write_bytes(b"fixture")
+    path = exported_model(tmp_path)
     options = {"device": "cuda", "engine_cache": tmp_path, **options}
     if options["engine_cache"] == "missing":
         options["engine_cache"] = tmp_path / "missing"
@@ -541,4 +547,80 @@ def test_tensorrt_preload_skips_builder_resources(tmp_path, monkeypatch):
 def test_tensorrt_preload_without_extra_is_a_no_op(monkeypatch):
     module = load_detector()
     monkeypatch.setattr(module.importlib.util, "find_spec", lambda name: None)
+    loaded = []
+    monkeypatch.setattr(
+        module.ctypes, "CDLL", lambda *args, **kwargs: loaded.append(args)
+    )
     module._load_tensorrt_runtime()
+    assert loaded == []
+
+
+def cpu_runtime():
+    runtime = Mock()
+    runtime.get_available_providers.return_value = ["CPUExecutionProvider"]
+    runtime.InferenceSession.return_value = session([])
+    return runtime
+
+
+def test_a_replaced_model_with_the_same_interface_is_never_run(tmp_path):
+    path = exported_model(tmp_path)
+    path.write_bytes(b"tampered weights, same input and output shapes")
+    runtime = cpu_runtime()
+    with pytest.raises(ValueError, match="SHA-256"):
+        load_detector().load_detector(path, device="cpu", runtime=runtime)
+    runtime.InferenceSession.assert_not_called()
+
+
+@pytest.mark.parametrize("provenance", [None, "not json", '{"model": "no digest"}'])
+def test_a_model_without_valid_provenance_is_refused(tmp_path, provenance):
+    path = tmp_path / "model.onnx"
+    path.write_bytes(b"fixture")
+    if provenance is not None:
+        path.with_suffix(".provenance.json").write_text(provenance)
+    runtime = cpu_runtime()
+    with pytest.raises(ValueError, match="provenance"):
+        load_detector().load_detector(path, device="cpu", runtime=runtime)
+    runtime.InferenceSession.assert_not_called()
+
+
+def test_an_explicit_digest_is_a_deliberate_swap_and_still_checked(tmp_path):
+    path = exported_model(tmp_path)
+    path.write_bytes(b"retrained model")
+    retrained = hashlib.sha256(b"retrained model").hexdigest()
+    runtime = cpu_runtime()
+    load_detector().load_detector(
+        path, device="cpu", runtime=runtime, expected_sha256=retrained
+    )
+    runtime.InferenceSession.assert_called_once()
+    with pytest.raises(ValueError, match="SHA-256"):
+        load_detector().load_detector(
+            path, device="cpu", runtime=cpu_runtime(), expected_sha256="0" * 64
+        )
+
+
+def test_tensorrt_engines_of_different_models_never_share_a_cache_name(tmp_path):
+    prefixes = []
+    for name, contents in (("first", b"model one"), ("second", b"model two")):
+        directory = tmp_path / name
+        directory.mkdir()
+        path = exported_model(directory, contents)
+        runtime = Mock()
+        runtime.get_available_providers.return_value = [
+            "TensorrtExecutionProvider",
+            "CUDAExecutionProvider",
+        ]
+        model = session([])
+        model.get_providers.return_value = ["TensorrtExecutionProvider"]
+        runtime.InferenceSession.return_value = model
+        module = load_detector()
+        module._load_tensorrt_runtime = lambda: None
+        module.load_detector(
+            path,
+            device="cuda",
+            runtime=runtime,
+            provider="tensorrt",
+            engine_cache=tmp_path,
+        )
+        _, options = runtime.InferenceSession.call_args.kwargs["providers"][0]
+        prefixes.append(options["trt_engine_cache_prefix"])
+    assert prefixes[0] != prefixes[1]

@@ -63,12 +63,28 @@ pub async fn apply(pool: &PgPool, site: &SiteConfig) -> Result<i64, ReconcileErr
             ));
         }
     }
+    // Sector of each spot: the lot it names, or the first lot.
+    let sector = |spot: &crate::site_config::Spot3DDef| -> String {
+        spot.parking.clone().unwrap_or_else(|| {
+            site.parkings
+                .first()
+                .map_or_else(|| "Main".to_owned(), |lot| lot.name.clone())
+        })
+    };
     let manifest = serde_json::json!({
         "parkings": site.parkings.iter().map(|lot| serde_json::json!({
+            "name": lot.name,
             "path": lot.path.iter().map(|p| serde_json::json!({"x":p.x,"z":p.z})).collect::<Vec<_>>()
         })).collect::<Vec<_>>(),
-        "spots": spots.iter().map(|s| serde_json::json!({"id":s.id,
-            "center3D":{"x":s.center_3d.x,"y":s.center_3d.y,"z":s.center_3d.z}})).collect::<Vec<_>>()
+        "spots": spots.iter().map(|s| {
+            let mut spot = serde_json::json!({"id":s.id,
+                "center3D":{"x":s.center_3d.x,"y":s.center_3d.y,"z":s.center_3d.z},
+                "parking": sector(s)});
+            if let Some(kept_for) = s.reserved_for {
+                spot["reserved_for"] = kept_for.as_str().into();
+            }
+            spot
+        }).collect::<Vec<_>>()
     });
     let mut fingerprint = String::with_capacity(64);
     for byte in Sha256::digest(manifest.to_string().as_bytes()) {
@@ -96,10 +112,13 @@ pub async fn apply(pool: &PgPool, site: &SiteConfig) -> Result<i64, ReconcileErr
     }
     for spot in spots {
         sqlx::query(
-            "INSERT INTO spots (id,parking_lot,status,x,y,z,is_active) VALUES ($1,'Main','free',$2,$3,$4,TRUE) \
-             ON CONFLICT (id) DO UPDATE SET x=EXCLUDED.x,y=EXCLUDED.y,z=EXCLUDED.z,is_active=TRUE \
-             WHERE (spots.x,spots.y,spots.z,spots.is_active) IS DISTINCT FROM (EXCLUDED.x,EXCLUDED.y,EXCLUDED.z,TRUE)"
+            "INSERT INTO spots (id,parking_lot,status,x,y,z,is_active,reserved_for) VALUES ($1,$5,'free',$2,$3,$4,TRUE,$6) \
+             ON CONFLICT (id) DO UPDATE SET x=EXCLUDED.x,y=EXCLUDED.y,z=EXCLUDED.z,is_active=TRUE, \
+             parking_lot=EXCLUDED.parking_lot,reserved_for=EXCLUDED.reserved_for \
+             WHERE (spots.x,spots.y,spots.z,spots.is_active,spots.parking_lot,spots.reserved_for) \
+             IS DISTINCT FROM (EXCLUDED.x,EXCLUDED.y,EXCLUDED.z,TRUE,EXCLUDED.parking_lot,EXCLUDED.reserved_for)"
         ).bind(&spot.id).bind(spot.center_3d.x).bind(spot.center_3d.y).bind(spot.center_3d.z)
+            .bind(sector(spot)).bind(spot.reserved_for.map(|kept_for| kept_for.as_str()))
             .execute(&mut *tx).await?;
     }
     sqlx::query("UPDATE spots SET is_active=FALSE WHERE is_active AND NOT (id=ANY($1))")

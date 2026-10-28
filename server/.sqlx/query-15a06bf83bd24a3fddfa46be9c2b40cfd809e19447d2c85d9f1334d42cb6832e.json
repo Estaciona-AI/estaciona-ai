@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id \n        FROM spots \n        WHERE status = 'free' AND is_active\n          AND observation_timestamp > NOW() - make_interval(secs => $1)\n          AND reserved_for IS NULL\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "spots",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Float8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "15a06bf83bd24a3fddfa46be9c2b40cfd809e19447d2c85d9f1334d42cb6832e"
+}

@@ -304,6 +304,7 @@ async def run_input(
                 provider=item.detector.provider,
                 precision=item.detector.precision,
                 engine_cache=item.detector.engine_cache,
+                expected_sha256=item.detector.sha256,
                 mapping=item.mapping,
             )
         except Exception:

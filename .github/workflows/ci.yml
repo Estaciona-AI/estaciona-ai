@@ -154,13 +154,25 @@ jobs:
         run: uv python install
 
       - name: Run Ruff Check
-        run: uv run --locked ruff check . ../tools/rtsp-lab
+        run: uv run --locked ruff check . ../tools/rtsp-lab ../tools/identity
 
       - name: Run Ruff Format Check
-        run: uv run --locked ruff format --check . ../tools/rtsp-lab
+        run: uv run --locked ruff format --check . ../tools/rtsp-lab ../tools/identity
 
       - name: Run Pytest
         run: uv run --locked pytest --ignore=tests/test_rtsp_lab_integration.py
+
+  identity-tools-ci:
+    name: Identity tools CI
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./tools/identity
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Test realm invariants and the provisioning tool
+        run: python3 -m unittest -v test_realm test_provision
 
   rtsp-lab-ci:
     name: RTSP lab integration
@@ -224,6 +236,12 @@ jobs:
           ../test-server/estaciona-ai-rust-server --export-contracts "$RUNNER_TEMP/generated-contracts"
           diff -u messages.json "$RUNNER_TEMP/generated-contracts/messages.json"
           diff -ru v1 "$RUNNER_TEMP/generated-contracts/v1"
+      - name: Refuse incompatible changes within the released major version
+        run: |
+          git fetch --no-tags --depth=1 origin main
+          mkdir -p "$RUNNER_TEMP/released"
+          git -C .. archive FETCH_HEAD shared | tar -x -C "$RUNNER_TEMP/released"
+          uv run --locked python contract_compat.py "$RUNNER_TEMP/released/shared" .
       - name: Check first-party licensing policy
         run: python ../scripts/check_licenses.py
       - name: Lint contract checks

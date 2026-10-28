@@ -30,7 +30,13 @@ uuid = { version = "1.23.0", features = ["serde", "v4"] }
 jsonwebtoken = { version = "10.4.0", features = ["rust_crypto"] }
 hmac = "0.13.0"
 sha2 = "0.11.0"
-argon2 = "0.5.3"
+# Already locked through rustls; AES-256-GCM for personal fields at rest.
+ring = "0.17.14"
+base64 = "0.22.1"
+zeroize = "1.8.2"
+# Relying party for the central identity provider: discovery, PKCE, nonce
+# and ID token validation. TLS through rustls with ring, like sqlx.
+openidconnect = { version = "4.0.1", default-features = false, features = ["reqwest", "rustls-tls"] }
 tower-http = { version = "0.6.11", features = ["limit", "cors", "trace"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 schemars = { version = "=1.2.3", features = ["chrono04", "uuid1"] }

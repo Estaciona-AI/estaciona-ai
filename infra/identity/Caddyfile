@@ -1,0 +1,17 @@
+# Only the sign-in endpoints and their static resources are public; the admin
+# console, Admin REST API, health and metrics stay off the internet.
+{$AUTH_DOMAIN} {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+	@public path /realms/* /resources/*
+	handle @public {
+		reverse_proxy keycloak:8080
+	}
+	handle {
+		respond 404
+	}
+}

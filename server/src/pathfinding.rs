@@ -59,6 +59,7 @@ pub struct ParkingGraph {
     edges: HashMap<NodeId, Vec<Edge>>,
     name_to_id: HashMap<String, NodeId>,
     next_id: usize,
+    entrances: Vec<String>,
 }
 
 impl ParkingGraph {
@@ -68,7 +69,30 @@ impl ParkingGraph {
             edges: HashMap::new(),
             name_to_id: HashMap::new(),
             next_id: 0,
+            entrances: Vec::new(),
         }
+    }
+
+    /// Where drivers arrive; recommendations start at the nearest one.
+    pub fn mark_entrance(&mut self, name: &str) {
+        if self.name_to_id.contains_key(name) && !self.entrances.iter().any(|e| e == name) {
+            self.entrances.push(name.to_owned());
+        }
+    }
+
+    /// The cheapest route from any entrance, with its cost.
+    pub fn route_from_nearest_entrance(&self, target: &str) -> Option<(u32, Vec<String>)> {
+        self.entrances
+            .iter()
+            .filter_map(|entrance| {
+                let cost = self.calculate_cost(entrance, target)?;
+                Some((cost, entrance))
+            })
+            .min_by_key(|(cost, entrance)| (*cost, (*entrance).clone()))
+            .and_then(|(cost, entrance)| {
+                self.calculate_route(entrance, target)
+                    .map(|route| (cost, route))
+            })
     }
 
     pub fn add_node(&mut self, name: &str, x: f32, y: f32) -> Result<NodeId, DuplicateNodeName> {
@@ -507,7 +531,7 @@ mod tests {
     }
 
     #[test]
-    fn r11_duplicate_name_does_not_replace_an_existing_route_origin() {
+    fn duplicate_name_does_not_replace_an_existing_route_origin() {
         let mut graph = ParkingGraph::new();
         let origin = graph.add_node("cam-01", 0.0, 0.0).unwrap();
         let spot = graph.add_node("spot", 1.0, 0.0).unwrap();
@@ -519,5 +543,74 @@ mod tests {
             Some(vec!["cam-01".into(), "spot".into()])
         );
         assert_eq!(graph.nodes.len(), 2);
+    }
+
+    #[test]
+    fn a_spot_reachable_from_several_entrances_uses_the_cheapest() {
+        let mut graph = ParkingGraph::new();
+        let north = graph.add_node("cam-01", 0.0, 0.0).unwrap();
+        let south = graph.add_node("entrance-1", 10.0, 0.0).unwrap();
+        let spot = graph.add_node("spot", 8.0, 0.0).unwrap();
+        graph.mark_entrance("cam-01");
+        graph.mark_entrance("entrance-1");
+        graph.add_edge(north, spot, 80, true);
+        graph.add_edge(south, spot, 20, true);
+        assert_eq!(
+            graph.route_from_nearest_entrance("spot"),
+            Some((20, vec!["entrance-1".into(), "spot".into()]))
+        );
+        // A node that is not an entrance is never a starting point.
+        graph.mark_entrance("missing");
+        let unmarked = graph.add_node("corridor", 9.0, 0.0).unwrap();
+        graph.add_edge(unmarked, spot, 1, true);
+        assert_eq!(graph.route_from_nearest_entrance("spot").unwrap().0, 20);
+    }
+
+    #[test]
+    fn has_edge_matches_only_existing_directed_edges() {
+        let mut graph = build_test_graph();
+        let one_way = graph.add_node("saida", 3.0, 0.0).unwrap();
+        let spot = graph.name_to_id["vaga-1"];
+        graph.add_edge(spot, one_way, 5, false);
+
+        assert!(graph.has_edge("entrada", "meio-1"));
+        assert!(graph.has_edge("meio-1", "entrada"));
+        assert!(graph.has_edge("vaga-1", "saida"));
+        assert!(!graph.has_edge("saida", "vaga-1"));
+        assert!(!graph.has_edge("entrada", "vaga-1"));
+        assert!(!graph.has_edge("fantasma", "entrada"));
+        assert!(!graph.has_edge("entrada", "fantasma"));
+    }
+
+    #[test]
+    fn set_edge_status_blocks_the_reverse_direction_too() {
+        let mut graph = build_test_graph();
+
+        graph.set_edge_status("entrada", "meio-1", false);
+
+        assert_eq!(
+            graph.calculate_route("vaga-1", "entrada").unwrap(),
+            vec!["vaga-1", "meio-2", "entrada"]
+        );
+        assert_eq!(graph.calculate_cost("vaga-1", "entrada"), Some(30));
+    }
+
+    #[test]
+    fn revision_tracks_topology_but_not_edge_status() {
+        let mut graph = build_test_graph();
+        let original = graph.revision();
+        assert_eq!(original.len(), 64);
+        assert!(original.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_eq!(build_test_graph().revision(), original);
+
+        graph.set_edge_status("entrada", "meio-1", false);
+        assert_eq!(graph.revision(), original);
+
+        let extra = graph.add_node("vaga-2", 3.0, 0.0).unwrap();
+        assert_ne!(graph.revision(), original);
+        let spot = graph.name_to_id["vaga-1"];
+        let with_node = graph.revision();
+        graph.add_edge(spot, extra, 5, true);
+        assert_ne!(graph.revision(), with_node);
     }
 }

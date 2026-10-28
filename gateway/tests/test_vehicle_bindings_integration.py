@@ -68,21 +68,12 @@ def declaration(server, signed_token, user):
     return binding
 
 
-def test_disabled_lpr_cannot_affect_occupancy_or_registration(server):
+def test_disabled_lpr_cannot_affect_occupancy_or_accounts(server):
     _, admin = signed(server)
     assert request(server, "/admin/vehicle-bindings", admin)[0] == 404
     server.query("ALTER TABLE vehicles RENAME TO unavailable_optional_vehicles")
-    status, created = request(
-        server,
-        "/users",
-        method="POST",
-        payload={
-            "name": "Active feature",
-            "email": f"{uuid4()}@example.invalid",
-            "password": "fixture-password",
-        },
-    )
-    assert status == 201, created
+    status, me = request(server, "/me", signed(server, "user")[1])
+    assert status == 200, me
 
     async def run():
         async with websockets.connect(
@@ -223,36 +214,10 @@ def test_admin_approval_recovery_revocation_and_bounded_routes(server):
     )
 
 
-def test_public_plate_declarations_do_not_authorize_future_arrivals(server):
+def test_an_undeclared_plate_never_authorizes_an_arrival(server):
     enable_lpr(server)
-    for email in [
-        f"first-{uuid4()}@example.invalid",
-        f"legitimate-{uuid4()}@example.invalid",
-    ]:
-        status, value = request(
-            server,
-            "/users",
-            method="POST",
-            payload={
-                "name": "Unverified",
-                "email": email,
-                "password": "fixture-password",
-                "plate": "ABC1D23",
-            },
-        )
-        assert status == 201, value
-    assert (
-        server.query("SELECT COUNT(*) FROM vehicle_bindings WHERE status='pending'")[0][
-            0
-        ]
-        == 2
-    )
-    assert (
-        server.query("SELECT COUNT(*) FROM vehicle_bindings WHERE status='approved'")[
-            0
-        ][0]
-        == 0
-    )
+    signed(server, "user")
+    assert server.query("SELECT COUNT(*) FROM vehicles")[0][0] == 0
     server.query(
         "INSERT INTO edge_camera_grants (gateway_id,camera_id,car_detected) VALUES (%s,'cam-01',TRUE)",
         (server.gateway_id,),

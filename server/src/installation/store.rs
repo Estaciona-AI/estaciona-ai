@@ -11,8 +11,12 @@ use uuid::Uuid;
 use super::{Environment, InstallationIdentity};
 
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
+/// Applying every migration takes longer as they accumulate; each statement
+/// is still bounded by the lock and statement timeouts set in `migrate`.
+pub(crate) const MIGRATION_TIMEOUT: Duration = Duration::from_secs(300);
 // Identifiers are audited constants, never derived from an input descriptor.
 const BUSINESS_TABLES: &[&str] = &[
+    "admin_audit_log",
     "auth_sessions",
     "edge_camera_grants",
     "edge_camera_spots",
@@ -20,6 +24,8 @@ const BUSINESS_TABLES: &[&str] = &[
     "edge_forecast_state",
     "edge_gateways",
     "edge_path_state",
+    "oidc_login_attempts",
+    "oidc_logout_marks",
     "physical_occupancy_hourly",
     "reservations",
     "site_map_revisions",
@@ -53,10 +59,13 @@ pub enum StoreError {
     MissingSchema,
     Unbound,
     Migration,
+    MigrationPending,
+    SchemaAhead,
     IdentityMismatch,
     ExistingData,
     DatabaseConfirmationMismatch,
     UnsupportedSchema,
+    PrivilegedRuntimeRole,
 }
 
 impl fmt::Display for StoreError {
@@ -68,6 +77,10 @@ impl fmt::Display for StoreError {
                 "Database is unbound; run --installation-init or --installation-adopt explicitly"
             }
             Self::Migration => "Installation database migrations failed",
+            Self::MigrationPending => {
+                "Database schema is behind this release; run --migrate with the owner role"
+            }
+            Self::SchemaAhead => "Database schema is newer than this release",
             Self::MissingSchema => "Installation binding migration required",
             Self::IdentityMismatch => "Database belongs to a different installation identity",
             Self::ExistingData => "Database contains application data; explicit adoption required",
@@ -76,6 +89,10 @@ impl fmt::Display for StoreError {
             }
             Self::UnsupportedSchema => {
                 "Application table inventory does not match the supported schema"
+            }
+            Self::PrivilegedRuntimeRole => {
+                "The server's database role can change the schema or bypass privileges; \
+                 connect with the role from infra/app-role.sql"
             }
         })
     }
@@ -309,18 +326,95 @@ pub async fn preflight(
     }).await.map_err(|_| StoreError::Timeout)?
 }
 
+/// The runtime role cannot change the schema, so it only confirms that every
+/// migration of this binary was applied, unchanged, and that none is unknown.
+pub(crate) async fn require_migrated(pool: &PgPool) -> Result<(), StoreError> {
+    let exists: bool =
+        sqlx::query_scalar("SELECT to_regclass('public._sqlx_migrations') IS NOT NULL")
+            .fetch_one(pool)
+            .await?;
+    if !exists {
+        return Err(StoreError::MissingSchema);
+    }
+    let applied: Vec<(i64, Vec<u8>, bool)> =
+        sqlx::query_as("SELECT version, checksum, success FROM public._sqlx_migrations")
+            .fetch_all(pool)
+            .await?;
+    let migrator = sqlx::migrate!();
+    let expected: std::collections::HashMap<i64, &[u8]> = migrator
+        .iter()
+        .filter(|migration| migration.migration_type.is_up_migration())
+        .map(|migration| (migration.version, migration.checksum.as_ref()))
+        .collect();
+    if applied
+        .iter()
+        .any(|(version, _, _)| !expected.contains_key(version))
+    {
+        return Err(StoreError::SchemaAhead);
+    }
+    let current = expected.iter().all(|(version, checksum)| {
+        applied
+            .iter()
+            .any(|(applied, stored, success)| applied == version && stored == checksum && *success)
+    });
+    if current {
+        Ok(())
+    } else {
+        Err(StoreError::MigrationPending)
+    }
+}
+
+/// Powers the running service must not have: it only reads and writes rows.
+pub async fn excess_privileges(pool: &PgPool) -> Result<Vec<&'static str>, StoreError> {
+    let (superuser, create_db, create_role, bypass_rls, create_in_schema, owns_tables): (
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+    ) = timeout(
+        OPERATION_TIMEOUT,
+        sqlx::query_as(
+            "SELECT r.rolsuper, r.rolcreatedb, r.rolcreaterole, r.rolbypassrls, \
+             has_schema_privilege('public', 'CREATE'), \
+             EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+                    WHERE n.nspname = 'public' AND c.relowner = r.oid) \
+             FROM pg_roles r WHERE r.rolname = current_user",
+        )
+        .fetch_one(pool),
+    )
+    .await
+    .map_err(|_| StoreError::Timeout)??;
+    Ok([
+        (superuser, "superuser"),
+        (create_db, "create databases"),
+        (create_role, "create roles"),
+        (bypass_rls, "bypass row security"),
+        (create_in_schema, "create objects in schema public"),
+        (owns_tables, "own application tables"),
+    ]
+    .into_iter()
+    .filter_map(|(held, name)| held.then_some(name))
+    .collect())
+}
+
 /// A cancelled migrator must not return a session advisory lock to the pool.
 pub(crate) async fn migrate(pool: &PgPool) -> Result<(), StoreError> {
-    let mut connection = pool.acquire().await?;
-    connection.close_on_drop();
-    sqlx::query("SET lock_timeout='2s'")
-        .execute(&mut *connection)
-        .await?;
-    sqlx::query("SET statement_timeout='5s'")
-        .execute(&mut *connection)
-        .await?;
-    sqlx::migrate!()
-        .run(&mut *connection)
-        .await
-        .map_err(|_| StoreError::Migration)
+    timeout(MIGRATION_TIMEOUT, async {
+        let mut connection = pool.acquire().await?;
+        connection.close_on_drop();
+        sqlx::query("SET lock_timeout='2s'")
+            .execute(&mut *connection)
+            .await?;
+        sqlx::query("SET statement_timeout='5s'")
+            .execute(&mut *connection)
+            .await?;
+        sqlx::migrate!()
+            .run(&mut *connection)
+            .await
+            .map_err(|_| StoreError::Migration)
+    })
+    .await
+    .map_err(|_| StoreError::Timeout)?
 }

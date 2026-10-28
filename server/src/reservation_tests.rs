@@ -10,7 +10,7 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
-use chrono::{Duration, Utc};
+use chrono::{Datelike, Duration, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -20,34 +20,30 @@ use crate::{
     state::{AppState, SharedState},
 };
 
-struct Fixture {
-    state: SharedState,
-    owner: Uuid,
-    other: Uuid,
-    admin: Uuid,
-    spot_id: String,
+pub(crate) struct Fixture {
+    pub(crate) state: SharedState,
+    pub(crate) owner: Uuid,
+    pub(crate) other: Uuid,
+    pub(crate) admin: Uuid,
+    pub(crate) spot_id: String,
 }
 
 impl Fixture {
-    async fn new(pool: PgPool) -> Result<Self, sqlx::Error> {
+    pub(crate) async fn new(pool: PgPool) -> Result<Self, sqlx::Error> {
         let verified = crate::installation::test_support::provision(&pool).await;
         let owner = Uuid::new_v4();
         let other = Uuid::new_v4();
         let admin = Uuid::new_v4();
         for (id, role) in [(owner, "user"), (other, "user"), (admin, "admin")] {
-            sqlx::query(
-                "INSERT INTO users (id, name, email, password_hash, role) \
-                 VALUES ($1, 'Reservation Fixture', $2, 'unused-test-hash', $3)",
-            )
-            .bind(id)
-            .bind(format!("{id}@example.invalid"))
-            .bind(role)
-            .execute(&pool)
-            .await?;
+            sqlx::query("INSERT INTO users (id, role) VALUES ($1, $2)")
+                .bind(id)
+                .bind(role)
+                .execute(&pool)
+                .await?;
         }
 
         let spot_id = "R01-01".to_owned();
-        sqlx::query("INSERT INTO spots (id, status, x, y) VALUES ($1, 'free', 0, 0)")
+        sqlx::query("INSERT INTO spots (id, status, x, y, observation_timestamp) VALUES ($1, 'free', 0, 0, NOW() - INTERVAL '30 seconds')")
             .bind(&spot_id)
             .execute(&pool)
             .await?;
@@ -61,6 +57,9 @@ impl Fixture {
             auth_limits: Default::default(),
             jwt_secret: "r01-disposable-jwt-secret".to_owned(),
             plate_pepper: "r01-disposable-plate-pepper".to_owned(),
+            personal_data: crate::personal_data::PersonalDataCipher::for_unit_test(),
+            identity: crate::identity::IdentityProvider::for_unit_test(),
+            ws_admission: Default::default(),
         });
 
         Ok(Self {
@@ -99,7 +98,7 @@ impl Fixture {
         .await?)
     }
 
-    async fn headers(&self, user_id: Uuid, role: &str) -> HeaderMap {
+    pub(crate) async fn headers(&self, user_id: Uuid, role: &str) -> HeaderMap {
         let token = crate::sessions::issue(
             self.state.installation.pool(),
             user_id,
@@ -131,7 +130,7 @@ impl Fixture {
         .into_response()
     }
 
-    async fn create_for_owner(&self) -> Uuid {
+    pub(crate) async fn create_for_owner(&self) -> Uuid {
         let response = self.create(self.owner).await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), 16_384)
@@ -182,7 +181,7 @@ impl Fixture {
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn r03_demoted_admin_cannot_mutate_a_spot(pool: PgPool) -> Result<(), sqlx::Error> {
+async fn demoted_admin_cannot_mutate_a_spot(pool: PgPool) -> Result<(), sqlx::Error> {
     let fixture = Fixture::new(pool).await?;
     let headers = fixture.headers(fixture.admin, "admin").await;
     sqlx::query("UPDATE users SET role = 'user' WHERE id = $1")
@@ -205,7 +204,7 @@ async fn r03_demoted_admin_cannot_mutate_a_spot(pool: PgPool) -> Result<(), sqlx
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn r03_deleted_user_cannot_create_a_reservation(pool: PgPool) -> Result<(), sqlx::Error> {
+async fn deleted_user_cannot_create_a_reservation(pool: PgPool) -> Result<(), sqlx::Error> {
     let fixture = Fixture::new(pool).await?;
     let headers = fixture.headers(fixture.owner, "user").await;
     sqlx::query("DELETE FROM users WHERE id = $1")
@@ -229,7 +228,7 @@ async fn r03_deleted_user_cannot_create_a_reservation(pool: PgPool) -> Result<()
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn r03_authorization_database_failure_denies_admin_mutation(
+async fn authorization_database_failure_denies_admin_mutation(
     pool: PgPool,
 ) -> Result<(), sqlx::Error> {
     let fixture = Fixture::new(pool).await?;
@@ -326,6 +325,55 @@ async fn rest_cancel_denies_a_different_owner_without_releasing_the_spot(
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     assert_eq!(fixture.reservation_status(reservation_id).await?, "active");
     assert_eq!(fixture.spot_status().await?, "reserved");
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn rest_extend_hides_a_different_owners_reservation(pool: PgPool) -> Result<(), sqlx::Error> {
+    let fixture = Fixture::new(pool).await?;
+    let reservation_id = fixture.create_for_owner().await;
+    let expires_at = || {
+        sqlx::query_scalar::<_, chrono::DateTime<Utc>>(
+            "SELECT expires_at FROM reservations WHERE id = $1",
+        )
+        .bind(reservation_id)
+        .fetch_one(fixture.state.installation.pool())
+    };
+    let before = expires_at().await?;
+
+    let response = reservations::extend_reservation(
+        State(fixture.state.clone()),
+        Path(reservation_id),
+        fixture.headers(fixture.other, "user").await,
+    )
+    .await
+    .into_response();
+
+    // Not found rather than conflict: the answer must not reveal that the ID exists.
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(expires_at().await?, before);
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn admin_free_releases_open_occupancy_history(pool: PgPool) -> Result<(), sqlx::Error> {
+    let fixture = Fixture::new(pool).await?;
+    sqlx::query("INSERT INTO user_occupancy_history (user_id,spot_id) VALUES ($1,$2)")
+        .bind(fixture.owner)
+        .bind(&fixture.spot_id)
+        .execute(fixture.state.installation.pool())
+        .await?;
+    let open = || {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM user_occupancy_history WHERE spot_id=$1 AND released_at IS NULL",
+        )
+        .bind(&fixture.spot_id)
+        .fetch_one(fixture.state.installation.pool())
+    };
+    fixture.update_spot("occupied").await;
+    assert_eq!(open().await?, 1);
+    fixture.update_spot("free").await;
+    assert_eq!(open().await?, 0);
     Ok(())
 }
 
@@ -504,11 +552,25 @@ async fn retired_spot_rejects_admin_mutation_without_releasing_history(pool: PgP
 
 async fn assert_recommendation_ignores_retired(pool: PgPool, branch: &str) {
     let f = Fixture::new(pool).await.unwrap();
-    let retired = if branch == "priority" { "A-01" } else { "B-07" };
-    sqlx::query("INSERT INTO spots (id,status,x,y,is_active) VALUES ($1,'free',1,0,FALSE),('C-01','free',10,0,TRUE)").bind(retired).execute(f.state.installation.pool()).await.unwrap();
+    let retired = if branch == "priority" {
+        "KEPT-7"
+    } else {
+        "B-07"
+    };
+    sqlx::query("INSERT INTO spots (id,status,x,y,is_active,observation_timestamp,reserved_for) VALUES ($1,'free',1,0,FALSE,NOW() - INTERVAL '30 seconds',$2),('C-01','free',10,0,TRUE,NOW() - INTERVAL '30 seconds',$2)").bind(retired).bind((branch == "priority").then_some("pcd")).execute(f.state.installation.pool()).await.unwrap();
     if branch == "priority" {
-        sqlx::query("UPDATE users SET pcd_status=TRUE WHERE id=$1")
+        let pcd = f
+            .state
+            .personal_data
+            .encrypt(
+                crate::personal_data::Field::UserPcdStatus,
+                f.owner,
+                &Some(true),
+            )
+            .unwrap();
+        sqlx::query("UPDATE users SET pcd_status_enc=$2 WHERE id=$1")
             .bind(f.owner)
+            .bind(pcd)
             .execute(f.state.installation.pool())
             .await
             .unwrap();
@@ -525,6 +587,7 @@ async fn assert_recommendation_ignores_retired(pool: PgPool, branch: &str) {
     }
     let mut graph = ParkingGraph::new();
     let cam = graph.add_node("cam-01", 0.0, 0.0).unwrap();
+    graph.mark_entrance("cam-01");
     let old = graph.add_node(retired, 1.0, 0.0).unwrap();
     let current = graph.add_node("C-01", 10.0, 0.0).unwrap();
     graph.add_edge(cam, old, 1, true);
@@ -559,6 +622,7 @@ async fn recommendation_fixture(pool: PgPool) -> Fixture {
     let f = Fixture::new(pool).await.unwrap();
     let mut graph = ParkingGraph::new();
     let camera = graph.add_node("cam-01", 0.0, 0.0).unwrap();
+    graph.mark_entrance("cam-01");
     let spot = graph.add_node(&f.spot_id, 1.0, 0.0).unwrap();
     graph.add_edge(camera, spot, 1, true);
     *f.state.installation.graph.write().await = graph;
@@ -581,6 +645,7 @@ async fn assert_recommendation_unavailable(f: &Fixture) {
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let body = to_bytes(response.into_body(), 16384).await.unwrap();
     let text = String::from_utf8(body.to_vec()).unwrap();
+    assert_eq!(text, "Recommendation temporarily unavailable");
     for internal_detail in [
         "injected",
         "SELECT",
@@ -600,10 +665,10 @@ async fn assert_recommendation_unavailable(f: &Fixture) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn r08_priority_query_failure_does_not_fall_back_to_an_ordinary_spot(pool: PgPool) {
+async fn priority_query_failure_does_not_fall_back_to_an_ordinary_spot(pool: PgPool) {
     let f = recommendation_fixture(pool).await;
     // Break the priority query at prepare time, while the role lookup still works.
-    sqlx::query("ALTER TABLE users RENAME COLUMN pcd_status TO r08_unavailable")
+    sqlx::query("ALTER TABLE users RENAME COLUMN pcd_status_enc TO r08_unavailable")
         .execute(f.state.installation.pool())
         .await
         .unwrap();
@@ -611,7 +676,7 @@ async fn r08_priority_query_failure_does_not_fall_back_to_an_ordinary_spot(pool:
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn r08_history_count_failure_does_not_fall_back_to_the_closest_spot(pool: PgPool) {
+async fn history_count_failure_does_not_fall_back_to_the_closest_spot(pool: PgPool) {
     let f = recommendation_fixture(pool).await;
     sqlx::query("ALTER TABLE user_occupancy_history RENAME TO r08_unavailable")
         .execute(f.state.installation.pool())
@@ -621,7 +686,7 @@ async fn r08_history_count_failure_does_not_fall_back_to_the_closest_spot(pool: 
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn r08_favorite_lookup_failure_does_not_fall_back_to_the_closest_spot(pool: PgPool) {
+async fn favorite_lookup_failure_does_not_fall_back_to_the_closest_spot(pool: PgPool) {
     let f = recommendation_fixture(pool).await;
     for _ in 0..3 {
         sqlx::query("INSERT INTO user_occupancy_history (user_id,spot_id) VALUES ($1,$2)")
@@ -640,7 +705,7 @@ async fn r08_favorite_lookup_failure_does_not_fall_back_to_the_closest_spot(pool
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn r08_free_spots_query_failure_is_unavailable_instead_of_full(pool: PgPool) {
+async fn free_spots_query_failure_is_unavailable_instead_of_full(pool: PgPool) {
     let f = recommendation_fixture(pool).await;
     // Earlier priority reads and later verification reads must remain healthy.
     // Inject only the final ordinary-spots SELECT, using a disposable SQL view.
@@ -648,7 +713,7 @@ async fn r08_free_spots_query_failure_is_unavailable_instead_of_full(pool: PgPoo
         "ALTER TABLE spots RENAME TO r08_original_spots;
          CREATE FUNCTION r08_free_read_allowed() RETURNS BOOLEAN
          LANGUAGE plpgsql VOLATILE AS $$ BEGIN
-             IF strpos(current_query(), 'AND id NOT IN') > 0 THEN
+             IF strpos(current_query(), 'AND reserved_for IS NULL') > 0 THEN
                  RAISE EXCEPTION 'injected R08 free spots failure';
              END IF;
              RETURN TRUE;
@@ -663,7 +728,7 @@ async fn r08_free_spots_query_failure_is_unavailable_instead_of_full(pool: PgPoo
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn r08_successful_empty_lookup_still_reports_full(pool: PgPool) {
+async fn successful_empty_lookup_still_reports_full(pool: PgPool) {
     let f = recommendation_fixture(pool).await;
     sqlx::query("UPDATE spots SET status='occupied'")
         .execute(f.state.installation.pool())
@@ -685,13 +750,14 @@ async fn assert_recommended_spot(f: &Fixture, expected: &str) {
 }
 
 async fn add_preferred_spot(f: &Fixture, spot_id: &str) {
-    sqlx::query("INSERT INTO spots (id,status,x,y) VALUES ($1,'free',10,0)")
+    sqlx::query("INSERT INTO spots (id,status,x,y,observation_timestamp) VALUES ($1,'free',10,0,NOW() - INTERVAL '30 seconds')")
         .bind(spot_id)
         .execute(f.state.installation.pool())
         .await
         .unwrap();
     let mut graph = ParkingGraph::new();
     let camera = graph.add_node("cam-01", 0.0, 0.0).unwrap();
+    graph.mark_entrance("cam-01");
     let ordinary = graph.add_node(&f.spot_id, 1.0, 0.0).unwrap();
     let preferred = graph.add_node(spot_id, 10.0, 0.0).unwrap();
     graph.add_edge(camera, ordinary, 1, true);
@@ -700,19 +766,19 @@ async fn add_preferred_spot(f: &Fixture, spot_id: &str) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn r08_valid_priority_still_takes_precedence_over_distance(pool: PgPool) {
+async fn valid_priority_still_takes_precedence_over_distance(pool: PgPool) {
     let f = recommendation_fixture(pool).await;
-    add_preferred_spot(&f, "A-01").await;
-    sqlx::query("UPDATE users SET pcd_status=TRUE WHERE id=$1")
-        .bind(f.owner)
+    add_preferred_spot(&f, "KEPT-1").await;
+    sqlx::query("UPDATE spots SET reserved_for = 'pcd' WHERE id = 'KEPT-1'")
         .execute(f.state.installation.pool())
         .await
         .unwrap();
-    assert_recommended_spot(&f, "A-01").await;
+    declare(&f, f.owner, None, Some(true)).await;
+    assert_recommended_spot(&f, "KEPT-1").await;
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn r08_valid_history_still_takes_precedence_over_distance(pool: PgPool) {
+async fn valid_history_still_takes_precedence_over_distance(pool: PgPool) {
     let f = recommendation_fixture(pool).await;
     add_preferred_spot(&f, "B-07").await;
     for _ in 0..3 {
@@ -726,7 +792,7 @@ async fn r08_valid_history_still_takes_precedence_over_distance(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn r08_valid_empty_history_still_uses_distance(pool: PgPool) {
+async fn valid_empty_history_still_uses_distance(pool: PgPool) {
     let f = recommendation_fixture(pool).await;
     add_preferred_spot(&f, "B-07").await;
     assert_recommended_spot(&f, "R01-01").await;
@@ -768,7 +834,7 @@ async fn concurrent_same_user_cannot_reserve_two_distinct_spots(
     pool: PgPool,
 ) -> Result<(), sqlx::Error> {
     let fixture = Fixture::new(pool).await?;
-    sqlx::query("INSERT INTO spots (id,status,x,y) VALUES ('policy-second','free',0,0)")
+    sqlx::query("INSERT INTO spots (id,status,x,y,observation_timestamp) VALUES ('policy-second','free',0,0,NOW() - INTERVAL '30 seconds')")
         .execute(fixture.state.installation.pool())
         .await?;
     let first = reservations::create_reservation(
@@ -823,7 +889,7 @@ async fn policy_can_allow_two_reservations_without_a_global_user_constraint(
     pool: PgPool,
 ) -> Result<(), sqlx::Error> {
     let fixture = Fixture::new(pool).await?;
-    sqlx::query("INSERT INTO spots (id,status,x,y) VALUES ('policy-second','free',0,0),('policy-third','free',0,0)").execute(fixture.state.installation.pool()).await?;
+    sqlx::query("INSERT INTO spots (id,status,x,y,observation_timestamp) VALUES ('policy-second','free',0,0,NOW() - INTERVAL '30 seconds'),('policy-third','free',0,0,NOW() - INTERVAL '30 seconds')").execute(fixture.state.installation.pool()).await?;
     let policy = crate::reservation_policy::ReservationPolicy {
         max_active_per_user: 2,
         ..Default::default()
@@ -1036,4 +1102,277 @@ async fn admin_spot_status_rejects_values_outside_the_wire_contract(
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert_eq!(fixture.spot_status().await?, "free");
     Ok(())
+}
+
+async fn declare(f: &Fixture, user: Uuid, born: Option<chrono::NaiveDate>, pcd: Option<bool>) {
+    use crate::personal_data::Field;
+    let cipher = &f.state.personal_data;
+    sqlx::query("UPDATE users SET date_of_birth_enc=$2, pcd_status_enc=$3 WHERE id=$1")
+        .bind(user)
+        .bind(cipher.encrypt(Field::UserDateOfBirth, user, &born).unwrap())
+        .bind(cipher.encrypt(Field::UserPcdStatus, user, &pcd).unwrap())
+        .execute(f.state.installation.pool())
+        .await
+        .unwrap();
+}
+
+async fn recommended_for(f: &Fixture, user: Uuid) -> (StatusCode, serde_json::Value) {
+    let role = if user == f.admin { "admin" } else { "user" };
+    let response = reservations::recommend_spot(
+        State(f.state.clone()),
+        f.headers(user, role).await,
+        axum::extract::Query(reservations::RecommendQuery { user_id: user }),
+    )
+    .await
+    .into_response();
+    let status = response.status();
+    let body = to_bytes(response.into_body(), 16384).await.unwrap();
+    (status, serde_json::from_slice(&body).unwrap_or_default())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn encrypted_eligibility_selects_reserved_spots(pool: PgPool) {
+    let f = Fixture::new(pool).await.unwrap();
+    // The map keeps these spots; their names carry no meaning.
+    sqlx::query("INSERT INTO spots (id,status,x,y,observation_timestamp,reserved_for) VALUES ('Z-PCD','free',5,0,NOW() - INTERVAL '30 seconds','pcd'),('Z-SENIOR','free',5,0,NOW() - INTERVAL '30 seconds','elderly')")
+        .execute(f.state.installation.pool())
+        .await
+        .unwrap();
+    let today = Utc::now().date_naive();
+    let sixty = chrono::NaiveDate::from_ymd_opt(today.year() - 60, today.month(), today.day())
+        .unwrap_or_else(|| chrono::NaiveDate::from_ymd_opt(today.year() - 60, 2, 28).unwrap());
+    declare(&f, f.owner, Some(sixty), None).await;
+    declare(&f, f.other, Some(sixty + Duration::days(1)), Some(true)).await;
+    let mut graph = ParkingGraph::new();
+    let camera = graph.add_node("cam-01", 0.0, 0.0).unwrap();
+    graph.mark_entrance("cam-01");
+    for spot in [f.spot_id.as_str(), "Z-PCD", "Z-SENIOR"] {
+        let node = graph.add_node(spot, 1.0, 0.0).unwrap();
+        graph.add_edge(camera, node, 1, true);
+    }
+    *f.state.installation.graph.write().await = graph;
+
+    assert_eq!(
+        recommended_for(&f, f.owner).await.1["recommended_spot"],
+        "Z-SENIOR"
+    );
+    // One day short of 60 is not elderly; the disability declaration still applies.
+    assert_eq!(
+        recommended_for(&f, f.other).await.1["recommended_spot"],
+        "Z-PCD"
+    );
+    assert_eq!(
+        recommended_for(&f, f.admin).await.1["recommended_spot"],
+        f.spot_id
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn an_envelope_moved_from_another_user_does_not_grant_priority(pool: PgPool) {
+    let f = Fixture::new(pool).await.unwrap();
+    declare(&f, f.other, None, Some(true)).await;
+    sqlx::query("UPDATE users SET pcd_status_enc=(SELECT pcd_status_enc FROM users WHERE id=$2) WHERE id=$1")
+        .bind(f.owner)
+        .bind(f.other)
+        .execute(f.state.installation.pool())
+        .await
+        .unwrap();
+    let (status, body) = recommended_for(&f, f.owner).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(body.is_null());
+    assert_eq!(f.active_count().await.unwrap(), 0);
+}
+
+async fn observed(f: &Fixture, spot_id: &str, age: Option<i32>) {
+    sqlx::query(
+        "UPDATE spots SET observation_timestamp = NOW() - make_interval(secs => $2) WHERE id = $1",
+    )
+    .bind(spot_id)
+    .bind(age.map(f64::from))
+    .execute(f.state.installation.pool())
+    .await
+    .unwrap();
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_spot_without_a_recent_observation_cannot_be_reserved(pool: PgPool) {
+    let f = Fixture::new(pool).await.unwrap();
+    // Never seen by a camera, then seen too long ago: both unknown.
+    for age in [
+        None,
+        Some(crate::freshness::DEFAULT_STALE_AFTER_SECS as i32 + 1),
+    ] {
+        observed(&f, &f.spot_id, age).await;
+        let response = f.create(f.owner).await;
+        assert_eq!(response.status(), StatusCode::CONFLICT, "age {age:?}");
+        let status: String = sqlx::query_scalar("SELECT status FROM spots WHERE id = $1")
+            .bind(&f.spot_id)
+            .fetch_one(f.state.installation.pool())
+            .await
+            .unwrap();
+        assert_eq!(status, "free", "a refused claim leaves the spot untouched");
+    }
+    observed(&f, &f.spot_id, Some(5)).await;
+    assert_eq!(f.create(f.owner).await.status(), StatusCode::OK);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn recommendation_skips_a_nearer_spot_whose_camera_went_quiet(pool: PgPool) {
+    let f = recommendation_fixture(pool).await;
+    sqlx::query(
+        "INSERT INTO spots (id,status,x,y,observation_timestamp) \
+         VALUES ('R08-FAR','free',10,0,NOW() - INTERVAL '5 seconds')",
+    )
+    .execute(f.state.installation.pool())
+    .await
+    .unwrap();
+    let mut graph = ParkingGraph::new();
+    let camera = graph.add_node("cam-01", 0.0, 0.0).unwrap();
+    graph.mark_entrance("cam-01");
+    let near = graph.add_node(&f.spot_id, 1.0, 0.0).unwrap();
+    let far = graph.add_node("R08-FAR", 10.0, 0.0).unwrap();
+    graph.add_edge(camera, near, 1, true);
+    graph.add_edge(camera, far, 10, true);
+    *f.state.installation.graph.write().await = graph;
+    observed(&f, &f.spot_id, Some(600)).await;
+    let response = recommendation_response(&f).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 16384).await.unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["recommended_spot"], "R08-FAR");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_spot_going_quiet_is_announced_unknown_once(pool: PgPool) {
+    let f = Fixture::new(pool).await.unwrap();
+    let mut updates = f.state.installation.tx.subscribe();
+    let mut announced = std::collections::HashSet::new();
+    let unknown = format!(
+        r#"{{"type":"SPOT_UPDATE","spot_id":"{}","status":"unknown"}}"#,
+        f.spot_id
+    );
+
+    observed(&f, &f.spot_id, Some(5)).await;
+    assert!(
+        crate::freshness::sweep(&f.state, &mut announced)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    observed(&f, &f.spot_id, Some(600)).await;
+    assert_eq!(
+        crate::freshness::sweep(&f.state, &mut announced)
+            .await
+            .unwrap(),
+        std::slice::from_ref(&f.spot_id)
+    );
+    assert_eq!(updates.recv().await.unwrap(), unknown);
+    // Still quiet: nothing new to say.
+    assert!(
+        crate::freshness::sweep(&f.state, &mut announced)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // The camera returns, then goes quiet again: announced again.
+    observed(&f, &f.spot_id, Some(5)).await;
+    assert!(
+        crate::freshness::sweep(&f.state, &mut announced)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    observed(&f, &f.spot_id, Some(600)).await;
+    assert_eq!(
+        crate::freshness::sweep(&f.state, &mut announced)
+            .await
+            .unwrap(),
+        std::slice::from_ref(&f.spot_id)
+    );
+    assert_eq!(updates.recv().await.unwrap(), unknown);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn snapshots_show_unknown_but_keep_reservations(pool: PgPool) {
+    let f = Fixture::new(pool).await.unwrap();
+    f.create_for_owner().await;
+    sqlx::query(
+        "INSERT INTO spots (id,status,x,y,observation_timestamp) VALUES \
+         ('R08-NEW','free',0,0,NULL),('R08-OLD','occupied',0,0,NOW() - INTERVAL '10 minutes'), \
+         ('R08-SEEN','occupied',0,0,NOW() - INTERVAL '5 seconds')",
+    )
+    .execute(f.state.installation.pool())
+    .await
+    .unwrap();
+    // The reserved spot's camera also went quiet: the reservation still shows.
+    observed(&f, &f.spot_id, Some(600)).await;
+    let rows: Vec<(String, String)> = sqlx::query_as(crate::freshness::SNAPSHOT_SQL)
+        .bind(crate::freshness::stale_after_secs())
+        .fetch_all(f.state.installation.pool())
+        .await
+        .unwrap();
+    let rows: std::collections::BTreeMap<_, _> = rows.into_iter().collect();
+    assert_eq!(rows["R08-NEW"], "unknown");
+    assert_eq!(rows["R08-OLD"], "unknown");
+    assert_eq!(rows["R08-SEEN"], "occupied");
+    assert_eq!(rows[&f.spot_id], "reserved");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn closest_spot_is_measured_from_the_nearest_of_two_entrances(pool: PgPool) {
+    let f = Fixture::new(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO spots (id,status,x,y,observation_timestamp) \
+         VALUES ('SOUTH-1','free',100,0,NOW() - INTERVAL '30 seconds')",
+    )
+    .execute(f.state.installation.pool())
+    .await
+    .unwrap();
+    let mut graph = ParkingGraph::new();
+    let north = graph.add_node("cam-01", 0.0, 0.0).unwrap();
+    let south = graph.add_node("entrance-1", 100.0, 0.0).unwrap();
+    graph.mark_entrance("cam-01");
+    graph.mark_entrance("entrance-1");
+    // The fixture spot is far from the north entrance, SOUTH-1 next to the south one.
+    let far = graph.add_node(&f.spot_id, 0.0, 50.0).unwrap();
+    let near = graph.add_node("SOUTH-1", 100.0, 1.0).unwrap();
+    graph.add_edge(north, far, 50, true);
+    graph.add_edge(south, near, 1, true);
+    *f.state.installation.graph.write().await = graph;
+    let (status, body) = recommended_for(&f, f.owner).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["recommended_spot"], "SOUTH-1");
+    assert_eq!(body["route"], serde_json::json!(["entrance-1", "SOUTH-1"]));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn spots_kept_by_the_map_are_never_offered_to_everyone(pool: PgPool) {
+    let f = Fixture::new(pool).await.unwrap();
+    // Named like an ordinary spot, kept for PcD by the map; nearer than the fixture spot.
+    sqlx::query(
+        "INSERT INTO spots (id,status,x,y,observation_timestamp,reserved_for) \
+         VALUES ('B-02','free',1,0,NOW() - INTERVAL '30 seconds','pcd')",
+    )
+    .execute(f.state.installation.pool())
+    .await
+    .unwrap();
+    let mut graph = ParkingGraph::new();
+    let camera = graph.add_node("cam-01", 0.0, 0.0).unwrap();
+    graph.mark_entrance("cam-01");
+    for (spot, cost) in [("B-02", 1), (f.spot_id.as_str(), 5)] {
+        let node = graph.add_node(spot, 1.0, 0.0).unwrap();
+        graph.add_edge(camera, node, cost, true);
+    }
+    *f.state.installation.graph.write().await = graph;
+    assert_eq!(
+        recommended_for(&f, f.owner).await.1["recommended_spot"],
+        f.spot_id
+    );
+    declare(&f, f.other, None, Some(true)).await;
+    assert_eq!(
+        recommended_for(&f, f.other).await.1["recommended_spot"],
+        "B-02"
+    );
 }

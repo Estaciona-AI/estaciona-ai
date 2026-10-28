@@ -34,22 +34,40 @@ pub(super) fn document() -> Value {
     let json_body = |schema| body("json", Some(schema));
     let mut operations = vec![
         rest(
-            "login",
-            "POST",
-            "/login",
-            "public",
-            "public",
-            Some("v1/rest-login-request.schema.json"),
-            (200, json_body("v1/rest-login-response.schema.json")),
+            "current_user",
+            "GET",
+            "/me",
+            "human_session",
+            "authenticated_user",
+            None,
+            (200, json_body("v1/rest-user-response.schema.json")),
         ),
         rest(
-            "register",
-            "POST",
-            "/users",
-            "public",
-            "public",
-            Some("v1/rest-create-user.schema.json"),
-            (201, json_body("v1/rest-user-response.schema.json")),
+            "update_eligibility",
+            "PUT",
+            "/me/eligibility",
+            "human_session",
+            "authenticated_user",
+            Some("v1/rest-update-eligibility.schema.json"),
+            (200, json_body("v1/rest-user-response.schema.json")),
+        ),
+        rest(
+            "export_personal_data",
+            "GET",
+            "/me/export",
+            "human_session",
+            "authenticated_user",
+            None,
+            (200, json_body("v1/rest-personal-data-export.schema.json")),
+        ),
+        rest(
+            "delete_account",
+            "DELETE",
+            "/me",
+            "human_session",
+            "authenticated_user",
+            None,
+            (204, body("empty", None)),
         ),
         rest(
             "get_user",
@@ -64,16 +82,16 @@ pub(super) fn document() -> Value {
             "logout",
             "POST",
             "/auth/logout",
-            "human_bearer",
+            "human_session",
             "current_session",
             None,
-            (204, body("empty", None)),
+            (200, json_body("v1/rest-logout-response.schema.json")),
         ),
         rest(
             "websocket_ticket",
             "POST",
             "/auth/ws-ticket",
-            "human_bearer",
+            "human_session",
             "dashboard_requires_admin",
             Some("v1/rest-issue-ws-ticket.schema.json"),
             (201, json_body("v1/rest-issued-ws-ticket.schema.json")),
@@ -209,12 +227,13 @@ pub(super) fn document() -> Value {
             body("json", None),
         ),
         ("health", "/health", body("text", None)),
+        ("readiness", "/ready", body("text", None)),
     ] {
         operations.push(json!({
             "id":id, "method":"GET", "path":path, "legacy_path":null,
             "authentication":"public", "authorization":"public", "availability":"always",
             "request_schema":null, "request_encoding":"none", "responses":{"200":response},
-            "error_schema": if id == "health" {None} else {Some("v1/rest-api-error.schema.json")}
+            "error_schema": if matches!(id, "health" | "readiness") {None} else {Some("v1/rest-api-error.schema.json")}
         }));
     }
     for operation in &mut operations {
@@ -225,6 +244,12 @@ pub(super) fn document() -> Value {
             "save_config" => {
                 operation["effect"] = json!("persist_geometry_for_next_restart");
                 operation["request_encoding"] = json!("json");
+            }
+            "delete_account" => {
+                operation["effect"] = json!("release_reservations_and_delete_local_account")
+            }
+            "readiness" => {
+                operation["responses"]["503"] = body("text", None);
             }
             "websocket_ticket" => {
                 operation["effect"] = json!("single_use_destination_bound_ticket")
@@ -245,17 +270,24 @@ pub(super) fn document() -> Value {
         "schema_null_meaning":"no_exported_dto_schema",
         "authentication":{
             "public":{"credential":null},
-            "human_session":{"credential":"bearer_or_estaciona_token_cookie", "validation":"registered_current_database_session"},
-            "human_bearer":{"credential":"authorization_bearer", "validation":"registered_current_database_session"},
+            "human_session":{"credential":"bearer_or_host_only_session_cookie", "validation":"registered_current_database_session", "cookie_writes":"require_allowed_origin"},
             "single_use_ticket":{"credential":"ticket_query_parameter", "issued_by":"websocket_ticket", "validation":"destination_session_and_origin"},
             "individual_gateway_bearer":{"credential":"authorization_bearer", "validation":"active_gateway_and_explicit_grants"},
             "local_shared_key":{"credential":"authorization_bearer", "validation":"gateway_process_key"}
+        },
+        "sign_in":{
+            "protocol":"openid_connect_authorization_code_with_pkce",
+            "identity_provider":"central_keycloak_realm",
+            "start":"/auth/login", "callback":"/auth/callback",
+            "backchannel_logout":"/auth/backchannel-logout",
+            "session":"host_only_http_only_cookie",
+            "accounts":"provisioned_at_identity_provider", "local_credentials":false
         },
         "installation_configuration":{
             "source":"operator_package", "public_endpoint":null,
             "files":["installation.json","config.json","spots_3d.json","reservation_policy.json"],
             "optional_files":["reservation_policy.json"],
-            "secrets_source":"process_environment", "scope_from_client_payload":false
+            "secrets_source":"process_environment_or_private_files", "scope_from_client_payload":false
         },
         "http":operations,
         "websockets":[

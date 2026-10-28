@@ -7,11 +7,14 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::pathfinding::ParkingGraph;
+use crate::personal_data::Field;
 use crate::reservation_store::{self, CreateError, FinishReason};
+use crate::site_config::ReservedFor;
 use crate::state::SharedState;
 use crate::ws::messages::ServerToAppMsg;
 
@@ -36,7 +39,7 @@ pub struct ReservationResponse {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct UpdateSpotStatus {
-    #[schemars(schema_with = "crate::contracts::spot_status_schema")]
+    #[schemars(schema_with = "crate::contracts::settable_spot_status_schema")]
     pub status: String,
 }
 
@@ -71,7 +74,9 @@ pub async fn update_spot_status(
     headers: HeaderMap,
     Json(payload): Json<UpdateSpotStatus>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    crate::security::require_admin(&headers, &state.jwt_secret, state.installation.pool()).await?;
+    let actor =
+        crate::security::require_admin(&headers, &state.jwt_secret, state.installation.pool())
+            .await?;
     if payload.status != "occupied" && payload.status != "free" && payload.status != "reserved" {
         return Err((StatusCode::BAD_REQUEST, "Invalid status".to_string()));
     }
@@ -117,6 +122,20 @@ pub async fn update_spot_status(
         })?;
     }
 
+    crate::audit::record(
+        &mut *tx,
+        actor,
+        "spot_status_set",
+        Some(&id),
+        serde_json::json!({"status": payload.status}),
+    )
+    .await
+    .map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Database error".to_string(),
+        )
+    })?;
     tx.commit().await.map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -189,7 +208,24 @@ pub async fn get_reservations(
     State(state): State<SharedState>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    crate::security::require_admin(&headers, &state.jwt_secret, state.installation.pool()).await?;
+    let actor =
+        crate::security::require_admin(&headers, &state.jwt_secret, state.installation.pool())
+            .await?;
+    crate::audit::record(
+        state.installation.pool(),
+        actor,
+        "active_reservations_listed",
+        None,
+        serde_json::json!({}),
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("Audit record failed: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to fetch reservations".to_string(),
+        )
+    })?;
     let records = sqlx::query_as!(
         ReservationResponse,
         r#"
@@ -362,6 +398,69 @@ impl RecommendationQueryError {
     }
 }
 
+const ELDERLY_AGE: i32 = 60;
+
+/// Completed years, as PostgreSQL `age()` counts them (29 February included).
+fn completed_years(born: NaiveDate, today: NaiveDate) -> i32 {
+    let birthday_pending = (today.month(), today.day()) < (born.month(), born.day());
+    today.year() - born.year() - i32::from(birthday_pending)
+}
+
+/// Kinds of kept spots (the map's `reserved_for`) the user is eligible for.
+/// Eligibility is decrypted in the server, so the database never compares
+/// the clear values.
+async fn priority_spots(
+    state: &SharedState,
+    user_id: Uuid,
+) -> Result<Vec<&'static str>, (StatusCode, String)> {
+    let row = sqlx::query!(
+        "SELECT date_of_birth_enc, pcd_status_enc FROM users WHERE id = $1",
+        user_id
+    )
+    .fetch_optional(state.installation.pool())
+    .await
+    .map_err(|source| {
+        RecommendationQueryError {
+            query: "priority",
+            source,
+        }
+        .into_http_error()
+    })?;
+    let Some(row) = row else {
+        return Ok(Vec::new());
+    };
+    let cipher = &state.personal_data;
+    let eligibility = cipher
+        .decrypt_optional::<NaiveDate>(
+            Field::UserDateOfBirth,
+            user_id,
+            row.date_of_birth_enc.as_deref(),
+        )
+        .and_then(|born| {
+            let pcd = cipher.decrypt_optional::<bool>(
+                Field::UserPcdStatus,
+                user_id,
+                row.pcd_status_enc.as_deref(),
+            )?;
+            Ok((born, pcd))
+        });
+    let (born, pcd) = eligibility.map_err(|error| {
+        tracing::error!(%error, "Recommendation eligibility cannot be decrypted");
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Recommendation temporarily unavailable".to_owned(),
+        )
+    })?;
+    let mut spots = Vec::new();
+    if pcd == Some(true) {
+        spots.push(ReservedFor::Pcd.as_str());
+    }
+    if born.is_some_and(|born| completed_years(born, Utc::now().date_naive()) >= ELDERLY_AGE) {
+        spots.push(ReservedFor::Elderly.as_str());
+    }
+    Ok(spots)
+}
+
 pub async fn recommend_spot(
     State(state): State<SharedState>,
     headers: HeaderMap,
@@ -373,42 +472,35 @@ pub async fn recommend_spot(
     if requester != query.user_id {
         return Err((StatusCode::FORBIDDEN, "User access denied".to_string()));
     }
-    let priority_spot = sqlx::query!(
-        r#"
-        WITH user_data AS (
-            SELECT pcd_status, EXTRACT(YEAR FROM age(CURRENT_DATE, date_of_birth)) as age 
-            FROM users WHERE id = $1
+    let priority_spots = match priority_spots(&state, query.user_id).await? {
+        kinds if kinds.is_empty() => Vec::new(),
+        kinds => sqlx::query_scalar!(
+            "SELECT id FROM spots WHERE status = 'free' AND is_active AND reserved_for = ANY($1) \
+             AND observation_timestamp > NOW() - make_interval(secs => $2) \
+             ORDER BY id",
+            &kinds as &[&str],
+            crate::freshness::stale_after_secs()
         )
-        SELECT s.id 
-        FROM spots s, user_data u
-        WHERE s.status = 'free' AND s.is_active
-          AND (
-              (u.pcd_status = true AND s.id IN ('A-01', 'A-02'))
-              OR 
-              (u.age >= 60 AND s.id IN ('A-03', 'A-04'))
-          )
-        ORDER BY s.id
-        LIMIT 1
-        "#,
-        query.user_id
-    )
-    .fetch_optional(state.installation.pool())
-    .await
-    .map_err(|source| {
-        RecommendationQueryError {
-            query: "priority",
-            source,
-        }
-        .into_http_error()
-    })?;
+        .fetch_all(state.installation.pool())
+        .await
+        .map_err(|source| {
+            RecommendationQueryError {
+                query: "priority",
+                source,
+            }
+            .into_http_error()
+        })?,
+    };
 
-    if let Some(priority) = priority_spot {
+    if let Some(first) = priority_spots.first() {
         let graph = state.installation.graph.read().await;
-        let route = graph.calculate_route("cam-01", &priority.id);
+        // The nearest kept spot; one no entrance reaches is still offered.
+        let (priority, route) = nearest(&graph, &priority_spots)
+            .map_or_else(|| (first.clone(), None), |(id, route)| (id, Some(route)));
         return Ok((
             StatusCode::OK,
             Json(serde_json::json!({
-                "recommended_spot": priority.id,
+                "recommended_spot": priority,
                 "route": route
             })),
         ));
@@ -437,12 +529,14 @@ pub async fn recommend_spot(
             JOIN spots s ON s.id = h.spot_id
             WHERE h.user_id = $1 
               AND s.status = 'free' AND s.is_active
-              AND s.id NOT IN ('A-01', 'A-02', 'A-03', 'A-04')
+              AND s.observation_timestamp > NOW() - make_interval(secs => $2)
+              AND s.reserved_for IS NULL
             GROUP BY h.spot_id
             ORDER BY uses DESC
             LIMIT 1
             "#,
-            query.user_id
+            query.user_id,
+            crate::freshness::stale_after_secs()
         )
         .fetch_optional(state.installation.pool())
         .await
@@ -456,7 +550,9 @@ pub async fn recommend_spot(
 
         if let Some(fav) = favorite_spot {
             let graph = state.installation.graph.read().await;
-            let route = graph.calculate_route("cam-01", &fav.spot_id);
+            let route = graph
+                .route_from_nearest_entrance(&fav.spot_id)
+                .map(|(_, route)| route);
             return Ok((
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -472,8 +568,10 @@ pub async fn recommend_spot(
         SELECT id 
         FROM spots 
         WHERE status = 'free' AND is_active
-          AND id NOT IN ('A-01', 'A-02', 'A-03', 'A-04')
-        "#
+          AND observation_timestamp > NOW() - make_interval(secs => $1)
+          AND reserved_for IS NULL
+        "#,
+        crate::freshness::stale_after_secs()
     )
     .fetch_all(state.installation.pool())
     .await
@@ -489,35 +587,30 @@ pub async fn recommend_spot(
         return Err((StatusCode::NOT_FOUND, "Estacionamento Lotado".to_string()));
     }
 
-    let mut closest_spot_id = None;
-    let mut min_cost = u32::MAX;
-
-    {
-        let graph = state.installation.graph.read().await;
-        for spot in &free_spots {
-            if let Some(cost) = graph.calculate_cost("cam-01", &spot.id)
-                && cost < min_cost
-            {
-                min_cost = cost;
-                closest_spot_id = Some(spot.id.clone());
-            }
-        }
-    }
-
-    match closest_spot_id {
-        Some(spot_id) => {
-            let graph = state.installation.graph.read().await;
-            let route = graph.calculate_route("cam-01", &spot_id);
-            Ok((
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "recommended_spot": spot_id,
-                    "route": route
-                })),
-            ))
-        }
+    let ids: Vec<String> = free_spots.into_iter().map(|spot| spot.id).collect();
+    let graph = state.installation.graph.read().await;
+    match nearest(&graph, &ids) {
+        Some((spot_id, route)) => Ok((
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "recommended_spot": spot_id,
+                "route": route
+            })),
+        )),
         None => Err((StatusCode::NOT_FOUND, "Estacionamento Lotado".to_string())),
     }
+}
+
+/// The candidate closest to any entrance of the site, with its route.
+fn nearest(graph: &ParkingGraph, candidates: &[String]) -> Option<(String, Vec<String>)> {
+    candidates
+        .iter()
+        .filter_map(|id| {
+            let (cost, route) = graph.route_from_nearest_entrance(id)?;
+            Some((cost, id, route))
+        })
+        .min_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)))
+        .map(|(_, id, route)| (id.clone(), route))
 }
 
 #[cfg(test)]
@@ -545,6 +638,17 @@ mod tests {
         let json_data = r#"{"status": "occupied"}"#;
         let parsed: UpdateSpotStatus = serde_json::from_str(json_data).unwrap();
         assert_eq!(parsed.status, "occupied");
+    }
+
+    #[test]
+    fn completed_years_match_postgres_age_including_leap_birthdays() {
+        let date = |y, m, d| NaiveDate::from_ymd_opt(y, m, d).unwrap();
+        assert_eq!(completed_years(date(1966, 10, 25), date(2026, 10, 25)), 60);
+        assert_eq!(completed_years(date(1966, 10, 26), date(2026, 10, 25)), 59);
+        assert_eq!(completed_years(date(1966, 2, 28), date(2026, 2, 28)), 60);
+        assert_eq!(completed_years(date(1964, 2, 29), date(2024, 2, 28)), 59);
+        assert_eq!(completed_years(date(1964, 2, 29), date(2024, 2, 29)), 60);
+        assert_eq!(completed_years(date(1964, 2, 29), date(2025, 2, 28)), 60);
     }
 
     #[test]

@@ -88,11 +88,11 @@ pub async fn capabilities() -> Json<Capabilities> {
             browser_websocket: "single_use_ticket",
             edge_authentication: "individual_gateway_bearer",
             logout_scope: "current_session",
-            sso: false,
+            sso: true,
         },
         paths: BTreeMap::from([
-            ("login", "/api/v1/login"),
-            ("register", "/api/v1/users"),
+            ("sign_in", "/auth/login"),
+            ("current_user", "/api/v1/me"),
             ("logout", "/api/v1/auth/logout"),
             ("websocket_ticket", "/api/v1/auth/ws-ticket"),
             ("contract_manifest", "/api/v1/contracts/v1/manifest.json"),
@@ -259,5 +259,39 @@ mod tests {
             let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(body["code"], expected);
         }
+    }
+
+    #[test]
+    fn every_status_has_a_stable_error_code() {
+        for (status, code) in [
+            (StatusCode::BAD_REQUEST, "BAD_REQUEST"),
+            (StatusCode::UNAUTHORIZED, "UNAUTHORIZED"),
+            (StatusCode::FORBIDDEN, "FORBIDDEN"),
+            (StatusCode::NOT_FOUND, "NOT_FOUND"),
+            (StatusCode::METHOD_NOT_ALLOWED, "METHOD_NOT_ALLOWED"),
+            (StatusCode::CONFLICT, "CONFLICT"),
+            (StatusCode::PAYLOAD_TOO_LARGE, "PAYLOAD_TOO_LARGE"),
+            (StatusCode::UNPROCESSABLE_ENTITY, "UNPROCESSABLE_ENTITY"),
+            (StatusCode::TOO_MANY_REQUESTS, "TOO_MANY_REQUESTS"),
+            (StatusCode::SERVICE_UNAVAILABLE, "SERVICE_UNAVAILABLE"),
+            (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR"),
+            (StatusCode::BAD_GATEWAY, "INTERNAL_ERROR"),
+            (StatusCode::GONE, "HTTP_ERROR"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(ErrorCode::from(status)).unwrap(),
+                code,
+                "{status}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn published_contracts_exclude_the_test_fixtures() {
+        assert!(contract(Path("v1/manifest.json".into())).await.is_ok());
+        assert_eq!(
+            contract(Path("v1/fixtures.json".into())).await.unwrap_err(),
+            StatusCode::NOT_FOUND
+        );
     }
 }

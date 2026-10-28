@@ -2,73 +2,50 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import sqlite3
-import os
 import json
 import asyncio
+from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
+
 from gateway import (
     init_db,
     init_metrics_db,
     save_event,
-    get_unsynced_events,
-    mark_events_as_synced,
+    finish_event,
+    pending_deliveries,
     save_metric,
     update_metrics_forwarded_batch,
     is_authorized,
     handler,
     sync_loop,
-    main,
+    Retention,
 )
 
 
-def test_init_db(tmp_path):
+def test_saved_events_are_pending_in_order_with_their_own_uuid(tmp_path):
     db_path = str(tmp_path / "test_fallback.db")
     init_db(db_path)
-    assert os.path.exists(db_path)
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='fallback_events'"
-    )
-    assert cursor.fetchone() is not None
-    conn.close()
+    first = save_event(db_path, "event_data_1")
+    second = save_event(db_path, "event_data_2")
+    events = pending_deliveries(db_path)
+    assert [(uuid, text) for _, uuid, text in events] == [
+        (first, "event_data_1"),
+        (second, "event_data_2"),
+    ]
 
 
-def test_init_metrics_db(tmp_path):
-    db_path = str(tmp_path / "test_metrics.db")
-    init_metrics_db(db_path)
-    assert os.path.exists(db_path)
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='metrics'"
-    )
-    assert cursor.fetchone() is not None
-    conn.close()
-
-
-def test_save_and_get_unsynced_events(tmp_path):
+def test_a_finished_event_leaves_the_queue_with_its_outcome(tmp_path):
     db_path = str(tmp_path / "test_fallback.db")
     init_db(db_path)
-    save_event(db_path, "event_data_1")
-    save_event(db_path, "event_data_2")
-    events = get_unsynced_events(db_path)
-    assert len(events) == 2
-    assert events[0][1] == "event_data_1"
-    assert events[1][1] == "event_data_2"
-
-
-def test_mark_events_as_synced(tmp_path):
-    db_path = str(tmp_path / "test_fallback.db")
-    init_db(db_path)
-    save_event(db_path, "event_data_1")
-    events = get_unsynced_events(db_path)
-    event_id = events[0][0]
-    mark_events_as_synced(db_path, [event_id])
-    remaining = get_unsynced_events(db_path)
-    assert len(remaining) == 0
+    event = save_event(db_path, "event_data_1")
+    finish_event(db_path, event, "rejected", "invalid_local_payload")
+    assert pending_deliveries(db_path) == []
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute(
+            "SELECT synced, delivery_result, delivery_reason FROM fallback_events"
+        ).fetchone() == (1, "rejected", "invalid_local_payload")
 
 
 def test_save_and_update_metrics(tmp_path):
@@ -126,6 +103,7 @@ def test_handler_auth_success(tmp_path):
             json.dumps(
                 {
                     "type": "SPOT_UPDATE",
+                    "camera_id": "cam-01",
                     "spot_id": "A-01",
                     "status": "occupied",
                     "timestamp": "2026-06-05T12:00:00Z",
@@ -138,11 +116,27 @@ def test_handler_auth_success(tmp_path):
         sync_event = asyncio.Event()
         await handler(mock_ws, db_path, metrics_path, "secret_key", sync_event)
 
-        events = get_unsynced_events(db_path)
+        events = pending_deliveries(db_path)
         assert len(events) == 1
-        payload = json.loads(events[0][1])
-        assert "gateway_received_at" in payload
+        payload = json.loads(events[0][2])
+        received = payload["gateway_received_at"]
+        assert received.endswith("Z")
+        assert datetime.fromisoformat(received).utcoffset() == timedelta(0)
         assert sync_event.is_set()
+        with sqlite3.connect(metrics_path) as conn:
+            assert conn.execute(
+                "SELECT edge_id, spot_id, status, detection_ts, edge_sent_ts,"
+                " gateway_received_ts FROM metrics"
+            ).fetchall() == [
+                (
+                    "cam-01",
+                    "A-01",
+                    "occupied",
+                    "2026-06-05T12:00:00Z",
+                    "2026-06-05T12:00:01Z",
+                    received,
+                )
+            ]
 
     asyncio.run(run())
 
@@ -161,7 +155,7 @@ def test_handler_auth_fail(tmp_path):
         await handler(mock_ws, db_path, metrics_path, "secret_key", sync_event)
 
         mock_ws.close.assert_called_once()
-        assert len(get_unsynced_events(db_path)) == 0
+        assert len(pending_deliveries(db_path)) == 0
 
     asyncio.run(run())
 
@@ -175,11 +169,17 @@ def test_malformed_frame_does_not_discard_valid_batch(tmp_path):
         mock_ws = AsyncMock()
         mock_ws.request.headers = {"Authorization": "Bearer secret_key"}
         valid = json.dumps({"type": "SPOT_UPDATE", "spot_id": "A-01", "status": "free"})
-        mock_ws.recv.side_effect = [valid, "{invalid", valid, Exception("Closed")]
+        mock_ws.recv.side_effect = [
+            valid,
+            "{invalid",
+            "[1]",
+            valid,
+            Exception("Closed"),
+        ]
 
         await handler(mock_ws, db_path, metrics_path, "secret_key", asyncio.Event())
 
-        assert len(get_unsynced_events(db_path)) == 2
+        assert len(pending_deliveries(db_path)) == 2
 
     asyncio.run(run())
 
@@ -246,7 +246,10 @@ def test_sync_loop_sends_to_cloud(tmp_path):
                     sync_event,
                 )
             )
-            await asyncio.sleep(0.05)
+            for _ in range(1000):
+                if not pending_deliveries(db_path):
+                    break
+                await asyncio.sleep(0.01)
             task.cancel()
             try:
                 await task
@@ -260,7 +263,7 @@ def test_sync_loop_sends_to_cloud(tmp_path):
             assert sent_payload["payload"] == payload
             assert "gateway_forwarded_at" in sent_payload
 
-            assert len(get_unsynced_events(db_path)) == 0
+            assert len(pending_deliveries(db_path)) == 0
 
             conn = sqlite3.connect(metrics_path)
             cursor = conn.cursor()
@@ -326,39 +329,7 @@ def test_send_without_cloud_ack_preserves_pending_event(tmp_path):
                 except asyncio.CancelledError:
                     pass
 
-        assert len(get_unsynced_events(db_path)) == 1
-
-    asyncio.run(run())
-
-
-@pytest.mark.parametrize("window", ["1", "8"])
-def test_main_startup(monkeypatch, window):
-    monkeypatch.setenv("EDGE_MAX_IN_FLIGHT", window)
-    monkeypatch.setenv("EDGE_API_KEY", "secret_key")
-
-    async def run():
-        with (
-            patch("websockets.serve") as mock_serve,
-            patch("gateway.init_db") as mock_init_db,
-            patch("gateway.init_metrics_db") as mock_init_metrics,
-            patch("gateway.sync_loop", new_callable=AsyncMock) as mock_sync_loop,
-        ):
-            mock_serve.return_value.__aenter__ = AsyncMock()
-            mock_serve.return_value.__aexit__ = AsyncMock()
-
-            task = asyncio.create_task(main())
-            await asyncio.sleep(0.01)
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-
-            assert mock_init_db.called
-            assert mock_init_metrics.called
-            assert mock_serve.called
-            assert mock_sync_loop.called
-            assert mock_sync_loop.call_args.kwargs["max_in_flight"] == int(window)
+        assert len(pending_deliveries(db_path)) == 1
 
     asyncio.run(run())
 
@@ -389,7 +360,7 @@ def test_continuous_input_commits_without_waiting_for_idle(tmp_path):
         )
         try:
             await asyncio.wait_for(paused.wait(), 2)
-            assert len(get_unsynced_events(db_path)) == 64
+            assert len(pending_deliveries(db_path)) == 64
             assert sync_event.is_set()
         finally:
             task.cancel()
@@ -416,7 +387,7 @@ def test_large_frames_flush_before_next_receive(tmp_path):
             if reads == 1:
                 return frame
             if reads == 2:
-                persisted_before_second_receive = len(get_unsynced_events(db_path)) == 1
+                persisted_before_second_receive = len(pending_deliveries(db_path)) == 1
             raise RuntimeError("closed")
 
         ws.recv.side_effect = recv
@@ -447,7 +418,7 @@ def test_continuous_slow_input_has_a_batch_deadline(tmp_path):
         )
         try:
             await asyncio.wait_for(sync_event.wait(), 0.20)
-            assert get_unsynced_events(db_path)
+            assert pending_deliveries(db_path)
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
@@ -486,9 +457,9 @@ def test_local_delivery_replay_has_one_persisted_event_and_ack_after_commit(tmp_
                 message = json.loads(text)
                 if message["type"] == "LOCAL_ACK":
                     # A separate connection must already see the event.
-                    rows = get_unsynced_events(db_path)
+                    rows = pending_deliveries(db_path)
                     assert len(rows) == 1
-                    assert json.loads(rows[0][1])["spot_id"] == "A-01"
+                    assert json.loads(rows[0][2])["spot_id"] == "A-01"
                     acks.append(message)
 
             ws.send.side_effect = send
@@ -535,6 +506,110 @@ def test_local_uuid_conflict_cannot_replace_persisted_payload(tmp_path):
             await handler(ws, db, metrics, "key", asyncio.Event())
             ack = json.loads(ws.send.call_args.args[0])
             assert ack["outcome"] == ("persisted" if status == "free" else "rejected")
-        assert json.loads(get_unsynced_events(db)[0][1])["status"] == "free"
+        assert json.loads(pending_deliveries(db)[0][2])["status"] == "free"
+
+    asyncio.run(run())
+
+
+def local_socket(frames, local=True):
+    ws = AsyncMock()
+    ws.request.headers = {"Authorization": "Bearer key"}
+    if local:
+        ws.request.headers["X-Estaciona-Local-Delivery"] = "1"
+    ws.recv.side_effect = [*frames, OSError("closed")]
+    return ws
+
+
+def local_event(event_id, payload, version=1):
+    return {
+        "type": "LOCAL_EVENT",
+        "version": version,
+        "event_id": event_id,
+        "payload": payload,
+    }
+
+
+SPOT = {"type": "SPOT_UPDATE", "spot_id": "A-01", "status": "free"}
+EVENT_ID = "6f1c2a9e-3b7d-4e8a-9c41-2d5f8b0a7e13"
+
+
+@pytest.mark.parametrize(
+    "frame,local,reason",
+    [
+        (
+            local_event(EVENT_ID, SPOT, version=2),
+            True,
+            "Invalid local delivery envelope",
+        ),
+        (
+            local_event(EVENT_ID, SPOT, version="1"),
+            True,
+            "Invalid local delivery envelope",
+        ),
+        (
+            local_event(EVENT_ID, SPOT, version=True),
+            True,
+            "Invalid local delivery envelope",
+        ),
+        (local_event(EVENT_ID, [SPOT]), True, "Invalid local delivery envelope"),
+        (local_event(EVENT_ID, SPOT), False, "Invalid local delivery envelope"),
+        (local_event("not-a-uuid", SPOT), True, "Invalid event UUID"),
+        (local_event(None, SPOT), True, "Invalid event UUID"),
+        (SPOT, True, "Local delivery envelope required"),
+    ],
+)
+def test_invalid_local_delivery_closes_with_policy_violation(
+    tmp_path, frame, local, reason
+):
+    async def run():
+        db, metrics = str(tmp_path / "fallback.db"), str(tmp_path / "metrics.db")
+        init_db(db)
+        init_metrics_db(metrics)
+        ws = local_socket([json.dumps(frame)], local=local)
+
+        await handler(ws, db, metrics, "key", asyncio.Event())
+
+        ws.close.assert_awaited_once_with(1008, reason)
+        assert pending_deliveries(db) == []
+        assert not any(
+            json.loads(call.args[0])["type"] == "LOCAL_ACK"
+            for call in ws.send.await_args_list
+        )
+
+    asyncio.run(run())
+
+
+def test_local_replay_with_reordered_keys_is_a_duplicate(tmp_path):
+    async def run():
+        db, metrics = str(tmp_path / "fallback.db"), str(tmp_path / "metrics.db")
+        init_db(db)
+        init_metrics_db(metrics)
+        outcomes = []
+        for payload in (SPOT, dict(reversed(SPOT.items()))):
+            ws = local_socket([json.dumps(local_event(EVENT_ID, payload))])
+            await handler(ws, db, metrics, "key", asyncio.Event())
+            outcomes.append(json.loads(ws.send.await_args.args[0])["outcome"])
+        assert outcomes == ["persisted", "duplicate"]
+        assert len(pending_deliveries(db)) == 1
+
+    asyncio.run(run())
+
+
+def test_full_storage_refuses_the_batch_without_acknowledging_it(tmp_path):
+    async def run():
+        db, metrics = str(tmp_path / "fallback.db"), str(tmp_path / "metrics.db")
+        init_db(db)
+        init_metrics_db(metrics)
+        ws = local_socket([json.dumps(local_event(EVENT_ID, SPOT))])
+        sync_event = asyncio.Event()
+
+        await handler(ws, db, metrics, "key", sync_event, Retention(max_db_bytes=1))
+
+        ws.close.assert_awaited_once_with(1013, "Gateway storage full")
+        assert pending_deliveries(db) == []
+        assert [
+            json.loads(call.args[0])["type"] for call in ws.send.await_args_list
+        ] == ["LOCAL_READY"]
+        assert not sync_event.is_set()
 
     asyncio.run(run())

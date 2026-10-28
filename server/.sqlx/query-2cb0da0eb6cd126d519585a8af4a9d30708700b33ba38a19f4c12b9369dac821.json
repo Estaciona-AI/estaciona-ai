@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT date_of_birth_enc, pcd_status_enc FROM users WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "date_of_birth_enc",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "date_of_birth_enc"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "pcd_status_enc",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "pcd_status_enc"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "2cb0da0eb6cd126d519585a8af4a9d30708700b33ba38a19f4c12b9369dac821"
+}

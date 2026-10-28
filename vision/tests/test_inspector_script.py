@@ -65,7 +65,8 @@ context.data = data;
         input=harness,
         text=True,
         capture_output=True,
-        timeout=5,
+        # Starting node is a wait, not what is tested.
+        timeout=30,
     )
     assert result.returncode == 0, result.stdout + result.stderr
 
@@ -118,6 +119,7 @@ ctx.data={input_id:'camera-a',status:'active',age_ms:1,frame:{epoch:1,sequence:9
         input=harness,
         text=True,
         capture_output=True,
-        timeout=5,
+        # Starting node is a wait, not what is tested.
+        timeout=30,
     )
     assert result.returncode == 0, result.stdout + result.stderr

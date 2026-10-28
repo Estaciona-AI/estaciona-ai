@@ -4,6 +4,7 @@
 """Validated local profiles. Installation coordinates are not authorization."""
 
 from dataclasses import dataclass
+import ipaddress
 import json
 import math
 import os
@@ -90,6 +91,13 @@ def _uuid(value):
     raise ConfigurationError("invalid installation identity")
 
 
+def is_loopback(host):
+    try:
+        return host == "localhost" or ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 @dataclass(frozen=True)
 class Source:
     kind: str
@@ -123,6 +131,7 @@ class DetectorProfile:
     provider: str = "default"
     precision: str = "fp32"
     engine_cache: Path | None = None
+    sha256: str | None = None
 
 
 def parse_detector_profile(value, base):
@@ -139,6 +148,7 @@ def parse_detector_profile(value, base):
             "provider",
             "precision",
             "engine_cache",
+            "sha256",
         ),
     )
     if value["adapter"] != "rtdetr" or value["device"] not in ("cpu", "cuda"):
@@ -169,6 +179,12 @@ def parse_detector_profile(value, base):
         engine_cache = _path(base, value["engine_cache"], file=False)
         if not engine_cache.is_dir():
             raise ConfigurationError("TensorRT engine cache directory is missing")
+    sha256 = value.get("sha256")
+    # Only for a deliberate swap: otherwise the export's provenance applies.
+    if sha256 is not None and (
+        type(sha256) is not str or not re.fullmatch("[0-9a-f]{64}", sha256)
+    ):
+        raise ConfigurationError("detector sha256 must be 64 lowercase hex digits")
     return DetectorProfile(
         model,
         value["device"],
@@ -180,6 +196,7 @@ def parse_detector_profile(value, base):
         provider,
         precision,
         engine_cache,
+        sha256,
     )
 
 
@@ -297,6 +314,8 @@ def load_configuration(path) -> RuntimeConfiguration:
             and not url.fragment
             and url.port != 0
         )
+        # Without TLS the gateway credential may only travel inside this host.
+        valid_url = valid_url and (url.scheme == "wss" or is_loopback(url.hostname))
     except ValueError, TypeError, AttributeError:
         valid_url = False
     if not valid_url:

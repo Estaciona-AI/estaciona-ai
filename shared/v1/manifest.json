@@ -47,10 +47,6 @@
         "id": "urn:estaciona-ai:rest:create-reservation:v1",
         "path": "v1/rest-create-reservation.schema.json"
       },
-      "create-user": {
-        "id": "urn:estaciona-ai:rest:create-user:v1",
-        "path": "v1/rest-create-user.schema.json"
-      },
       "issue-ws-ticket": {
         "id": "urn:estaciona-ai:rest:issue-ws-ticket:v1",
         "path": "v1/rest-issue-ws-ticket.schema.json"
@@ -59,17 +55,21 @@
         "id": "urn:estaciona-ai:rest:issued-ws-ticket:v1",
         "path": "v1/rest-issued-ws-ticket.schema.json"
       },
-      "login-request": {
-        "id": "urn:estaciona-ai:rest:login-request:v1",
-        "path": "v1/rest-login-request.schema.json"
+      "logout-response": {
+        "id": "urn:estaciona-ai:rest:logout-response:v1",
+        "path": "v1/rest-logout-response.schema.json"
       },
-      "login-response": {
-        "id": "urn:estaciona-ai:rest:login-response:v1",
-        "path": "v1/rest-login-response.schema.json"
+      "personal-data-export": {
+        "id": "urn:estaciona-ai:rest:personal-data-export:v1",
+        "path": "v1/rest-personal-data-export.schema.json"
       },
       "reservation-response": {
         "id": "urn:estaciona-ai:rest:reservation-response:v1",
         "path": "v1/rest-reservation-response.schema.json"
+      },
+      "update-eligibility": {
+        "id": "urn:estaciona-ai:rest:update-eligibility:v1",
+        "path": "v1/rest-update-eligibility.schema.json"
       },
       "update-spot-status": {
         "id": "urn:estaciona-ai:rest:update-spot-status:v1",
@@ -81,6 +81,6 @@
       }
     }
   },
-  "version": "1.3.0",
+  "version": "2.0.0",
   "wire_version": 1
 }

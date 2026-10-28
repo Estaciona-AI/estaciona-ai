@@ -5,7 +5,7 @@
 
 import asyncio
 from contextlib import closing, suppress
-from datetime import datetime
+from datetime import datetime, timedelta
 import hashlib
 import json
 import os
@@ -20,7 +20,7 @@ import pytest
 from sqlalchemy import create_engine
 
 import gateway
-from ml import worker
+from ml import history, worker
 from test_delivery_integration import server as delivery_server, until
 from test_forecast_model import small_training
 from test_forecast_worker import trainings
@@ -144,10 +144,12 @@ def test_worker_publishes_through_its_own_edge_credential(
                 str(tmp_path / "forecast_metrics.db"),
                 server.url,
                 FORECAST_KEY,
+                str(tmp_path / "forecast_ledger.db"),
             )
         )
         try:
-            await until(lambda: [row[0] for row in delivered()] == ["applied"])
+            # Includes training the first model, which a loaded machine slows.
+            await until(lambda: [row[0] for row in delivered()] == ["applied"], 120)
         finally:
             task.cancel()
             with suppress(asyncio.CancelledError):
@@ -158,6 +160,11 @@ def test_worker_publishes_through_its_own_edge_credential(
     (stored,) = server.query("SELECT payload FROM edge_forecast_state WHERE singleton")
     assert stored[0]["type"] == "TREND_PREDICTION_V2"
     assert stored[0]["max_capacity"] == published["max_capacity"] == 1
+    # The first forecast has nothing issued a day earlier to be scored by,
+    # and the server accepts saying so.
+    assert stored[0]["evaluation"]["reason"] == "no_prior_forecast"
+    with closing(sqlite3.connect(tmp_path / "forecast_ledger.db")) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM forecasts").fetchone() == (1,)
 
     def hours(forecast):
         # The server re-serializes UTC instants with a Z suffix.
@@ -168,3 +175,40 @@ def test_worker_publishes_through_its_own_edge_credential(
 
     assert hours(stored[0]) == hours(published)
     assert len(trainings) == 1
+
+
+def test_history_uses_the_map_revision_in_force_on_postgres(server, reader):
+    """The reader sees revisions (JSONB manifests) and judges each hour by its map."""
+    hours = server.query(
+        "SELECT h FROM generate_series(date_trunc('hour', now()) - interval '6 hours', "
+        "date_trunc('hour', now()) - interval '1 hour', interval '1 hour') AS h"
+    )
+    hours = [hour for (hour,) in hours]
+    expanded = hours[3]
+    extra = [f"S-{index}" for index in range(9)]
+    for spot in extra:
+        server.query(
+            "INSERT INTO spots (id, parking_lot, status, x, y, z, is_active) "
+            "VALUES (%s, 'Main', 'free', 0, 0, 0, TRUE)",
+            (spot,),
+        )
+    manifest = {
+        "parkings": [],
+        "spots": [{"id": spot} for spot in ["R02-A", *extra]],
+    }
+    server.query(
+        "INSERT INTO site_map_revisions (fingerprint, manifest, applied_at) "
+        "VALUES (%s, %s::jsonb, %s)",
+        ("e" * 64, json.dumps(manifest), expanded),
+    )
+    server.query(
+        "INSERT INTO physical_occupancy_hourly (spot_id, hour_start, status, observed_at) "
+        "SELECT 'R02-A', h, 'occupied', h FROM unnest(%s::timestamptz[]) AS h",
+        (hours,),
+    )
+    frame = history.physical_history(
+        reader, start=hours[0], end=hours[-1] + timedelta(hours=1)
+    )
+    assert frame["expected_spots"].tolist() == [1, 1, 1, 10, 10, 10]
+    assert frame["rate"].tolist()[:3] == [1.0, 1.0, 1.0]
+    assert frame["rate"].iloc[3:].isna().all()

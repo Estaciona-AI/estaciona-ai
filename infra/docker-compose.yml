@@ -1,14 +1,47 @@
+# Settings live in three places, so no container receives another's secrets:
+#   ../.env                compose variables: SITE_DATA_DIR, SECRETS_DIR, API_DOMAIN
+#   ./env/postgres.env     database container only (owner account)
+#   ./env/server.env       server settings that are not secrets
+# Secrets are files in SECRETS_DIR, mounted only where they are used:
+#   database_url            runtime role from infra/app-role.sql
+#   migration_database_url  estaciona_owner (infra/db-init), used only by migrate
+#   jwt_secret              at least 32 random bytes
+#   plate_pepper            at least 32 random bytes
+#   personal_data_keys      see .env.example; back it up apart from the database
+#   oidc_client_secret      written by tools/identity/provision.py --secret-out
+# The server image runs as UID 10001 and refuses secret files others can read
+# or another user owns:
+#   chown 10001 "$SECRETS_DIR"/* && chmod 600 "$SECRETS_DIR"/*
+# One stack per installation. Defaults keep the original names; a second
+# installation on the same host sets its own compose project and
+# ESTACIONA_INSTANCE (containers and database volume), and its own
+# DB_HOST_PORT, SERVER_HOST_PORT, HTTP_PORT and HTTPS_PORT, e.g.
+#   docker compose -p gavea --env-file ../gavea.env up -d
+x-server: &server
+  build:
+    context: ..
+    dockerfile: infra/Dockerfile.server
+  image: estaciona-ai-server:local
+  user: "10001:10001"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  networks:
+    - estaciona_ai
+
 services:
   db:
-    image: postgres:15-alpine
-    container_name: estaciona_db
+    image: postgres:15-alpine@sha256:a8e042598834300dfaa17a54f695b87b7f25d3490433bbbe2ef3bffbb9747f24
+    container_name: ${ESTACIONA_INSTANCE:-estaciona}_db
     restart: always
     env_file:
-      - ../.env
+      - ./env/postgres.env
     ports:
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:${DB_HOST_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      # Creates the non-superuser owner when the volume is new.
+      - ./db-init:/docker-entrypoint-initdb.d:ro
     networks:
       - estaciona_ai
     healthcheck:
@@ -17,19 +50,56 @@ services:
       timeout: 5s
       retries: 5
 
+  # Applies the migrations of this release with the owner role, then exits.
+  migrate:
+    <<: *server
+    container_name: ${ESTACIONA_INSTANCE:-estaciona}_migrate
+    command: ["./server", "--migrate"]
+    restart: "no"
+    environment:
+      SITE_DATA_DIR: /deployment
+      DATABASE_URL_FILE: /run/secrets/migration_database_url
+      # The db service is reached only over this compose network.
+      DATABASE_NETWORK: private
+    secrets:
+      - migration_database_url
+    volumes:
+      - type: bind
+        source: ${SITE_DATA_DIR:?Set SITE_DATA_DIR to an absolute installation maps directory}
+        target: /deployment
+        read_only: true
+        bind:
+          create_host_path: false
+    depends_on:
+      db:
+        condition: service_healthy
+
   server:
-    build:
-      context: ..
-      dockerfile: infra/Dockerfile.server
-    container_name: estaciona_server
+    <<: *server
+    container_name: ${ESTACIONA_INSTANCE:-estaciona}_server
     restart: always
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:${SERVER_HOST_PORT:-8000}:8000"
     env_file:
-      - ../.env
+      - ./env/server.env
     environment:
       RUST_LOG: info
       SITE_DATA_DIR: /deployment
+      DATABASE_URL_FILE: /run/secrets/database_url
+      # The db service is reached only over this compose network.
+      DATABASE_NETWORK: private
+      JWT_SECRET_FILE: /run/secrets/jwt_secret
+      PLATE_SECRET_PEPPER_FILE: /run/secrets/plate_pepper
+      PERSONAL_DATA_KEYS_FILE: /run/secrets/personal_data_keys
+      OIDC_CLIENT_SECRET_FILE: /run/secrets/oidc_client_secret
+    secrets:
+      - database_url
+      - jwt_secret
+      - plate_pepper
+      - personal_data_keys
+      - oidc_client_secret
+    tmpfs:
+      - /tmp
     volumes:
       - type: bind
         source: ${SITE_DATA_DIR:?Set SITE_DATA_DIR to an absolute installation maps directory}
@@ -37,20 +107,18 @@ services:
         bind:
           create_host_path: false
     depends_on:
-      db:
-        condition: service_healthy
-    networks:
-      - estaciona_ai
+      migrate:
+        condition: service_completed_successfully
 
   caddy:
-    image: caddy:2-alpine
+    image: caddy:2-alpine@sha256:eb4d35b7452d1ab6171fbdbe8d9275b2301dad6dad92115d91e19fb9b24d510f
     environment:
       API_DOMAIN: ${API_DOMAIN:?Set API_DOMAIN to the public API hostname}
-    container_name: estaciona_caddy
+    container_name: ${ESTACIONA_INSTANCE:-estaciona}_caddy
     restart: always
     ports:
-      - "80:80"
-      - "443:443"
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile
       - caddy_data:/data
@@ -60,9 +128,23 @@ services:
     depends_on:
       - server
 
+secrets:
+  database_url:
+    file: ${SECRETS_DIR:?Set SECRETS_DIR to the absolute directory with the server secret files}/database_url
+  migration_database_url:
+    file: ${SECRETS_DIR:?Set SECRETS_DIR to the absolute directory with the server secret files}/migration_database_url
+  jwt_secret:
+    file: ${SECRETS_DIR:?Set SECRETS_DIR to the absolute directory with the server secret files}/jwt_secret
+  plate_pepper:
+    file: ${SECRETS_DIR:?Set SECRETS_DIR to the absolute directory with the server secret files}/plate_pepper
+  personal_data_keys:
+    file: ${SECRETS_DIR:?Set SECRETS_DIR to the absolute directory with the server secret files}/personal_data_keys
+  oidc_client_secret:
+    file: ${SECRETS_DIR:?Set SECRETS_DIR to the absolute directory with the server secret files}/oidc_client_secret
+
 volumes:
   postgres_data:
-    name: estaciona_postgres_data
+    name: ${ESTACIONA_INSTANCE:-estaciona}_postgres_data
   caddy_data:
   caddy_config:
 

@@ -5,6 +5,8 @@ import hashlib
 import json
 import os
 import logging
+import sqlite3
+from contextlib import closing
 import lightgbm as lgb
 import pandas as pd
 import numpy as np
@@ -25,6 +27,7 @@ if __package__:
         MODEL_FILE,
         baseline_rates,
         calendar_for,
+        deployment_context,
         get_db_engine,
         has_recent_history,
         predict_rates,
@@ -41,6 +44,7 @@ else:
         MODEL_FILE,
         baseline_rates,
         calendar_for,
+        deployment_context,
         get_db_engine,
         has_recent_history,
         predict_rates,
@@ -78,10 +82,56 @@ def evaluate_forecast(actual, predicted, inference_time_ms):
         return {**unavailable, "reason": "evaluation_failed"}
 
 
-def load_occupancy_model(models_dir):
-    """Load the LightGBM artifact only if it matches its manifest."""
+class StaleArtifact(ValueError):
+    """The artifact was trained for another installation, site profile or
+    capacity: retrain instead of serving it."""
+
+
+class ForecastLedger:
+    """Forecasts as issued, so they are scored only against later outcomes."""
+
+    def __init__(self, path):
+        self.path = str(path)
+        with closing(sqlite3.connect(self.path)) as conn, conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS forecasts "
+                "(origin TEXT PRIMARY KEY, issued_at TEXT NOT NULL, rates TEXT NOT NULL)"
+            )
+
+    def record(self, origin, rates, issued_at):
+        # The first forecast of an origin stands; a restart cannot revise it.
+        with closing(sqlite3.connect(self.path)) as conn, conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO forecasts VALUES (?, ?, ?)",
+                (
+                    origin.isoformat(),
+                    issued_at.isoformat(),
+                    json.dumps([float(rate) for rate in rates]),
+                ),
+            )
+            conn.execute(
+                "DELETE FROM forecasts WHERE origin < ?",
+                ((origin - timedelta(days=7)).isoformat(),),
+            )
+
+    def issued(self, origin):
+        with closing(sqlite3.connect(self.path)) as conn:
+            row = conn.execute(
+                "SELECT rates FROM forecasts WHERE origin = ?", (origin.isoformat(),)
+            ).fetchone()
+        return None if row is None else np.asarray(json.loads(row[0]), np.float64)
+
+
+def load_occupancy_model(models_dir, context=None):
+    """Load the LightGBM artifact only if it matches its manifest and, when
+    given, the deployment it is about to serve."""
     with open(os.path.join(models_dir, MANIFEST_FILE), encoding="utf-8") as handle:
         manifest = json.load(handle)
+    if context is not None and manifest.get("context") != context:
+        raise StaleArtifact(
+            "Forecast artifact was trained for another installation, "
+            "site profile or capacity"
+        )
     if manifest.get("manifest_version") != MANIFEST_VERSION:
         raise ValueError("Unsupported forecast manifest version")
     if manifest.get("features") != FEATURES:
@@ -96,10 +146,13 @@ def load_occupancy_model(models_dir):
 
 
 class PredictiveEngine:
-    def __init__(self, models_dir=None, engine=None):
+    def __init__(self, models_dir=None, engine=None, ledger=None):
         models_dir = models_dir or os.path.join(os.path.dirname(__file__), "models")
-        self.manifest, self.model = load_occupancy_model(models_dir)
         self.engine = engine or get_db_engine()
+        self.ledger = ledger
+        self.manifest, self.model = load_occupancy_model(
+            models_dir, deployment_context(self.engine, self.get_capacity())
+        )
 
     def get_capacity(self):
         with self.engine.connect() as connection:
@@ -124,8 +177,11 @@ class PredictiveEngine:
         capacity = self.get_capacity()
         if capacity <= 0:
             raise ValueError("Forecast requires registered active spots")
+        if deployment_context(self.engine, capacity) != self.manifest.get("context"):
+            raise StaleArtifact("The deployment changed since the artifact was trained")
 
-        # Lags for a backtest origin 24 h ago, then the forecast origin itself.
+        # The last 24 h (scored against the forecast issued then) and the
+        # lags of the forecast origin.
         start = origin - timedelta(hours=LOOKBACK + HORIZON)
         index = pd.date_range(start, periods=LOOKBACK + 2 * HORIZON, freq="h", tz="UTC")
         frame = physical_history(self.engine, start, origin)
@@ -147,18 +203,38 @@ class PredictiveEngine:
         if np.shape(predicted) != (HORIZON,) or not np.isfinite(predicted).all():
             raise ValueError("Forecast inference returned invalid values")
         counts = np.rint(predicted.clip(0, 1) * capacity).astype(int).tolist()
+        evaluation = self._prospective_evaluation(
+            rate[backtest_origin:forecast_origin], origin, capacity, inference_time_ms
+        )
+        if self.ledger is not None:
+            self.ledger.record(origin, predicted, now)
+        return self._payload(now, origin, counts, evaluation, capacity)
 
-        actual = rate[backtest_origin:forecast_origin] * capacity
-        if has_recent_history(rate, backtest_origin) and np.isfinite(actual).all():
-            backtest = self._rates(rate, calendar, backtest_origin) * capacity
-            evaluation = evaluate_forecast(actual, backtest, inference_time_ms)
-        else:
-            evaluation = {
+    def _prospective_evaluation(self, observed, origin, capacity, inference_time_ms):
+        """Score the forecast issued 24 h ago against what happened since.
+
+        Reconstructing it with the current artifact would score hours that
+        artifact was trained on; only a forecast recorded when it was issued
+        is out of sample.
+        """
+        issued = None
+        if self.ledger is not None:
+            issued = self.ledger.issued(origin - timedelta(hours=HORIZON))
+        if issued is None:
+            return {
+                "status": "unavailable",
+                "reason": "no_prior_forecast",
+                "inference_time_ms": inference_time_ms,
+            }
+        if not np.isfinite(observed).all():
+            return {
                 "status": "unavailable",
                 "reason": "invalid_evaluation_window",
                 "inference_time_ms": inference_time_ms,
             }
-        return self._payload(now, origin, counts, evaluation, capacity)
+        return evaluate_forecast(
+            observed * capacity, issued.clip(0, 1) * capacity, inference_time_ms
+        )
 
     def _payload(self, now, origin, counts, evaluation, capacity):
         return {

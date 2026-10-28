@@ -120,6 +120,22 @@ mod tests {
             ReservationPolicy::load(&root).unwrap().max_active_per_user,
             3
         );
+        let policy = r#"{"max_active_per_user":2}"#;
+        let mut padded = policy.to_owned();
+        padded.push_str(&" ".repeat(16 * 1024 - policy.len()));
+        std::fs::write(&file, &padded).unwrap();
+        assert_eq!(
+            ReservationPolicy::load(&root).unwrap().max_active_per_user,
+            2
+        );
+        padded.push(' ');
+        std::fs::write(&file, &padded).unwrap();
+        assert!(
+            ReservationPolicy::load(&root)
+                .unwrap_err()
+                .to_string()
+                .contains("exceeds 16 KiB")
+        );
         std::fs::write(&file, r#"{"max_active_per_usr":3}"#).unwrap();
         assert!(ReservationPolicy::load(&root).is_err());
         std::fs::write(&file, r#"{"hold_seconds":-1}"#).unwrap();

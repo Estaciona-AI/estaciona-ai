@@ -34,6 +34,7 @@ class BenchmarkProfile:
     provider: str = DetectorProfile.provider
     precision: str = DetectorProfile.precision
     engine_cache: Path | None = DetectorProfile.engine_cache
+    sha256: str | None = DetectorProfile.sha256
 
 
 def load_profiles(path):

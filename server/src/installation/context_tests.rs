@@ -19,6 +19,7 @@ async fn verified_identity_reaches_runtime_and_uses_its_database(pool: PgPool) {
     let site = crate::site_config::SiteConfig {
         directory: std::env::temp_dir(),
         parkings: vec![crate::site_config::ParkingLotConfig {
+            name: "Test lot".into(),
             path: vec![
                 crate::site_config::PathNode { x: 0.0, z: 0.0 },
                 crate::site_config::PathNode { x: 1.0, z: 0.0 },
@@ -31,12 +32,16 @@ async fn verified_identity_reaches_runtime_and_uses_its_database(pool: PgPool) {
                 y: 0.0,
                 z: 1.0,
             },
+            reserved_for: None,
+            parking: None,
         }],
     };
     let state = crate::state::init_state(
         verified,
         "test-jwt".into(),
         "test-pepper".into(),
+        crate::personal_data::Keyring::for_unit_test(),
+        crate::identity::IdentityProvider::for_unit_test(),
         crate::installation::test_support::package(site),
         Default::default(),
     )
@@ -159,6 +164,8 @@ impl SiteFixture {
             verified,
             "synthetic-jwt".into(),
             "synthetic-pepper".into(),
+            crate::personal_data::Keyring::for_unit_test(),
+            crate::identity::IdentityProvider::for_unit_test(),
             super::InstallationPackage::load(&self.directory).unwrap(),
             Default::default(),
         )
@@ -354,13 +361,11 @@ async fn reservation_handler_selects_its_context_database_with_repeated_local_id
     let user = uuid::Uuid::from_u128(42);
     let gateway = uuid::Uuid::from_u128(43);
     for state in [&a, &b] {
-        sqlx::query(
-            "INSERT INTO users(id,email,password_hash) VALUES ($1,'same@example.invalid','unused')",
-        )
-        .bind(user)
-        .execute(state.installation.pool())
-        .await
-        .unwrap();
+        sqlx::query("INSERT INTO users (id,username) VALUES ($1,'unused')")
+            .bind(user)
+            .execute(state.installation.pool())
+            .await
+            .unwrap();
         sqlx::query(
             "INSERT INTO edge_gateways(id,name,credential_digest) VALUES ($1,'same-gateway',$2)",
         )
@@ -373,6 +378,12 @@ async fn reservation_handler_selects_its_context_database_with_repeated_local_id
             .bind(gateway).execute(state.installation.pool()).await.unwrap();
         sqlx::query("INSERT INTO edge_camera_spots(gateway_id,camera_id,spot_id) VALUES ($1,'same-camera','shared-spot')")
             .bind(gateway).execute(state.installation.pool()).await.unwrap();
+    }
+    for state in [&a, &b] {
+        sqlx::query("UPDATE spots SET observation_timestamp = NOW() - INTERVAL '30 seconds'")
+            .execute(state.installation.pool())
+            .await
+            .unwrap();
     }
     for (index, state) in [&a, &b].into_iter().enumerate() {
         let token =

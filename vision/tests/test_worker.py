@@ -243,6 +243,7 @@ def test_worker_replays_same_event_after_ack_loss(tmp_path, monkeypatch, lose_ac
         "provider": "default",
         "precision": "fp32",
         "engine_cache": None,
+        "expected_sha256": None,
     }
     assert model.detect.call_args.kwargs["confidence"] == 0.3
     assert capture.closed

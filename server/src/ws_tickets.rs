@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Guilherme Pedroza
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::ws_admission::{CLIENT_MESSAGE_BYTES, Kind};
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, Extension, Query, State},
@@ -68,15 +69,6 @@ pub(crate) struct IssuedTicket {
     expires_at: DateTime<Utc>,
 }
 
-fn bearer(headers: &HeaderMap) -> Result<&str, ApiError> {
-    headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .filter(|value| !value.is_empty())
-        .ok_or((StatusCode::UNAUTHORIZED, "Bearer token required"))
-}
-
 fn service_unavailable(error: impl std::fmt::Display) -> ApiError {
     tracing::error!(%error, "WebSocket ticket operation unavailable");
     (
@@ -109,7 +101,9 @@ async fn issue(
         };
         (status, "Invalid request")
     })?;
-    let raw_jwt = bearer(&headers)?;
+    // Browsers send the session cookie; the CSRF guard has checked its Origin.
+    let raw_jwt =
+        security::session_token(&headers).ok_or((StatusCode::UNAUTHORIZED, "Session required"))?;
     let claims = security::verify_jwt(raw_jwt, &state.jwt_secret)
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or expired session"))?;
     let session = AuthSession::from_claims(claims)
@@ -349,11 +343,27 @@ pub async fn app_handler(
     if let Err(error) = origin_policy.authorize(&headers) {
         return error.into_response();
     }
-    let session = match consume(state.installation.pool(), &query.ticket, Destination::App).await {
+    let slot = match state.ws_admission.connection(Kind::App) {
+        Ok(slot) => slot,
+        Err(busy) => return busy.into_response(),
+    };
+    let consumed = {
+        let _handshake = match state.ws_admission.handshake() {
+            Ok(permit) => permit,
+            Err(busy) => return busy.into_response(),
+        };
+        consume(state.installation.pool(), &query.ticket, Destination::App).await
+    };
+    let session = match consumed {
         Ok(session) => session,
         Err((status, message)) => return (status, message).into_response(),
     };
-    ws.on_upgrade(move |socket| crate::ws::handle_app_socket(socket, state, session))
+    ws.max_message_size(CLIENT_MESSAGE_BYTES)
+        .max_frame_size(CLIENT_MESSAGE_BYTES)
+        .on_upgrade(move |socket| async move {
+            let _slot = slot;
+            crate::ws::handle_app_socket(socket, state, session).await
+        })
         .into_response()
 }
 
@@ -367,17 +377,32 @@ pub async fn dashboard_handler(
     if let Err(error) = origin_policy.authorize(&headers) {
         return error.into_response();
     }
-    let session = match consume(
-        state.installation.pool(),
-        &query.ticket,
-        Destination::Dashboard,
-    )
-    .await
-    {
+    let slot = match state.ws_admission.connection(Kind::Dashboard) {
+        Ok(slot) => slot,
+        Err(busy) => return busy.into_response(),
+    };
+    let consumed = {
+        let _handshake = match state.ws_admission.handshake() {
+            Ok(permit) => permit,
+            Err(busy) => return busy.into_response(),
+        };
+        consume(
+            state.installation.pool(),
+            &query.ticket,
+            Destination::Dashboard,
+        )
+        .await
+    };
+    let session = match consumed {
         Ok(session) => session,
         Err((status, message)) => return (status, message).into_response(),
     };
-    ws.on_upgrade(move |socket| crate::ws::handle_dashboard_socket(socket, state, session))
+    ws.max_message_size(CLIENT_MESSAGE_BYTES)
+        .max_frame_size(CLIENT_MESSAGE_BYTES)
+        .on_upgrade(move |socket| async move {
+            let _slot = slot;
+            crate::ws::handle_dashboard_socket(socket, state, session).await
+        })
         .into_response()
 }
 
@@ -392,6 +417,9 @@ mod tests {
         assert!(ticket.bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert_eq!(ticket_digest(&ticket).unwrap(), digest);
         assert!(ticket_digest("not-a-ticket").is_none());
+        // Length and alphabet are each checked on their own.
+        assert!(ticket_digest(&"g".repeat(64)).is_none());
+        assert!(ticket_digest(&"a".repeat(63)).is_none());
     }
 
     #[test]
@@ -410,16 +438,16 @@ mod tests {
 
 #[cfg(test)]
 mod postgres_tests {
-    use super::cleanup_expired_batch;
+    use super::{CLEANUP_INTERVAL, cleanup_expired_batch, spawn_cleanup};
     use sqlx::PgPool;
+    use std::time::Duration;
     use uuid::Uuid;
 
     #[sqlx::test(migrations = "./migrations")]
     async fn cleanup_removes_expired_tickets_in_bounded_batches(pool: PgPool) {
         let user_id = Uuid::new_v4();
-        sqlx::query("INSERT INTO users (id,name,email,password_hash) VALUES ($1,'Ticket cleanup',$2,'unused')")
+        sqlx::query("INSERT INTO users (id) VALUES ($1)")
             .bind(user_id)
-            .bind(format!("{user_id}@example.invalid"))
             .execute(&pool)
             .await
             .unwrap();
@@ -448,6 +476,66 @@ mod postgres_tests {
             .unwrap();
         assert_eq!(remaining, (1, 1));
     }
+
+    async fn signed_in_session(pool: &PgPool) -> (Uuid, Uuid) {
+        let user_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO users (id) VALUES ($1)")
+            .bind(user_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        let jwt = crate::sessions::issue(pool, user_id, "user", "fixture")
+            .await
+            .unwrap();
+        let session_id = crate::security::verify_jwt(&jwt, "fixture").unwrap().jti;
+        (user_id, session_id)
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn background_cleanup_removes_expired_tickets_and_sessions(pool: PgPool) {
+        let (user_id, live_session) = signed_in_session(&pool).await;
+        sqlx::query("INSERT INTO ws_tickets (session_id,digest,user_id,role,destination,session_expires_at,expires_at) VALUES ($2,decode(lpad(to_hex(1),64,'0'),'hex'),$1,'user','app',0,NOW()-INTERVAL '1 second')")
+            .bind(user_id)
+            .bind(live_session)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (_, ended_session) = signed_in_session(&pool).await;
+        sqlx::query("UPDATE auth_sessions SET expires_at=NOW()-INTERVAL '1 second' WHERE id=$1")
+            .bind(ended_session)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        spawn_cleanup(pool.clone());
+        let deadline = tokio::time::Instant::now() + CLEANUP_INTERVAL * 3;
+        let session_exists = "SELECT EXISTS (SELECT 1 FROM auth_sessions WHERE id=$1)";
+        loop {
+            let tickets: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ws_tickets")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            let ended: bool = sqlx::query_scalar(session_exists)
+                .bind(ended_session)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            if tickets == 0 && !ended {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "periodic cleanup did not run: {tickets} tickets, ended session kept: {ended}"
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        let live: bool = sqlx::query_scalar(session_exists)
+            .bind(live_session)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(live, "a valid session must survive the cleanup");
+    }
 }
 
 #[cfg(test)]
@@ -474,9 +562,12 @@ mod origin_handshake_tests {
             crate::installation::test_support::provision(&pool).await,
             "r14-test-jwt".into(),
             "r14-test-pepper".into(),
+            crate::personal_data::Keyring::for_unit_test(),
+            crate::identity::IdentityProvider::for_unit_test(),
             crate::installation::test_support::package(SiteConfig {
                 directory: std::env::temp_dir(),
                 parkings: vec![ParkingLotConfig {
+                    name: "Test lot".into(),
                     path: vec![PathNode { x: 0.0, z: 0.0 }, PathNode { x: 1.0, z: 0.0 }],
                 }],
                 spots: Vec::new(),
@@ -505,15 +596,12 @@ mod origin_handshake_tests {
 
     async fn insert_ticket(pool: &PgPool, destination: &str, role: &str) -> String {
         let user_id = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO users (id,name,email,password_hash,role) VALUES ($1,'R14 test',$2,'unused',$3)",
-        )
-        .bind(user_id)
-        .bind(format!("{user_id}@example.invalid"))
-        .bind(role)
-        .execute(pool)
-        .await
-        .unwrap();
+        sqlx::query("INSERT INTO users (id, role) VALUES ($1, $2)")
+            .bind(user_id)
+            .bind(role)
+            .execute(pool)
+            .await
+            .unwrap();
 
         let jwt = crate::sessions::issue(pool, user_id, role, "fixture")
             .await

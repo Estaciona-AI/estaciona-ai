@@ -4,7 +4,8 @@
       "enum": [
         "invalid_evaluation_window",
         "non_finite_values",
-        "evaluation_failed"
+        "evaluation_failed",
+        "no_prior_forecast"
       ],
       "type": "string"
     },
@@ -322,7 +323,8 @@
           "enum": [
             "free",
             "occupied",
-            "reserved"
+            "reserved",
+            "unknown"
           ],
           "type": "string"
         },
@@ -399,5 +401,5 @@
     }
   ],
   "title": "ServerToAppMsg",
-  "x-contract-version": "1.3.0"
+  "x-contract-version": "2.0.0"
 }

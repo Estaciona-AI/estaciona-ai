@@ -1,14 +1,15 @@
 // SPDX-FileCopyrightText: 2026 Guilherme Pedroza
 // SPDX-License-Identifier: Apache-2.0
 
-//! Local access-session registry. Identity-provider integration remains separate.
+//! Local access-session registry. Sessions start after a sign-in at the identity
+//! provider and end at logout, expiry or the provider's back-channel logout.
 use axum::{
     extract::State,
     http::{HeaderMap, StatusCode, header},
     response::IntoResponse,
 };
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{PgExecutor, PgPool, Postgres, Transaction};
 use tokio::time::{Duration, timeout};
 use uuid::Uuid;
 
@@ -18,7 +19,15 @@ use crate::{
 };
 
 type ApiError = (StatusCode, &'static str);
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct LogoutResponse {
+    /// Visit to end the identity provider session as well.
+    end_session_url: Option<String>,
+}
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
+/// Personal parking history kept for recommendations, in days.
+pub(crate) const PERSONAL_HISTORY_DAYS: i32 = 180;
 
 fn unavailable(error: impl std::fmt::Display) -> ApiError {
     tracing::error!(%error, "Session storage unavailable");
@@ -35,11 +44,23 @@ pub(crate) fn expires_at(session: &AuthSession) -> Result<DateTime<Utc>, securit
         .ok_or((StatusCode::UNAUTHORIZED, "Invalid session expiry".into()))
 }
 
+#[cfg(test)]
 pub(crate) async fn issue(
     pool: &PgPool,
     user: Uuid,
     role: &str,
     secret: &str,
+) -> Result<String, sqlx::Error> {
+    issue_for_provider_session(pool, user, role, secret, None).await
+}
+
+/// The provider session (`sid`) lets back-channel logout find this session.
+pub(crate) async fn issue_for_provider_session(
+    executor: impl PgExecutor<'_>,
+    user: Uuid,
+    role: &str,
+    secret: &str,
+    provider_session: Option<&str>,
 ) -> Result<String, sqlx::Error> {
     let token = security::create_jwt(&user.to_string(), role, secret)
         .map_err(|_| sqlx::Error::Protocol("Session signing failed".into()))?;
@@ -47,17 +68,162 @@ pub(crate) async fn issue(
         .map_err(|_| sqlx::Error::Protocol("Session signing failed".into()))?;
     let session = AuthSession::from_claims(claims)
         .map_err(|_| sqlx::Error::Protocol("Session expiry invalid".into()))?;
-    sqlx::query("INSERT INTO auth_sessions (id,user_id,role,expires_at) VALUES ($1,$2,$3,$4)")
-        .bind(session.session_id)
-        .bind(user)
-        .bind(role)
-        .bind(
-            expires_at(&session)
-                .map_err(|_| sqlx::Error::Protocol("Session expiry invalid".into()))?,
-        )
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "INSERT INTO auth_sessions (id,user_id,role,expires_at,idp_session_id) VALUES ($1,$2,$3,$4,$5)",
+    )
+    .bind(session.session_id)
+    .bind(user)
+    .bind(role)
+    .bind(expires_at(&session).map_err(|_| sqlx::Error::Protocol("Session expiry invalid".into()))?)
+    .bind(provider_session)
+    .execute(executor)
+    .await?;
     Ok(token)
+}
+
+/// Ends the account's sessions issued with any other role, so restoring that
+/// role later cannot revive them. Runs in the caller's role-change transaction.
+pub(crate) async fn revoke_other_roles(
+    tx: &mut Transaction<'_, Postgres>,
+    user: Uuid,
+    role: &str,
+) -> Result<u64, sqlx::Error> {
+    let sessions: Vec<Uuid> = sqlx::query_scalar(
+        "UPDATE auth_sessions SET revoked_at=NOW() WHERE revoked_at IS NULL AND user_id=$1 AND role<>$2 RETURNING id",
+    )
+    .bind(user)
+    .bind(role)
+    .fetch_all(&mut **tx)
+    .await?;
+    delete_tickets(tx, &sessions).await?;
+    Ok(sessions.len() as u64)
+}
+
+async fn delete_tickets(
+    tx: &mut Transaction<'_, Postgres>,
+    sessions: &[Uuid],
+) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM ws_tickets WHERE session_id = ANY($1)")
+        .bind(sessions)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+async fn revocation(pool: &PgPool) -> Result<Transaction<'_, Postgres>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    sqlx::raw_sql("SET LOCAL lock_timeout='2s'; SET LOCAL statement_timeout='2s'")
+        .execute(&mut *tx)
+        .await?;
+    Ok(tx)
+}
+
+/// Their WebSocket tickets go in the same transaction; open sockets close at
+/// their next revalidation.
+async fn finish_revocation(
+    mut tx: Transaction<'_, Postgres>,
+    sessions: Vec<Uuid>,
+) -> Result<u64, sqlx::Error> {
+    delete_tickets(&mut tx, &sessions).await?;
+    tx.commit().await?;
+    Ok(sessions.len() as u64)
+}
+
+/// Marks outlive any session or ID token issued before the logout.
+const LOGOUT_MARK_LIFETIME: &str = "9 hours";
+
+/// A collision between two keys only serializes unrelated logins.
+fn logout_key(issuer: &str, kind: &str, value: &str) -> String {
+    format!("oidc-logout {} {issuer} {kind} {value}", issuer.len())
+}
+
+/// Back-channel logout and sign-in for the same provider session or account
+/// run one at a time: whichever commits second sees the other.
+pub(crate) async fn lock_logout_keys(
+    tx: &mut Transaction<'_, Postgres>,
+    issuer: &str,
+    keys: &[(&str, &str)],
+) -> Result<(), sqlx::Error> {
+    let mut keys: Vec<String> = keys
+        .iter()
+        .map(|(kind, value)| logout_key(issuer, kind, value))
+        .collect();
+    // One order everywhere, so two transactions never wait on each other.
+    keys.sort();
+    for key in keys {
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(key)
+            .execute(&mut **tx)
+            .await?;
+    }
+    Ok(())
+}
+
+/// Whether the provider ended this session or account at or after `issued_at`;
+/// the caller holds the logout keys.
+pub(crate) async fn logged_out_since(
+    tx: &mut Transaction<'_, Postgres>,
+    issuer: &str,
+    provider_session: Option<&str>,
+    subject: &str,
+    issued_at: DateTime<Utc>,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM oidc_logout_marks WHERE issuer=$1 AND logged_out_at>=$4 \
+         AND ((kind='sid' AND value=$2) OR (kind='sub' AND value=$3)))",
+    )
+    .bind(issuer)
+    .bind(provider_session)
+    .bind(subject)
+    .bind(issued_at)
+    .fetch_one(&mut **tx)
+    .await
+}
+
+/// Ends the sessions a back-channel logout names and records it, so a sign-in
+/// still completing with an older ID token cannot start a new one.
+pub(crate) async fn apply_logout(
+    pool: &PgPool,
+    issuer: &str,
+    logout: &crate::identity::Logout,
+) -> Result<u64, sqlx::Error> {
+    use crate::identity::LogoutTarget;
+    let (kind, value) = match &logout.target {
+        LogoutTarget::ProviderSession(sid) => ("sid", sid.as_str()),
+        LogoutTarget::Subject(subject) => ("sub", subject.as_str()),
+    };
+    let mut tx = revocation(pool).await?;
+    lock_logout_keys(&mut tx, issuer, &[(kind, value)]).await?;
+    sqlx::query(
+        "INSERT INTO oidc_logout_marks (issuer,kind,value,logged_out_at,expires_at) \
+         VALUES ($1,$2,$3,$4,$4+$5::interval) ON CONFLICT (issuer,kind,value) DO UPDATE \
+         SET logged_out_at=GREATEST(oidc_logout_marks.logged_out_at,EXCLUDED.logged_out_at), \
+         expires_at=GREATEST(oidc_logout_marks.expires_at,EXCLUDED.expires_at)",
+    )
+    .bind(issuer)
+    .bind(kind)
+    .bind(value)
+    .bind(logout.issued_at)
+    .bind(LOGOUT_MARK_LIFETIME)
+    .execute(&mut *tx)
+    .await?;
+    let sessions = match &logout.target {
+        LogoutTarget::ProviderSession(sid) => sqlx::query_scalar(
+            "UPDATE auth_sessions SET revoked_at=NOW() WHERE revoked_at IS NULL AND idp_session_id=$1 RETURNING id",
+        )
+        .bind(sid)
+        .fetch_all(&mut *tx)
+        .await?,
+        LogoutTarget::Subject(subject) => sqlx::query_scalar(
+            "UPDATE auth_sessions SET revoked_at=NOW() WHERE revoked_at IS NULL AND user_id IN \
+             (SELECT id FROM users WHERE oidc_issuer=$1 AND oidc_subject=$2) RETURNING id",
+        )
+        .bind(issuer)
+        .bind(subject)
+        .fetch_all(&mut *tx)
+        .await?,
+    };
+    finish_revocation(tx, sessions).await
 }
 
 /// Serializes ticket issuance with logout; callers hold this until ticket commit.
@@ -77,12 +243,8 @@ pub(crate) async fn logout(
     State(state): State<SharedState>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
-    let raw = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .filter(|value| !value.is_empty())
-        .ok_or((StatusCode::UNAUTHORIZED, "Bearer token required"))?;
+    let raw =
+        security::session_token(&headers).ok_or((StatusCode::UNAUTHORIZED, "Session required"))?;
     let claims = security::verify_jwt(raw, &state.jwt_secret)
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or expired session"))?;
     let session = AuthSession::from_claims(claims)
@@ -120,15 +282,15 @@ pub(crate) async fn logout(
             "Session operation timed out",
         )
     })??;
+    // The provider session continues until the browser visits this URL.
+    let end_session_url = state.identity.end_session_url().await;
     Ok((
-        StatusCode::NO_CONTENT,
+        StatusCode::OK,
         [
-            (
-                header::SET_COOKIE,
-                "estaciona_token=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0",
-            ),
+            (header::SET_COOKIE, security::clear_session_cookie()),
             (header::CACHE_CONTROL, "no-store"),
         ],
+        axum::Json(LogoutResponse { end_session_url }),
     ))
 }
 
@@ -137,7 +299,16 @@ pub(crate) async fn cleanup_expired(pool: &PgPool) -> Result<u64, sqlx::Error> {
     sqlx::query("SET LOCAL statement_timeout='2s'")
         .execute(&mut *tx)
         .await?;
-    let count = sqlx::query("DELETE FROM auth_sessions WHERE id IN (SELECT id FROM auth_sessions WHERE expires_at<=NOW() ORDER BY expires_at LIMIT 1000 FOR UPDATE SKIP LOCKED)")
+    let mut count = sqlx::query("DELETE FROM auth_sessions WHERE id IN (SELECT id FROM auth_sessions WHERE expires_at<=NOW() ORDER BY expires_at LIMIT 1000 FOR UPDATE SKIP LOCKED)")
+        .execute(&mut *tx).await?.rows_affected();
+    count += sqlx::query("DELETE FROM oidc_logout_marks WHERE (issuer,kind,value) IN (SELECT issuer,kind,value FROM oidc_logout_marks WHERE expires_at<=NOW() ORDER BY expires_at LIMIT 1000 FOR UPDATE SKIP LOCKED)")
+        .execute(&mut *tx).await?.rows_affected();
+    // Personal parking history expires by age, not only by count.
+    count += sqlx::query("DELETE FROM user_occupancy_history WHERE id IN (SELECT id FROM user_occupancy_history WHERE occupied_at < NOW() - make_interval(days => $1) ORDER BY occupied_at LIMIT 1000 FOR UPDATE SKIP LOCKED)")
+        .bind(PERSONAL_HISTORY_DAYS)
+        .execute(&mut *tx).await?.rows_affected();
+    // Abandoned sign-ins: the browser never came back from the provider.
+    count += sqlx::query("DELETE FROM oidc_login_attempts WHERE state_digest IN (SELECT state_digest FROM oidc_login_attempts WHERE expires_at<=NOW() ORDER BY expires_at LIMIT 1000 FOR UPDATE SKIP LOCKED)")
         .execute(&mut *tx).await?.rows_affected();
     tx.commit().await?;
     Ok(count)
@@ -152,16 +323,22 @@ mod tests {
     async fn fixture(pool: PgPool) -> (SharedState, Uuid) {
         let verified = crate::installation::test_support::provision(&pool).await;
         let user = Uuid::new_v4();
-        sqlx::query("INSERT INTO users (id,name,email,password_hash,role) VALUES ($1,'Sessions',$2,'unused','user')")
-            .bind(user).bind(format!("{user}@example.invalid")).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO users (id, role) VALUES ($1, 'user')")
+            .bind(user)
+            .execute(&pool)
+            .await
+            .unwrap();
         let state = crate::state::init_state(
             verified,
             "session-test-secret".into(),
             "test-pepper".into(),
+            crate::personal_data::Keyring::for_unit_test(),
+            crate::identity::IdentityProvider::for_unit_test(),
             crate::installation::test_support::package(SiteConfig {
                 directory: std::env::temp_dir(),
                 spots: vec![],
                 parkings: vec![ParkingLotConfig {
+                    name: "Test lot".into(),
                     path: vec![PathNode { x: 0.0, z: 0.0 }, PathNode { x: 1.0, z: 0.0 }],
                 }],
             }),
@@ -182,7 +359,7 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "./migrations")]
-    async fn r03b_logout_revokes_only_one_independent_session(pool: PgPool) {
+    async fn logout_revokes_only_one_independent_session(pool: PgPool) {
         let (state, user) = fixture(pool).await;
         let first = issue(state.installation.pool(), user, "user", &state.jwt_secret)
             .await
@@ -202,7 +379,7 @@ mod tests {
             .await
             .unwrap()
             .into_response();
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(response.status(), StatusCode::OK);
         assert!(
             response.headers()[header::SET_COOKIE]
                 .to_str()
@@ -241,7 +418,7 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "./migrations")]
-    async fn r03b_logout_database_failure_does_not_claim_success(pool: PgPool) {
+    async fn logout_database_failure_does_not_claim_success(pool: PgPool) {
         let (state, user) = fixture(pool).await;
         let jwt = issue(state.installation.pool(), user, "user", &state.jwt_secret)
             .await
@@ -271,9 +448,7 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "./migrations")]
-    async fn r03b_logout_serializes_with_ticket_issuance_and_removes_committed_ticket(
-        pool: PgPool,
-    ) {
+    async fn logout_serializes_with_ticket_issuance_and_removes_committed_ticket(pool: PgPool) {
         let (state, user) = fixture(pool).await;
         let jwt = issue(state.installation.pool(), user, "user", &state.jwt_secret)
             .await
@@ -311,7 +486,7 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "./migrations")]
-    async fn r03b_expired_session_cleanup_is_bounded(pool: PgPool) {
+    async fn expired_session_cleanup_is_bounded(pool: PgPool) {
         let (state, user) = fixture(pool).await;
         for _ in 0..1001 {
             sqlx::query("INSERT INTO auth_sessions (id,user_id,role,expires_at) VALUES ($1,$2,'user',NOW()-INTERVAL '1 second')")
@@ -336,7 +511,7 @@ mod tests {
         assert_eq!(cleanup_expired(state.installation.pool()).await.unwrap(), 1);
     }
     #[sqlx::test(migrations = "./migrations")]
-    async fn r03b_downgrade_cannot_discard_unexpired_revocation_state(pool: PgPool) {
+    async fn downgrade_cannot_discard_unexpired_revocation_state(pool: PgPool) {
         let (state, user) = fixture(pool).await;
         let jwt = issue(state.installation.pool(), user, "user", &state.jwt_secret)
             .await

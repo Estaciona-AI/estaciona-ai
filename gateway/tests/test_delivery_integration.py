@@ -7,6 +7,7 @@ from functools import lru_cache
 """Opt-in integration against the built Rust server and a disposable PostgreSQL DB."""
 
 import asyncio
+import base64
 from contextlib import closing, suppress
 import hashlib
 import json
@@ -34,6 +35,24 @@ pytestmark = pytest.mark.skipif(
     reason="set ESTACIONA_TEST_SERVER and DATABASE_URL to run real Rust integration",
 )
 KEY = "11" * 32
+APP_ROLE_SCRIPT = Path(__file__).parents[2] / "infra" / "app-role.sql"
+IDENTITY = {
+    "OIDC_ISSUER_URL": "http://127.0.0.1:9/realms/integration",
+    "OIDC_CLIENT_ID": "integration",
+    "OIDC_CLIENT_SECRET": "integration-client-secret",
+    "OIDC_REDIRECT_URL": "http://localhost:8000/auth/callback",
+    "APP_URL": "http://localhost",
+}
+# How long a server command or startup may take before the harness gives up;
+# a wait, not a performance assertion.
+SERVER_COMMAND_TIMEOUT = 120
+# Optional server admission limits a test may lower.
+WS_LIMITS = (
+    "WS_HANDSHAKE_CONCURRENCY",
+    "WS_MAX_EDGE_CONNECTIONS",
+    "WS_MAX_APP_CONNECTIONS",
+    "WS_MAX_DASHBOARD_CONNECTIONS",
+)
 IMAGE = (
     "postgres@sha256:bbbf67eadd2381a2738a4a2e36d4c3936c36edd82d80e7ef00411194385d3829"
 )
@@ -100,16 +119,36 @@ class Server:
                 }
             )
         )
+        self.personal_data_keys = root / "personal-data.keys"
+        self.personal_data_keys.write_text(
+            "1:" + base64.b64encode(os.urandom(32)).decode() + "\n"
+        )
+        self.personal_data_keys.chmod(0o600)
         self.environment = {
             **os.environ,
             "DATABASE_URL": db_url,
             "SITE_DATA_DIR": str(site),
-            "JWT_SECRET": "disposable-jwt",
+            "JWT_SECRET": "disposable-jwt-secret-for-integration",
             "LPR_ENABLED": "false",
-            "PLATE_SECRET_PEPPER": "disposable-pepper",
+            "PLATE_SECRET_PEPPER": "disposable-plate-pepper-for-integration",
+            "PERSONAL_DATA_KEYS_FILE": str(self.personal_data_keys),
+            # Sign-in is covered by the Rust tests; here the provider stays
+            # unreachable, as during an outage: everything else keeps working.
+            **IDENTITY,
             "WS_ALLOWED_ORIGINS": "http://localhost",
         }
         self.environment.pop("EDGE_API_KEY", None)
+
+    def use_runtime_role(self):
+        """Serve with the DML-only role of infra/app-role.sql, as in production."""
+        password = uuid4().hex
+        with closing(psycopg2.connect(self.db_url)) as conn, conn:
+            with conn.cursor() as cursor:
+                cursor.execute(APP_ROLE_SCRIPT.read_text())
+                cursor.execute("ALTER ROLE estaciona_app PASSWORD %s", (password,))
+        parsed = urlsplit(self.db_url)
+        netloc = f"estaciona_app:{password}@{parsed.hostname}:{parsed.port or 5432}"
+        self.environment["DATABASE_URL"] = urlunsplit(parsed._replace(netloc=netloc))
 
     def query(self, statement, arguments=()):
         with closing(psycopg2.connect(self.db_url)) as conn, conn:
@@ -119,7 +158,7 @@ class Server:
 
     def start(self):
         if self.postgres_container:
-            parsed = urlsplit(self.db_url)
+            parsed = urlsplit(self.environment["DATABASE_URL"])
             netloc = (
                 parsed.netloc.rsplit("@", 1)[0] + f"@127.0.0.1:{parsed.port or 5432}"
             )
@@ -132,14 +171,19 @@ class Server:
                 "--cap-drop=ALL",
                 "--security-opt",
                 "no-new-privileges",
+                # The owner of the private fixture files, as SECRETS_DIR in production.
                 "--user",
-                "1000:1000",
+                f"{os.getuid()}:{os.getgid()}",
                 "--network",
                 f"container:{self.postgres_container}",
                 "--mount",
                 f"type=bind,source={self.binary},target=/app/server,readonly",
                 "--mount",
                 f"type=bind,source={self.root / 'site'},target=/site,readonly",
+                "--mount",
+                f"type=bind,source={self.personal_data_keys},target=/run/secrets/personal-data.keys,readonly",
+                "--env",
+                "PERSONAL_DATA_KEYS_FILE=/run/secrets/personal-data.keys",
                 "--env",
                 f"DATABASE_URL={database_url}",
                 "--env",
@@ -147,11 +191,22 @@ class Server:
                 "--env",
                 f"LPR_ENABLED={self.environment['LPR_ENABLED']}",
                 "--env",
-                "JWT_SECRET=disposable-jwt",
+                "JWT_SECRET=disposable-jwt-secret-for-integration",
                 "--env",
-                "PLATE_SECRET_PEPPER=disposable-pepper",
+                "PLATE_SECRET_PEPPER=disposable-plate-pepper-for-integration",
+                *[
+                    argument
+                    for key in IDENTITY
+                    for argument in ("--env", f"{key}={self.environment[key]}")
+                ],
                 "--env",
                 f"WS_ALLOWED_ORIGINS={self.environment['WS_ALLOWED_ORIGINS']}",
+                *[
+                    argument
+                    for key in WS_LIMITS
+                    if key in self.environment
+                    for argument in ("--env", f"{key}={self.environment[key]}")
+                ],
                 "--entrypoint",
                 "/app/server",
                 IMAGE,
@@ -164,8 +219,11 @@ class Server:
                 ]
             self.container_id = subprocess.check_output(args, text=True).strip()
         else:
-            # Refuse unrelated listeners; never signal them.
+            # Refuse unrelated listeners; never signal them. SO_REUSEADDR lets
+            # the previous test's connections linger in TIME_WAIT, while Linux
+            # still refuses the bind when anything listens on the port.
             with socket.socket() as probe:
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 probe.bind(("0.0.0.0", 8000))
             self.process = subprocess.Popen(
                 [self.binary],
@@ -174,7 +232,7 @@ class Server:
                 stdout=self.log,
                 stderr=self.log,
             )
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + SERVER_COMMAND_TIMEOUT
         while time.monotonic() < deadline:
             if self.process is not None and self.process.poll() is not None:
                 pytest.fail((self.root / "server.log").read_text())
@@ -234,9 +292,12 @@ def server(tmp_path):
             env=instance.environment,
             capture_output=True,
             text=True,
-            timeout=15,
+            # Applying every migration takes longer on a loaded machine; the
+            # command bounds itself (store::MIGRATION_TIMEOUT).
+            timeout=SERVER_COMMAND_TIMEOUT,
         )
         assert initialized.returncode == 0, initialized.stdout + initialized.stderr
+        instance.use_runtime_role()
         instance.start()
         instance.query(
             "INSERT INTO edge_gateways (id, name, credential_digest) VALUES (%s, %s, %s)",
@@ -245,6 +306,11 @@ def server(tmp_path):
                 "Delivery fixture",
                 hashlib.sha256(KEY.encode()).digest(),
             ),
+        )
+        # A camera saw the mapped spot moments ago: free and reservable. A spot
+        # without a recent observation is unknown and cannot be reserved.
+        instance.query(
+            "UPDATE spots SET observation_timestamp = NOW() - INTERVAL '30 seconds'"
         )
         for camera_id in ("test-camera", "session-camera"):
             instance.query(
@@ -293,12 +359,12 @@ def message(event_id):
     }
 
 
-async def until(predicate):
+async def until(predicate, timeout=10):
     async def poll():
         while not predicate():
             await asyncio.sleep(0.01)
 
-    await asyncio.wait_for(poll(), timeout=10)
+    await asyncio.wait_for(poll(), timeout=timeout)
 
 
 async def receive_ready(connection):
@@ -319,7 +385,7 @@ def test_gateway_recovers_a_lost_ack_after_both_processes_restart(
     outbox, metrics = str(tmp_path / "outbox.db"), str(tmp_path / "metrics.db")
     gateway.init_db(outbox)
     gateway.init_metrics_db(metrics)
-    event_id = gateway.save_event(outbox, json.dumps(message("unused")["payload"]))
+    event_id = gateway.save_event(outbox, json.dumps(message(str(uuid4()))["payload"]))
     gateway.save_metric(metrics, "cam", "R02-A", "occupied", "t0", "t1", "t2", event_id)
     frames, acks = [], []
     current_key = KEY
@@ -526,18 +592,12 @@ def test_durable_projection_ack_survives_real_server_restart(server, kind):
         (frame["event_id"],),
     ) == [(1,)]
     if kind.startswith("TREND_PREDICTION"):
-        from test_ws_tickets_integration import http, issue, ws_url
+        from test_session_integration import insert_user, token
+        from test_ws_tickets_integration import issue, ws_url
 
-        email = f"{uuid4()}@example.invalid"
-        credentials = {"email": email, "password": "disposable-r02b-password"}
-        status, user, _ = http(
-            server, "/users", payload={"name": "R02b", **credentials}
-        )
-        assert status == 201, user
-        server.query("UPDATE users SET role='admin' WHERE email=%s", (email,))
-        status, login, _ = http(server, "/login", payload=credentials)
-        assert status == 200, login
-        status, ticket, _ = issue(server, login["token"], "dashboard")
+        admin = insert_user(server, role="admin")
+        signed = token(server, admin, "admin", int(time.time()) + 3600)
+        status, ticket, _ = issue(server, signed, "dashboard")
         assert status == 201, ticket
 
         async def read_restored_forecast():
@@ -588,3 +648,47 @@ def test_freshness_survives_restart_and_rejects_future_poisoning(server):
     newer["payload"]["status"] = "free"
     assert asyncio.run(deliver(newer))["outcome"] == "applied"
     assert server.query("SELECT status FROM spots WHERE id='R02-A'") == [("free",)]
+
+
+def test_a_replay_after_retention_is_answered_as_a_duplicate(server, tmp_path, capsys):
+    """Deleting a confirmed event is safe: the server keeps the receipt."""
+    outbox, metrics = str(tmp_path / "outbox.db"), str(tmp_path / "metrics.db")
+    gateway.init_db(outbox)
+    gateway.init_metrics_db(metrics)
+    payload = json.dumps(message(str(uuid4()))["payload"])
+    event_id = gateway.save_event(outbox, payload)
+
+    async def deliver():
+        task = asyncio.create_task(
+            gateway.sync_loop(outbox, metrics, server.url, KEY, asyncio.Event())
+        )
+        try:
+            await until(lambda: not gateway.pending_deliveries(outbox))
+        finally:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
+    asyncio.run(deliver())
+    assert (
+        f"event_id={event_id} outcome=applied duplicate=False"
+        in capsys.readouterr().out
+    )
+    with sqlite3.connect(outbox) as conn:
+        conn.execute("UPDATE fallback_events SET created_at = '2000-01-01 00:00:00'")
+    assert gateway.purge_synced_events(outbox, datetime.timedelta(days=1)) == 1
+
+    # The producer never saw its local ACK and replays the same event.
+    with sqlite3.connect(outbox) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM fallback_events").fetchone() == (0,)
+        conn.execute(
+            "INSERT INTO fallback_events (message_text, event_uuid) VALUES (?, ?)",
+            (payload, event_id),
+        )
+    asyncio.run(deliver())
+    assert (
+        f"event_id={event_id} outcome=applied duplicate=True" in capsys.readouterr().out
+    )
+    assert server.query(
+        "SELECT COUNT(*) FROM edge_event_receipts WHERE event_id=%s", (event_id,)
+    ) == [(1,)]

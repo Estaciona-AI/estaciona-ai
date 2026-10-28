@@ -7,7 +7,7 @@ use sqlx::PgPool;
 use std::fs;
 use uuid::Uuid;
 
-pub(super) fn identity(site: u128, environment: &str) -> InstallationIdentity {
+pub(crate) fn identity(site: u128, environment: &str) -> InstallationIdentity {
     // Synthetic coordinates only; file names are unrelated to ownership IDs.
     let path =
         std::env::temp_dir().join(format!("estaciona-binding-fixture-{}.json", Uuid::new_v4()));
@@ -76,7 +76,7 @@ async fn empty_database_can_be_bound_idempotently_without_rebinding(pool: PgPool
 #[sqlx::test(migrations = "./migrations")]
 async fn existing_data_requires_explicit_database_confirmation(pool: PgPool) {
     let expected = identity(2, "test");
-    sqlx::query("INSERT INTO users (id,email,password_hash) VALUES ('00000000-0000-4000-8000-000000000099','synthetic@example.invalid','preserved-hash')").execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO users (id,username) VALUES ('00000000-0000-4000-8000-000000000099','preserved-hash')").execute(&pool).await.unwrap();
     assert!(matches!(
         store::bind(&pool, &expected, BindMode::EmptyDatabase).await,
         Err(StoreError::ExistingData)
@@ -110,7 +110,7 @@ async fn existing_data_requires_explicit_database_confirmation(pool: PgPool) {
     .await
     .unwrap();
     let hash: String = sqlx::query_scalar(
-        "SELECT password_hash FROM users WHERE email='synthetic@example.invalid'",
+        "SELECT username FROM users WHERE id='00000000-0000-4000-8000-000000000099'",
     )
     .fetch_one(&pool)
     .await
@@ -177,7 +177,7 @@ async fn wait_for_blocked_lock(pool: &PgPool, table: &str) {
 async fn legacy_writer_cannot_race_the_empty_database_check(pool: PgPool) {
     let expected = identity(2, "test");
     let mut writer = pool.begin().await.unwrap();
-    sqlx::query("INSERT INTO users (id,email,password_hash) VALUES ('00000000-0000-4000-8000-000000000098','synthetic-writer@example.invalid','preserved')").execute(&mut *writer).await.unwrap();
+    sqlx::query("INSERT INTO users (id,username) VALUES ('00000000-0000-4000-8000-000000000098','preserved')").execute(&mut *writer).await.unwrap();
     let worker_pool = pool.clone();
     let worker =
         tokio::spawn(
@@ -194,7 +194,7 @@ async fn legacy_writer_cannot_race_the_empty_database_check(pool: PgPool) {
         BindingStatus::Unbound
     );
     let preserved: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM users WHERE email='synthetic-writer@example.invalid'",
+        "SELECT COUNT(*) FROM users WHERE id='00000000-0000-4000-8000-000000000098'",
     )
     .fetch_one(&pool)
     .await

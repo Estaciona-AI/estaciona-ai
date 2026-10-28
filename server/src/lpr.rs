@@ -5,6 +5,7 @@ use sqlx::Acquire;
 
 use crate::{
     edge_auth::{self, AuthError, CameraOperation, Principal},
+    installation::Environment,
     reservation_store::{self, CreateError},
     state::SharedState,
     ws::messages::ServerToAppMsg,
@@ -24,6 +25,15 @@ impl LprMode {
             Some("true") => Ok(Self::Enabled),
             _ => Err("LPR_ENABLED must be true or false"),
         }
+    }
+
+    /// Plates are out of the first installation. Production refuses the module
+    /// until plate keys are versioned; demo and test keep it exercisable.
+    pub fn ensure_allowed(self, environment: Environment) -> Result<(), &'static str> {
+        if self == Self::Enabled && environment == Environment::Production {
+            return Err("LPR_ENABLED=true is refused in production until plate keys are versioned");
+        }
+        Ok(())
     }
 }
 
@@ -76,10 +86,12 @@ pub async fn car_detected(
         (spot, route, false)
     } else {
         let free: Vec<String> = sqlx::query_scalar(
-            "SELECT id FROM spots WHERE status = 'free' AND is_active AND EXISTS( \
+            "SELECT id FROM spots WHERE status = 'free' AND is_active \
+             AND observation_timestamp > NOW() - make_interval(secs => $2) AND EXISTS( \
              SELECT 1 FROM edge_camera_spots WHERE gateway_id = $1 AND spot_id = spots.id)",
         )
         .bind(principal.gateway_id)
+        .bind(crate::freshness::stale_after_secs())
         .fetch_all(&mut *tx)
         .await?;
         let candidates = {
@@ -160,6 +172,26 @@ pub async fn car_detected(
 #[cfg(test)]
 mod mode_tests {
     use super::LprMode;
+    #[test]
+    fn production_refuses_lpr_while_demo_and_test_keep_it() {
+        use crate::installation::Environment;
+        assert!(
+            LprMode::Enabled
+                .ensure_allowed(Environment::Production)
+                .is_err()
+        );
+        for environment in [Environment::Demo, Environment::Test] {
+            assert!(LprMode::Enabled.ensure_allowed(environment).is_ok());
+        }
+        for environment in [
+            Environment::Production,
+            Environment::Demo,
+            Environment::Test,
+        ] {
+            assert!(LprMode::Disabled.ensure_allowed(environment).is_ok());
+        }
+    }
+
     #[test]
     fn lpr_is_disabled_unless_explicitly_enabled() {
         assert_eq!(LprMode::parse(None).unwrap(), LprMode::Disabled);

@@ -12,8 +12,139 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- **Vehicle plates are no longer collected.** The migration drops
+  `users.plate` and redacts stored `CAR_DETECTED` receipts that still held a
+  plate; neither can be restored by the down migration. A `production`
+  installation refuses to start with `LPR_ENABLED=true`.
+- **Create the personal data keyring before upgrading.** The server refuses to
+  start without `PERSONAL_DATA_KEYS_FILE` (Docker Compose:
+  `SECRETS_DIR/personal_data_keys`). See `.env.example` for the format.
+  Keep it outside database backups and back it up separately. The migration
+  discards birth dates and disability declarations stored in clear.
+- **Migrations are an explicit step.** The server no longer migrates at
+  startup; it refuses a schema behind or ahead of its release. Run
+  `--migrate` with the owner role before starting a new release (Docker
+  Compose runs the one-shot `migrate` service). Then run
+  `infra/app-role.sql` as the owner, set the `estaciona_app` password, and
+  point the server's `DATABASE_URL` to that role.
+- **Secrets are checked at startup.** `JWT_SECRET` and `PLATE_SECRET_PEPPER`
+  need at least 32 bytes. Each secret, and `DATABASE_URL`, can come from a
+  private file (`NAME_FILE`). A remote database needs `sslmode=verify-full`,
+  which checks the certificate and host name. `disable`, `require` and
+  `verify-ca` are accepted only with `DATABASE_NETWORK=private`, declaring a
+  private container network (Docker Compose sets it); `prefer` and `allow`
+  are refused. The forecast worker applies the same rule to
+  `ML_DATABASE_URL`, with `ML_DATABASE_NETWORK`.
+- **Docker Compose layout.** The database reads `infra/env/postgres.env`, the
+  server reads `infra/env/server.env` and its secrets from files in
+  `SECRETS_DIR` (see the header of `infra/docker-compose.yml`). The server
+  image runs as UID 10001: secret files and `SITE_DATA_DIR` must be owned by
+  it.
+- **Accounts move to the identity provider.** `POST /login`, `POST /users`
+  and `--create-admin` are gone; the migration drops e-mail, password hash and
+  name from `users`, so existing local accounts cannot sign in again. Register
+  the installation with `tools/identity/provision.py installation-create`,
+  set `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET_FILE`,
+  `OIDC_REDIRECT_URL` and `APP_URL`, and invite people with `user-invite`.
+  Browser apps send people to `/auth/login?return_to=/path`, read the account
+  from `GET /api/v1/me`, and keep no token: the session is the
+  `__Host-estaciona_session` cookie. Writes with that cookie need an `Origin`
+  from `WS_ALLOWED_ORIGINS`, which now also drives CORS. `POST /auth/logout`
+  answers 200 with the provider's `end_session_url`. Contract 1.4.0 removes the
+  login and registration operations.
+- **The gateway has two credentials.** Producers (vision) authenticate with a
+  new `GATEWAY_LOCAL_KEY` of at least 32 bytes; the gateway refuses the cloud
+  `EDGE_API_KEY` on its local listener and refuses to start when both are
+  equal or when either contains whitespace. Point each vision profile's
+  `credential_env` (and the legacy client) to the local key, and move the
+  cloud key to a private file named by `EDGE_API_KEY_FILE`. The gateway
+  listens on `127.0.0.1` by default (`GATEWAY_HOST` accepts only loopback
+  addresses), and vision refuses a `ws://` gateway URL off its own host.
+- **Vision checks the model file before running it.** An ONNX model must have
+  the `.provenance.json` written by `tools/export_rtdetr.py` next to it, and
+  its SHA-256 must match. To run another model on purpose, set the detector
+  profile's `sha256` (or `VISION_MODEL_SHA256` for the legacy client).
+  TensorRT engine names now include the model digest, so engines are rebuilt
+  once after this upgrade.
+- **A production server needs the restricted database role.** It refuses to
+  start when its role is a superuser, can create databases or roles, bypasses
+  row security, can create objects in `public` or owns application tables.
+  New Docker Compose volumes create `estaciona_owner` (no superuser powers) and
+  `estaciona_app` from `ESTACIONA_OWNER_PASSWORD` and `ESTACIONA_APP_PASSWORD`
+  in `infra/env/postgres.env`; `POSTGRES_USER` is now only the container
+  superuser. An existing volume keeps its roles: create a non-superuser owner,
+  transfer the database and schema to it, and point `migration_database_url`
+  to it.
+- **Installation administrators sign in with a one-time code.** The realm's
+  browser flow asks holders of the realm role `estaciona-mfa` (given with every
+  admin role by `tools/identity/provision.py`) to set up and use TOTP. A realm
+  imported before this release keeps its flow: import the new flow and role,
+  or recreate the realm, and give `estaciona-mfa` to existing administrators.
+- **Apps must handle the spot status `unknown`.** A spot whose latest
+  observation is older than `OBSERVATION_STALE_AFTER_SECS` (120 s) or that no
+  camera has seen yet is `unknown` in snapshots and updates. It cannot be
+  reserved (409) or recommended until a camera reports it again.
+- **Maps declare kept spots, sectors and entrances.** Spot names no longer
+  imply anything: mark spots kept for people with a disability or aged 60 and
+  over with `"reserved_for": "pcd"` or `"elderly"` in `spots_3d.json` (the
+  Centro map's A-01/A-02 and A-03/A-04 need it). A spot may name its parking
+  lot with `"parking"`; the first lot is the default and the stored sector. The
+  first point of each lot's path is an entrance (`cam-01` for the first lot,
+  `entrance-N` for the others) and recommendations start at the nearest one.
+- **Run `infra/app-role.sql` again after migrating.** The new administrative
+  trail (`admin_audit_log`) is append-only for the service, which the script
+  enforces.
+- **Wire contract 2.0.0.** The contract released on `main` is 1.3.0; this
+  release removes login and registration, changes the user response, and adds
+  the `unknown` spot status and the `no_prior_forecast` evaluation reason, so it
+  is published as 2.0.0. Hub and installation panels must move to it together
+  with the server; the HTTP prefix stays `/api/v1`. From now on CI refuses an
+  incompatible change released under the same major version.
+
 ### Added
 
+- Data subject rights: `GET /api/v1/me/export` returns everything the
+  installation keeps about the signed-in person, decrypted (account,
+  reservations, parking history, sessions), and `DELETE /api/v1/me` releases
+  the person's reserved spots and deletes the local account with its sessions,
+  reservations and history. The identity provider account is removed with
+  `tools/identity/provision.py`.
+- `GET /ready` answers 200 only when the database answers and is still bound
+  to this installation; `/health` stays a liveness probe.
+- An administrative trail (`admin_audit_log`) records administrators reading
+  another person's data, overriding a spot status, listing active reservations
+  and saving the map, with who did it.
+- Personal parking history older than 180 days is deleted automatically.
+- Sign-in through the central identity provider: OpenID Connect code flow with
+  PKCE as a confidential client (`openidconnect`), state bound to the browser
+  by a cookie, single-use attempts, nonce, and ID tokens accepted only when
+  signed with Ed25519. Each sign-in refreshes the generated username, the
+  encrypted display name and the role. Back-channel logout ends the named
+  provider session, or every session of the account. The server starts and
+  keeps serving existing sessions while the provider is unreachable; only
+  sign-in answers 503 until its metadata loads.
+- `GET /api/v1/me` and `PUT /api/v1/me/eligibility` for the signed-in account.
+- Central identity provider in `infra/identity/`: Keycloak 26.8 with its own
+  PostgreSQL, a proxy that publishes only `/realms/` and `/resources/`, and
+  the `estaciona` realm as code. Public sign-up is off, sign-in uses the
+  e-mail, passwords use Argon2 with a 12-character minimum, brute force
+  detection is on and tokens are signed with Ed25519 only.
+- `tools/identity/provision.py` registers an installation as a confidential
+  OIDC client (code flow with PKCE only, exact callback, back-channel logout,
+  its own roles in the ID token, no e-mail claim) and invites accounts with a
+  generated username such as `ea-7k3m9qx2vd`. Revoking access also ends the
+  account's sessions. Secrets travel only through private files.
+- `--migrate` applies the migrations of this release with the owner role and
+  checks the installation binding before and after.
+- `infra/app-role.sql` creates `estaciona_app`, the server's runtime role:
+  row access only, no schema changes, and no writes to the migration history
+  or the installation binding.
+- Encryption of personal fields at rest. The server seals each value with
+  AES-256-GCM (`ring`), bound to the installation, column and row, under keys
+  read from a file the database never sees. Envelopes carry a key ID, so a new
+  key can be added while older rows still open.
 - Forecast site profile (`FORECAST_PROFILE`, optional JSON) with the local
   timezone, expected cars per shift, academic periods and local holidays.
   Brazilian national holidays, including the Easter-based ones, are computed
@@ -34,6 +165,10 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
 
 ### Changed
 
+- The server image builds and runs on Debian trixie, pinned by digest. The
+  builder already used trixie while the runtime used bookworm, so the binary
+  could need a newer glibc than the runtime had. The unused OpenSSL and
+  `libpq` packages are gone: TLS is rustls. `cargo build` uses `--locked`.
 - The forecast predicts the occupancy rate with a calendar-aware LightGBM
   model instead of the attention model. Training pools simulated campuses with
   the real history, weighting real hours more. With four weeks of real
@@ -45,8 +180,22 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
   `ML_DATABASE_URL`. `ML_DATABASE_URL` is now required by the worker and must
   name the read-only role; it no longer falls back to `DATABASE_URL`.
 
+- Secret files must also be owned by the user the server runs as; a private
+  file of another account is refused.
+- The installation Docker Compose file takes `ESTACIONA_INSTANCE` and the
+  published ports (`DB_HOST_PORT`, `SERVER_HOST_PORT`, `HTTP_PORT`,
+  `HTTPS_PORT`), so two installations can run on one host. The defaults keep
+  the previous container, volume and port names.
+
 ### Removed
 
+- Local registration, password login and the `--create-admin` command, with
+  Argon2 and its admission limits. Accounts, passwords, e-mail verification
+  and brute-force protection belong to the identity provider.
+- Plate collection at registration. `POST /users` ignores a `plate` field and
+  no longer declares a vehicle binding; `GET /users/{id}` no longer returns the
+  plate digest. The dormant license plate module and its tables are kept for a
+  later release.
 - The attention forecast model, its checkpoint and `torch`. Without a LightGBM
   artifact, the worker trains the simulated prior instead.
 - The stay-duration model, which read users' disability status and age, and
@@ -57,15 +206,69 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
 
 ### Fixed
 
+- Forecast quality metrics are now out of sample: each forecast is recorded
+  when issued (`forecast_ledger.db` next to the worker) and scored a day later
+  against what was observed; until then the evaluation is unavailable with
+  reason `no_prior_forecast`. Before, the current model rebuilt the forecast
+  of 24 hours earlier, possibly from hours it was trained on.
+- A forecast artifact is served only for the installation, site profile and
+  capacity it was trained for; otherwise the worker retrains it. Run
+  `infra/forecast-reader.sql` again: the reader also reads
+  `installation_binding`. The daily retrain runs at 03:30 site time instead of
+  at the next hourly forecast.
+- The gateway's local database no longer grows without bound: confirmed events
+  are deleted 24 hours after they arrived and metrics after 7 days, in small
+  batches every five minutes; pending events are never deleted. Above
+  `GATEWAY_MAX_DB_BYTES` (2 GiB) new local events are refused with close code
+  1013 and stay in the producer's outbox. Pending deliveries use a partial
+  index.
+- A back-channel logout that arrives while a sign-in for the same provider
+  session or account is still completing now ends it as well: the callback
+  refuses an ID token issued before the logout.
 - Forecast timestamps were one hour late: the first point is now the current
   hour, the first one not yet observed. Predicted counts are rounded instead of
   truncated.
 - One silent spot no longer discards a whole hour of history, and registering a
   new spot no longer discards earlier hours. An hour counts when at least 90% of
-  the spots monitored so far reported.
+  the spots of the site map in force at that hour reported (from
+  `site_map_revisions`; the active spots when no revision exists). A camera
+  that stops reporting therefore lowers coverage even in a window that starts
+  after it stopped, and a small part of the lot is no longer taken as the
+  whole lot's rate. Run `infra/forecast-reader.sql` again: the reader now also
+  reads `site_map_revisions`.
+- A map whose path would expand to more than 50,000 navigation waypoints, or
+  with more than 10,000 spots, is refused when it is loaded or written,
+  instead of exhausting memory when the server builds its graph.
 
 ### Security
 
+- WebSocket handshakes no longer compete freely for the database pool: at most
+  `WS_HANDSHAKE_CONCURRENCY` (2) authenticate at once and the rest get 503
+  with `Retry-After` before any query. Open sockets are capped per kind (edge
+  64, app 2000, dashboard 64) and messages are limited to 64 KiB (edge) and
+  16 KiB (app, dashboard).
+- A compromised producer or a capture on the local network no longer
+  exposes the credential that authenticates the gateway to the server: the
+  two keys are separate, the listener is loopback-only and compares keys in
+  constant time.
+- No installation database stores e-mail addresses or password hashes any
+  more. Sessions are 8-hour host-only, HttpOnly cookies; cookie writes require
+  an allowed `Origin`, and CORS allows only the installation's apps, with
+  credentials, instead of any origin. Roles are limited to `user` and `admin`
+  by a constraint. Unknown command-line arguments stop the server instead of
+  being ignored.
+- The server runs with a database role that cannot change the schema, as UID
+  10001 with a read-only root filesystem and no capabilities. The database
+  container receives only its own account; the server receives its secrets as
+  files mounted into it alone and refuses secret files that others can read.
+- Birth date and disability status are stored only as encrypted envelopes
+  (`date_of_birth_enc`, `pcd_status_enc`). Undeclared values are encrypted too,
+  so a row does not show what was declared. Priority recommendations decrypt
+  them in the server instead of comparing clear values in SQL.
+- Receipts of `CAR_DETECTED` events written before the keyed fingerprint kept
+  the raw plate or an unkeyed SHA-256 of the event. A migration redacts them
+  and keeps their outcome; replaying one of those events is answered as an
+  event ID conflict. The legacy replay upgrade path is removed.
 - The edge gateway no longer holds a database credential for the forecast. The
   worker refuses to start if its role can insert, update, delete or truncate
   any table. Removing `torch` also drops its `filelock`, `fsspec` and

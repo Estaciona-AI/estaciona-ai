@@ -88,9 +88,11 @@ pub async fn create_in_transaction(
     }
     let claimed = sqlx::query(
         "UPDATE spots SET status = 'reserved', last_updated = NOW() \
-         WHERE id = $1 AND status = 'free' AND is_active",
+         WHERE id = $1 AND status = 'free' AND is_active \
+         AND observation_timestamp > NOW() - make_interval(secs => $2)",
     )
     .bind(spot_id)
+    .bind(crate::freshness::stale_after_secs())
     .execute(&mut *connection)
     .await
     .map_err(CreateError::Database)?;

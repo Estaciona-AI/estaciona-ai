@@ -85,6 +85,7 @@ def prebuild(inputs, *, loader=load_detector):
                 provider=profile.provider,
                 precision=profile.precision,
                 engine_cache=profile.engine_cache,
+                expected_sha256=profile.sha256,
             )
             # The engine is built or loaded for the exact batch on first use.
             detector.detect(

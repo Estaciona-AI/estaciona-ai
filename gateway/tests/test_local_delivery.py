@@ -99,7 +99,7 @@ def test_failed_gateway_commit_preserves_vision_event_for_retry(tmp_path):
                 is None
             )
             event_id = outbox.first()["event_id"]
-            assert gateway.get_unsynced_events(db) == []
+            assert gateway.pending_deliveries(db) == []
             with sqlite3.connect(db) as conn:
                 conn.execute("DROP TRIGGER fail_insert")
             ws = await delivery.send(None, None, {"Authorization": "Bearer local-test"})

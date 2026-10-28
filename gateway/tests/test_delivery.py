@@ -51,7 +51,8 @@ async def until(predicate):
         while not predicate():
             await asyncio.sleep(0)
 
-    await asyncio.wait_for(poll(), timeout=2)
+    # Only a failing test waits this long; a loaded runner still passes.
+    await asyncio.wait_for(poll(), timeout=10)
 
 
 class Cloud:
@@ -115,6 +116,52 @@ async def sync(db, metrics, cloud, predicate):
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
+
+
+def test_idle_loop_waits_and_forwards_later_events_with_the_cloud_key(tmp_path):
+    db, metrics = setup(tmp_path)
+    cloud = Cloud(lambda cloud, frame: cloud.ack(frame))
+    wake = asyncio.Event()
+
+    async def run():
+        with patch(
+            "gateway.websockets.connect", new_callable=AsyncMock, return_value=cloud
+        ) as connect:
+            task = asyncio.create_task(
+                gateway.sync_loop(db, metrics, "ws://test", "test", wake)
+            )
+            try:
+                for _ in range(10):
+                    await asyncio.sleep(0)
+                assert not task.done()
+                connect.assert_not_called()
+                event_id = enqueue(db, metrics, payload())
+                wake.set()
+                await until(lambda: not gateway.pending_deliveries(db))
+            finally:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+        assert connect.call_args.args == ("ws://test",)
+        assert connect.call_args.kwargs["additional_headers"] == {
+            "Authorization": "Bearer test"
+        }
+        return event_id
+
+    event_id = asyncio.run(run())
+    [frame] = cloud.frames
+    forwarded = frame.pop("gateway_forwarded_at")
+    assert frame == {
+        "type": "EDGE_EVENT",
+        "version": 1,
+        "event_id": event_id,
+        "payload": payload(),
+    }
+    assert forwarded.endswith("Z")
+    with sqlite3.connect(metrics) as conn:
+        assert conn.execute("SELECT gateway_forwarded_ts FROM metrics").fetchone() == (
+            forwarded,
+        )
 
 
 def test_backlog_migration_preserves_ids_and_synced_history(tmp_path):
@@ -514,17 +561,19 @@ def test_oldest_deadline_survives_later_ack_and_invalid_traffic(tmp_path):
         cloud = Cloud()
         with (
             patch("gateway.websockets.connect", AsyncMock(return_value=cloud)),
-            patch("gateway.ACK_TIMEOUT_SECONDS", 0.08),
+            patch("gateway.ACK_TIMEOUT_SECONDS", 0.4),
         ):
             task = asyncio.create_task(
                 gateway.sync_loop(db, metrics, "ws://test", "test", asyncio.Event())
             )
             try:
                 await until(lambda: len(cloud.frames) == 3)
-                await asyncio.sleep(0.05)
+                # The oldest deadline expires at 0.4 s; restarting it on this
+                # late ACK would close at 0.65 s, outside the 0.25-0.55 s window.
+                await asyncio.sleep(0.25)
                 cloud.ack(cloud.frames[2])
                 cloud.responses.put_nowait("not-json")
-                await asyncio.wait_for(cloud.closed.wait(), 0.06)
+                await asyncio.wait_for(cloud.closed.wait(), 0.3)
                 assert [row[1] for row in gateway.pending_deliveries(db)] == ids[:2]
             finally:
                 task.cancel()
@@ -593,12 +642,14 @@ def test_main_rejects_invalid_window_before_starting_tasks(
     tmp_path, monkeypatch, value
 ):
     monkeypatch.setenv("EDGE_API_KEY", "disposable-test-key")
+    monkeypatch.setenv("GATEWAY_LOCAL_KEY", "l" * 32)
     monkeypatch.setenv("EDGE_MAX_IN_FLIGHT", value)
     with (
-        patch("gateway.init_db"),
+        patch("gateway.init_db") as init_db,
         patch("gateway.init_metrics_db"),
         patch("asyncio.create_task") as start,
     ):
         with pytest.raises(ValueError, match="EDGE_MAX_IN_FLIGHT"):
             asyncio.run(gateway.main())
         start.assert_not_called()
+        init_db.assert_not_called()

@@ -12,13 +12,10 @@ async fn migrations_persist_a_reservation_with_user_and_spot(
     let reservation_id = Uuid::new_v4();
     let spot_id = "migration-test-spot";
 
-    sqlx::query(
-        "INSERT INTO users (id, name, email, password_hash) \
-         VALUES ($1, 'Migration Fixture', 'migration@example.invalid', 'unused-test-hash')",
-    )
-    .bind(user_id)
-    .execute(&pool)
-    .await?;
+    sqlx::query("INSERT INTO users (id) VALUES ($1)")
+        .bind(user_id)
+        .execute(&pool)
+        .await?;
 
     sqlx::query("INSERT INTO spots (id, status, x, y) VALUES ($1, 'free', 0, 0)")
         .bind(spot_id)
@@ -265,7 +262,7 @@ async fn edge_registry_reversal_preserves_spots_and_allows_reapplication(
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn r02b_projection_storage_exists_and_enforces_single_forecast(pool: PgPool) {
+async fn projection_storage_exists_and_enforces_single_forecast(pool: PgPool) {
     let exists: bool = sqlx::query_scalar("SELECT to_regclass('edge_path_state') IS NOT NULL AND to_regclass('edge_forecast_state') IS NOT NULL")
         .fetch_one(&pool).await.unwrap();
     assert!(exists, "durable projections must survive process restart");
@@ -280,4 +277,184 @@ async fn r02b_projection_storage_exists_and_enforces_single_forecast(pool: PgPoo
     .await
     .unwrap_err();
     assert_database_code(error, "23514");
+}
+
+#[sqlx::test(migrations = false)]
+async fn legacy_plate_receipts_are_redacted_and_other_events_kept(pool: PgPool) {
+    const RECEIPTS_REDACTED: i64 = 20261025000100;
+    let mut before = sqlx::migrate!();
+    before.migrations = before
+        .migrations
+        .iter()
+        .filter(|migration| migration.version < RECEIPTS_REDACTED)
+        .cloned()
+        .collect::<Vec<_>>()
+        .into();
+    before.run(&pool).await.unwrap();
+    let plate = serde_json::json!({"type":"CAR_DETECTED","plate":"ABC1D23","camera_id":"cam","timestamp":"2026-10-15T00:00:00Z"});
+    let spot = serde_json::json!({"type":"SPOT_UPDATE","spot_id":"A-01","status":"free"});
+    for payload in [
+        serde_json::json!({ "json": plate }),
+        serde_json::json!({ "json_text": plate.to_string() }),
+        serde_json::json!({ "sha256": [1, 2, 3] }),
+        serde_json::json!({ "json": spot }),
+    ] {
+        sqlx::query("INSERT INTO edge_event_receipts (event_id, payload, outcome) VALUES ($1, $2, 'applied')")
+            .bind(Uuid::new_v4())
+            .bind(sqlx::types::Json(payload))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    sqlx::migrate!().run(&pool).await.unwrap();
+
+    let receipts: Vec<(String, String)> = sqlx::query_as(
+        "SELECT payload::text, outcome FROM edge_event_receipts ORDER BY payload::text",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(receipts.len(), 4);
+    assert!(
+        receipts
+            .iter()
+            .all(|(payload, _)| !payload.contains("ABC1D23"))
+    );
+    assert!(receipts.iter().all(|(_, outcome)| outcome == "applied"));
+    let redacted = receipts
+        .iter()
+        .filter(|(payload, _)| payload == r#"{"redacted": "car_detected"}"#)
+        .count();
+    assert_eq!(redacted, 3);
+    assert!(
+        receipts
+            .iter()
+            .any(|(payload, _)| payload.contains("SPOT_UPDATE"))
+    );
+}
+
+/// estaciona_app is one role for the whole PostgreSQL cluster: tests that set
+/// its password and connect as it run one at a time.
+static RUNTIME_ROLE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[sqlx::test(migrations = "./migrations")]
+async fn runtime_role_changes_rows_but_not_the_schema_or_migration_history(pool: PgPool) {
+    let _role = RUNTIME_ROLE.lock().await;
+    crate::installation::test_support::provision(&pool).await;
+    sqlx::raw_sql(include_str!("../../infra/app-role.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Repeating the script keeps the same privileges.
+    sqlx::raw_sql(include_str!("../../infra/app-role.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let password = Uuid::new_v4().simple().to_string();
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "ALTER ROLE estaciona_app PASSWORD '{password}'"
+    )))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let options = pool
+        .connect_options()
+        .as_ref()
+        .clone()
+        .username("estaciona_app")
+        .password(&password);
+    let app = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .unwrap();
+
+    crate::installation::store::require_migrated(&app)
+        .await
+        .unwrap();
+    assert_eq!(
+        crate::installation::store::excess_privileges(&app)
+            .await
+            .unwrap(),
+        Vec::<&str>::new(),
+        "the runtime role only reads and writes rows"
+    );
+    for statement in [
+        "INSERT INTO spots (id, status, x, y) VALUES ('runtime-role', 'free', 0, 0)",
+        "UPDATE spots SET status = 'occupied' WHERE id = 'runtime-role'",
+        "INSERT INTO site_map_revisions (fingerprint, manifest) VALUES (repeat('a', 64), '{}')",
+        "DELETE FROM spots WHERE id = 'runtime-role'",
+        "SELECT environment FROM installation_binding",
+        "INSERT INTO admin_audit_log (actor_user_id, action) VALUES (gen_random_uuid(), 'runtime_check')",
+    ] {
+        sqlx::raw_sql(statement).execute(&app).await.unwrap();
+    }
+    for statement in [
+        "CREATE TABLE intruder (id INT)",
+        "ALTER TABLE users ADD COLUMN intruder INT",
+        "CREATE INDEX intruder ON spots (x)",
+        "DROP TABLE vision_spot_mappings",
+        "TRUNCATE spots",
+        "DELETE FROM _sqlx_migrations",
+        "UPDATE _sqlx_migrations SET success = false",
+        "UPDATE installation_binding SET environment = 'production'",
+        "DELETE FROM installation_binding",
+        // The administrative trail is append-only for the service.
+        "UPDATE admin_audit_log SET action = 'rewritten'",
+        "DELETE FROM admin_audit_log",
+        "TRUNCATE admin_audit_log",
+    ] {
+        assert!(
+            sqlx::raw_sql(statement).execute(&app).await.is_err(),
+            "{statement}"
+        );
+    }
+    app.close().await;
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn production_starts_only_with_the_restricted_runtime_role(pool: PgPool) {
+    let _role = RUNTIME_ROLE.lock().await;
+    use crate::installation::{
+        startup,
+        store::{self, BindMode, StoreError},
+        store_tests::identity,
+    };
+    let production = identity(3, "production");
+    store::bind(&pool, &production, BindMode::EmptyDatabase)
+        .await
+        .unwrap();
+    // The test pool connects as a superuser that owns every table.
+    let excess = store::excess_privileges(&pool).await.unwrap();
+    assert!(excess.contains(&"superuser") && excess.contains(&"own application tables"));
+    assert!(matches!(
+        startup::prepare(pool.clone(), production).await,
+        Err(StoreError::PrivilegedRuntimeRole)
+    ));
+
+    sqlx::raw_sql(include_str!("../../infra/app-role.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let password = Uuid::new_v4().simple().to_string();
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "ALTER ROLE estaciona_app PASSWORD '{password}'"
+    )))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let options = pool
+        .connect_options()
+        .as_ref()
+        .clone()
+        .username("estaciona_app")
+        .password(&password);
+    let app = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(options)
+        .await
+        .unwrap();
+    startup::prepare(app.clone(), production).await.unwrap();
+    app.close().await;
 }

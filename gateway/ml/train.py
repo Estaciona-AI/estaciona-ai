@@ -4,6 +4,7 @@
 #
 
 import hashlib
+import ipaddress
 import json
 import os
 import warnings
@@ -11,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 import numpy as np
 import lightgbm as lgb
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, make_url, text
 from dotenv import load_dotenv
 
 if __package__:
@@ -48,6 +49,49 @@ else:
 load_dotenv(os.path.join(os.path.dirname(__file__), "../../.env"))
 
 
+PRIVATE_NETWORK_SSL_MODES = ("disable", "require", "verify-ca", "verify-full")
+
+
+def _database_hosts(parsed):
+    """Every address libpq may connect to: the URL host and each `host` or
+    `hostaddr` parameter, which may repeat or list hosts separated by commas."""
+    values = [parsed.host] if parsed.host else []
+    for key in ("host", "hostaddr"):
+        value = parsed.query.get(key, ())
+        values.extend((value,) if isinstance(value, str) else value)
+    return [host.strip() for value in values for host in value.split(",")]
+
+
+def _is_local_host(host):
+    host = host.strip("[]")
+    if host.startswith("/") or host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def check_database_tls(url, network=None):
+    """The server's policy: a remote database needs sslmode=verify-full unless
+    ML_DATABASE_NETWORK=private declares a private network. libpq defaults to
+    the opportunistic "prefer", which is never enough for a remote host. With
+    several hosts libpq tries each in turn, so all of them must be local."""
+    if network not in (None, "private"):
+        raise ValueError('ML_DATABASE_NETWORK accepts only "private"')
+    parsed = make_url(url)
+    hosts = _database_hosts(parsed)
+    if hosts and all(_is_local_host(host) for host in hosts):
+        return
+    mode = parsed.query.get("sslmode", "prefer")
+    allowed = PRIVATE_NETWORK_SSL_MODES if network == "private" else ("verify-full",)
+    if mode not in allowed:
+        raise ValueError(
+            "ML_DATABASE_URL: a remote database needs sslmode=verify-full, "
+            "or ML_DATABASE_NETWORK=private on a private container network"
+        )
+
+
 def get_db_engine():
     # Never fall back to DATABASE_URL: that is the owner credential of the server.
     db_url = os.environ.get("ML_DATABASE_URL")
@@ -55,7 +99,22 @@ def get_db_engine():
         raise ValueError("ML_DATABASE_URL must name the read-only forecast role")
     if db_url.startswith("postgres://"):
         db_url = db_url.replace("postgres://", "postgresql://", 1)
+    check_database_tls(db_url, os.environ.get("ML_DATABASE_NETWORK"))
     return create_engine(db_url)
+
+
+def deployment_context(engine, capacity):
+    """What an artifact must match to be served: the installation whose
+    database it read and the site profile (which depends on capacity)."""
+    with engine.connect() as connection:
+        installation = connection.execute(
+            text("SELECT installation_id FROM installation_binding")
+        ).scalar_one_or_none()
+    return {
+        "installation_id": None if installation is None else str(installation),
+        "profile_sha256": profile_from_env(capacity).digest(),
+        "capacity": capacity,
+    }
 
 
 # Occupancy model: LightGBM on occupancy rate, one row per forecast horizon.
@@ -273,6 +332,7 @@ def train_occupancy_model(engine=None, models_dir=None, variants=SIM_VARIANTS):
         "real_hours": real_hours,
         "source": "blended" if real_hours else "synthetic_prior",
         "profile": {"specified": profile.specified, "sha256": profile.digest()},
+        "context": deployment_context(engine, capacity),
         "simulator": {"variants": variants, "days": SIM_DAYS, "seed": SIM_SEED},
         "evaluation": evaluation,
         "serving": serving,
