@@ -969,6 +969,20 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "./migrations")]
+    async fn confidence_at_the_threshold_is_applied(pool: PgPool) -> TestResult {
+        let principal = principal(&pool).await?;
+        let spot_id = authorized_spot(&pool, &principal, "free").await?;
+        let mut event_payload = payload(&spot_id, "occupied");
+        event_payload["confidence"] = json!(0.20);
+        let id = Uuid::new_v4();
+        let delivery = apply(&pool, &principal, id, event_payload).await?;
+        assert_eq!(delivery.ack.outcome, Outcome::Applied);
+        assert_eq!(receipt(&pool, id).await?.0, "applied");
+        assert_eq!(status(&pool, &spot_id).await?, "occupied");
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
     async fn invalid_and_unsupported_payloads_have_terminal_receipts(pool: PgPool) -> TestResult {
         let principal = principal(&pool).await?;
         let spot_id = authorized_spot(&pool, &principal, "free").await?;
