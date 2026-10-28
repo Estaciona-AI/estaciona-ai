@@ -57,11 +57,11 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
 - **The gateway has two credentials.** Producers (vision) authenticate with a
   new `GATEWAY_LOCAL_KEY` of at least 32 bytes; the gateway refuses the cloud
   `EDGE_API_KEY` on its local listener and refuses to start when both are
-  equal. Point each vision profile's `credential_env` (and the legacy client)
-  to the local key, and move the cloud key to a private file named by
-  `EDGE_API_KEY_FILE`. The gateway listens on `127.0.0.1` by default
-  (`GATEWAY_HOST` accepts only loopback addresses), and vision refuses a
-  `ws://` gateway URL off its own host.
+  equal or when either contains whitespace. Point each vision profile's
+  `credential_env` (and the legacy client) to the local key, and move the
+  cloud key to a private file named by `EDGE_API_KEY_FILE`. The gateway
+  listens on `127.0.0.1` by default (`GATEWAY_HOST` accepts only loopback
+  addresses), and vision refuses a `ws://` gateway URL off its own host.
 - **Vision checks the model file before running it.** An ONNX model must have
   the `.provenance.json` written by `tools/export_rtdetr.py` next to it, and
   its SHA-256 must match. To run another model on purpose, set the detector

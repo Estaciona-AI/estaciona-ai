@@ -83,6 +83,10 @@ def secret(environ, name):
     value = read_secret_file(path) if path else environ.get(name)
     if not value or any(ord(c) < 32 for c in value):
         raise ValueError(f"{name} or {name}_FILE is required")
+    # A bearer credential is one token: is_authorized splits the header on a
+    # space, so a key containing whitespace could never authenticate.
+    if any(c.isspace() for c in value):
+        raise ValueError(f"{name} must not contain whitespace")
     return value
 
 
