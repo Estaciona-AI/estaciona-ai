@@ -24,10 +24,10 @@ as described in [`SECURITY.md`](../SECURITY.md).
 
 | Boundary ([Architecture §2.5](02-architecture.md#25-trust-boundaries)) | Controls |
 |---|---|
-| Browser → server | OpenID Connect authorization code flow with PKCE [4, 5]; host-only, `HttpOnly`, `Secure` session cookies; allowed-origin checks for cookie writes and CORS; single-use WebSocket tickets; role checks on the server |
+| Browser → server | OpenID Connect authorization code flow with PKCE [4, 5]; host-only, `HttpOnly`, `Secure` session cookies; allowed-origin checks for cookie writes and CORS, against an exact list whose entries must be in the form a browser sends; single-use WebSocket tickets; role checks on the server |
 | Gateway and worker → server | One revocable credential per edge, stored as a digest, with explicit grants checked on every event; admission limits and message size limits on sockets |
 | Vision → gateway | Loopback-only listener; a local key distinct from the cloud credential, compared in constant time |
-| Server → database | Runtime role without schema privileges; migrations applied separately by an owner role; refusal to start with an over-privileged role in production; TLS with certificate and host-name verification for remote databases unless a private container network is declared |
+| Server and forecast worker → database | Runtime role without schema privileges; migrations applied separately by an owner role; refusal to start with an over-privileged role in production; a forecast worker that refuses to start if its role can modify any table; TLS with certificate and host-name verification for remote databases unless a private container network is declared, applied by the worker to every host its connection string names |
 | Secrets | Read from private files owned by the service user, with minimum lengths enforced at start-up |
 | Server container | Non-root user, read-only file system, all capabilities dropped, base images pinned by digest |
 | Supply chain | Committed lockfiles used with `--locked`; actions pinned by digest; scheduled RustSec and Python advisory audits; license checks; dependency policy in `server/deny.toml` |
