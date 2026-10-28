@@ -417,6 +417,9 @@ mod tests {
         assert!(ticket.bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert_eq!(ticket_digest(&ticket).unwrap(), digest);
         assert!(ticket_digest("not-a-ticket").is_none());
+        // Length and alphabet are each checked on their own.
+        assert!(ticket_digest(&"g".repeat(64)).is_none());
+        assert!(ticket_digest(&"a".repeat(63)).is_none());
     }
 
     #[test]
@@ -435,8 +438,9 @@ mod tests {
 
 #[cfg(test)]
 mod postgres_tests {
-    use super::cleanup_expired_batch;
+    use super::{CLEANUP_INTERVAL, cleanup_expired_batch, spawn_cleanup};
     use sqlx::PgPool;
+    use std::time::Duration;
     use uuid::Uuid;
 
     #[sqlx::test(migrations = "./migrations")]
@@ -471,6 +475,66 @@ mod postgres_tests {
             .await
             .unwrap();
         assert_eq!(remaining, (1, 1));
+    }
+
+    async fn signed_in_session(pool: &PgPool) -> (Uuid, Uuid) {
+        let user_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO users (id) VALUES ($1)")
+            .bind(user_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        let jwt = crate::sessions::issue(pool, user_id, "user", "fixture")
+            .await
+            .unwrap();
+        let session_id = crate::security::verify_jwt(&jwt, "fixture").unwrap().jti;
+        (user_id, session_id)
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn background_cleanup_removes_expired_tickets_and_sessions(pool: PgPool) {
+        let (user_id, live_session) = signed_in_session(&pool).await;
+        sqlx::query("INSERT INTO ws_tickets (session_id,digest,user_id,role,destination,session_expires_at,expires_at) VALUES ($2,decode(lpad(to_hex(1),64,'0'),'hex'),$1,'user','app',0,NOW()-INTERVAL '1 second')")
+            .bind(user_id)
+            .bind(live_session)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (_, ended_session) = signed_in_session(&pool).await;
+        sqlx::query("UPDATE auth_sessions SET expires_at=NOW()-INTERVAL '1 second' WHERE id=$1")
+            .bind(ended_session)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        spawn_cleanup(pool.clone());
+        let deadline = tokio::time::Instant::now() + CLEANUP_INTERVAL * 3;
+        let session_exists = "SELECT EXISTS (SELECT 1 FROM auth_sessions WHERE id=$1)";
+        loop {
+            let tickets: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ws_tickets")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            let ended: bool = sqlx::query_scalar(session_exists)
+                .bind(ended_session)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            if tickets == 0 && !ended {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "periodic cleanup did not run: {tickets} tickets, ended session kept: {ended}"
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        let live: bool = sqlx::query_scalar(session_exists)
+            .bind(live_session)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(live, "a valid session must survive the cleanup");
     }
 }
 
