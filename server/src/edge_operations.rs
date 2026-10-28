@@ -945,6 +945,19 @@ mod tests {
         assert_eq!(count, 0);
     }
     #[sqlx::test(migrations = "./migrations")]
+    async fn enabled_lpr_still_rejects_plates_over_durable_delivery(pool: PgPool) {
+        let mut f = fixture(pool).await;
+        Arc::get_mut(&mut f.state).unwrap().installation.lpr_mode = crate::lpr::LprMode::Enabled;
+        let event = serde_json::json!({"type":"CAR_DETECTED", "plate":"ABC1D23", "camera_id":"cam-01", "timestamp":"2026-10-18T00:00:00Z"});
+        let ack =
+            crate::edge_delivery::apply_with_state(&f.state, &f.principal, Uuid::new_v4(), event)
+                .await
+                .unwrap()
+                .ack;
+        assert_eq!(ack.outcome, crate::edge_delivery::Outcome::Rejected);
+        assert_eq!(ack.reason.as_deref(), Some("unsupported_event"));
+    }
+    #[sqlx::test(migrations = "./migrations")]
     async fn forecast_publication_cannot_overtake_an_earlier_commit(pool: PgPool) {
         let f = fixture(pool).await;
         grant_projections(&f).await;
