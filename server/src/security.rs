@@ -472,4 +472,70 @@ mod tests {
             "a signature alone must not authorize a session absent from the registry"
         );
     }
+
+    fn session_until(deadline: Instant, expires_at: usize) -> AuthSession {
+        AuthSession {
+            session_id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+            role: "user".to_owned(),
+            expires_at,
+            deadline,
+        }
+    }
+
+    #[test]
+    fn a_session_expires_at_its_deadline_or_its_token_expiry() {
+        let now = jsonwebtoken::get_current_timestamp() as usize;
+        let later = Instant::now() + StdDuration::from_secs(60);
+        let earlier = Instant::now()
+            .checked_sub(StdDuration::from_secs(1))
+            .unwrap();
+        assert_eq!(session_until(later, now + 60).check_expiration(), Ok(()));
+        // Either clock alone ends the session: the monotonic deadline, or the
+        // token expiry when the wall clock moves past it.
+        for session in [
+            session_until(earlier, now + 60),
+            session_until(later, now - 1),
+        ] {
+            assert_eq!(
+                session.check_expiration(),
+                Err((StatusCode::UNAUTHORIZED, "Expired session".to_owned()))
+            );
+        }
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn an_open_socket_learns_at_the_next_recheck_that_its_session_was_revoked(pool: PgPool) {
+        let user = Uuid::new_v4();
+        sqlx::query("INSERT INTO users (id, role) VALUES ($1, 'user')")
+            .bind(user)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let token = crate::sessions::issue(&pool, user, "user", "recheck-secret")
+            .await
+            .unwrap();
+        let session =
+            AuthSession::from_claims(verify_jwt(&token, "recheck-secret").unwrap()).unwrap();
+        session.revalidate(&pool).await.unwrap();
+        sqlx::query("UPDATE auth_sessions SET revoked_at=NOW() WHERE id=$1")
+            .bind(session.session_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let started = Instant::now();
+        let error = tokio::time::timeout(
+            SESSION_RECHECK_INTERVAL * 3,
+            session.wait_for_invalidation(&pool),
+        )
+        .await
+        .expect("a revoked session must end the socket");
+        assert_eq!(
+            error,
+            (StatusCode::UNAUTHORIZED, "Invalid user session".to_owned())
+        );
+        // Open sockets are rechecked on an interval, not on every poll.
+        assert!(started.elapsed() >= SESSION_RECHECK_INTERVAL);
+    }
 }

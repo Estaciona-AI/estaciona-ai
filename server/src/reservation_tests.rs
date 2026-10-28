@@ -329,6 +329,55 @@ async fn rest_cancel_denies_a_different_owner_without_releasing_the_spot(
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn rest_extend_hides_a_different_owners_reservation(pool: PgPool) -> Result<(), sqlx::Error> {
+    let fixture = Fixture::new(pool).await?;
+    let reservation_id = fixture.create_for_owner().await;
+    let expires_at = || {
+        sqlx::query_scalar::<_, chrono::DateTime<Utc>>(
+            "SELECT expires_at FROM reservations WHERE id = $1",
+        )
+        .bind(reservation_id)
+        .fetch_one(fixture.state.installation.pool())
+    };
+    let before = expires_at().await?;
+
+    let response = reservations::extend_reservation(
+        State(fixture.state.clone()),
+        Path(reservation_id),
+        fixture.headers(fixture.other, "user").await,
+    )
+    .await
+    .into_response();
+
+    // Not found rather than conflict: the answer must not reveal that the ID exists.
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(expires_at().await?, before);
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn admin_free_releases_open_occupancy_history(pool: PgPool) -> Result<(), sqlx::Error> {
+    let fixture = Fixture::new(pool).await?;
+    sqlx::query("INSERT INTO user_occupancy_history (user_id,spot_id) VALUES ($1,$2)")
+        .bind(fixture.owner)
+        .bind(&fixture.spot_id)
+        .execute(fixture.state.installation.pool())
+        .await?;
+    let open = || {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM user_occupancy_history WHERE spot_id=$1 AND released_at IS NULL",
+        )
+        .bind(&fixture.spot_id)
+        .fetch_one(fixture.state.installation.pool())
+    };
+    fixture.update_spot("occupied").await;
+    assert_eq!(open().await?, 1);
+    fixture.update_spot("free").await;
+    assert_eq!(open().await?, 0);
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn rest_cancel_rolls_back_when_releasing_the_spot_fails(
     pool: PgPool,
 ) -> Result<(), sqlx::Error> {
@@ -596,6 +645,7 @@ async fn assert_recommendation_unavailable(f: &Fixture) {
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let body = to_bytes(response.into_body(), 16384).await.unwrap();
     let text = String::from_utf8(body.to_vec()).unwrap();
+    assert_eq!(text, "Recommendation temporarily unavailable");
     for internal_detail in [
         "injected",
         "SELECT",

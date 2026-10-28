@@ -68,6 +68,16 @@ impl PrivateSession {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_session_matches_only_its_own_connection() {
+        // Closing a socket removes the user's private channel only when it is
+        // still that socket's: a newer connection of the same user must stay.
+        let (session, _messages, _closed) = channel();
+        let (newer, _newer_messages, _newer_closed) = channel();
+        assert!(session.same_channel(&session.clone()));
+        assert!(!session.same_channel(&newer));
+    }
+
     #[tokio::test]
     async fn saturated_queue_closes_only_its_connection_without_waiting() {
         let (session, mut messages, mut closed) = channel();
