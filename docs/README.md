@@ -11,7 +11,7 @@ authoritative operational sources listed below.
 |---|---|
 | Scope | Core repository: server, gateway, vision, forecast worker, contracts, infrastructure and tools |
 | Release baseline | `v0.9.0` (pilot, 2026-10-23) plus the unreleased changes on `develop` |
-| Reviewed against | `develop` at `9036d10` on 2026-10-27 |
+| Reviewed against | `develop` at `7bf6c6e` on 2026-10-28 |
 | Language and style | English; concise academic register; claims carry evidence or are marked as assumptions |
 | Audience | Engineers, reviewers and partners evaluating the core; public repository |
 
