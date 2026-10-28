@@ -333,6 +333,36 @@ def test_forecast_database_tls_refuses_unverified_remote_hosts(mode):
         train.check_database_tls(url)
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "postgresql://reader@localhost/estaciona?host=localhost&host=db.internal",
+        "postgresql://reader@localhost/estaciona?host=localhost,db.internal",
+        "postgresql://reader@localhost/estaciona?hostaddr=203.0.113.5",
+        "postgresql://reader@/estaciona?host=/run/postgresql&host=db.internal",
+        "postgresql://reader@db.internal/estaciona?host=localhost",
+        "postgresql://reader@/estaciona",
+    ],
+)
+def test_forecast_database_tls_checks_every_host_libpq_may_try(url):
+    with pytest.raises(ValueError, match="verify-full"):
+        train.check_database_tls(url)
+    separator = "&" if "?" in url else "?"
+    train.check_database_tls(f"{url}{separator}sslmode=verify-full")
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "postgresql://reader@localhost/estaciona?host=/run/postgresql&host=127.0.0.2",
+        "postgresql://reader@localhost/estaciona?hostaddr=127.0.0.1",
+        "postgresql://reader@[::1]/estaciona?host=localhost,::1",
+    ],
+)
+def test_forecast_database_tls_accepts_only_local_host_lists(url):
+    train.check_database_tls(url)
+
+
 def test_forecast_database_on_a_declared_private_network(monkeypatch):
     remote = "postgresql://reader@db/estaciona?sslmode={}"
     for mode in ("disable", "require", "verify-ca", "verify-full"):

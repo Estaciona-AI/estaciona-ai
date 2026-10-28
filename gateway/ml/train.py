@@ -4,6 +4,7 @@
 #
 
 import hashlib
+import ipaddress
 import json
 import os
 import warnings
@@ -48,21 +49,39 @@ else:
 load_dotenv(os.path.join(os.path.dirname(__file__), "../../.env"))
 
 
-LOCAL_DATABASE_HOSTS = ("localhost", "127.0.0.1", "::1")
 PRIVATE_NETWORK_SSL_MODES = ("disable", "require", "verify-ca", "verify-full")
+
+
+def _database_hosts(parsed):
+    """Every address libpq may connect to: the URL host and each `host` or
+    `hostaddr` parameter, which may repeat or list hosts separated by commas."""
+    values = [parsed.host] if parsed.host else []
+    for key in ("host", "hostaddr"):
+        value = parsed.query.get(key, ())
+        values.extend((value,) if isinstance(value, str) else value)
+    return [host.strip() for value in values for host in value.split(",")]
+
+
+def _is_local_host(host):
+    host = host.strip("[]")
+    if host.startswith("/") or host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def check_database_tls(url, network=None):
     """The server's policy: a remote database needs sslmode=verify-full unless
     ML_DATABASE_NETWORK=private declares a private network. libpq defaults to
-    the opportunistic "prefer", which is never enough for a remote host."""
+    the opportunistic "prefer", which is never enough for a remote host. With
+    several hosts libpq tries each in turn, so all of them must be local."""
     if network not in (None, "private"):
         raise ValueError('ML_DATABASE_NETWORK accepts only "private"')
     parsed = make_url(url)
-    host = parsed.query.get("host") or parsed.host or ""
-    if isinstance(host, tuple):
-        host = host[0]
-    if host.startswith("/") or host.strip("[]") in LOCAL_DATABASE_HOSTS:
+    hosts = _database_hosts(parsed)
+    if hosts and all(_is_local_host(host) for host in hosts):
         return
     mode = parsed.query.get("sslmode", "prefer")
     allowed = PRIVATE_NETWORK_SSL_MODES if network == "private" else ("verify-full",)
