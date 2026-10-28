@@ -222,6 +222,34 @@ mod tests {
     }
 
     #[test]
+    fn route_costs_follow_the_map_geometry() {
+        // A 0.5 m path that does not start at the origin, so a mirrored or
+        // shifted interpolation cannot reproduce the same distances.
+        let mut site = site("A-01", 0.0);
+        site.parkings[0].path = vec![PathNode { x: 1.0, z: 1.0 }, PathNode { x: 1.3, z: 1.4 }];
+        site.spots[0].center_3d = Coords3D {
+            x: 1.3,
+            y: 0.0,
+            z: 1.5,
+        };
+        let graph = build(&site).unwrap();
+        let (cost, route) = graph.route_from_nearest_entrance("A-01").unwrap();
+        // Four 0.125 m waypoints, then 0.1 m to the spot, in millimetres.
+        assert_eq!(
+            route,
+            [
+                "cam-01",
+                "path_node_1",
+                "path_node_2",
+                "path_node_3",
+                "path_node_4",
+                "A-01"
+            ]
+        );
+        assert!((595..=600).contains(&cost), "{cost}");
+    }
+
+    #[test]
     fn actual_generated_names_are_rejected() {
         for id in ["cam-01", "path_node_1", "path_node_7"] {
             let site = site(id, 1.0);
