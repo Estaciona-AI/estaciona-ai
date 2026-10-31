@@ -239,6 +239,10 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
 - A map whose path would expand to more than 50,000 navigation waypoints, or
   with more than 10,000 spots, is refused when it is loaded or written,
   instead of exhausting memory when the server builds its graph.
+- An entry of `WS_ALLOWED_ORIGINS` whose port a browser never sends (a leading
+  zero, an empty port, 0 or above 65535) now stops the server at start-up.
+  Before, the server started and then refused every WebSocket and CORS request
+  from that application.
 
 ### Security
 

@@ -1,6 +1,6 @@
 # 6. Evidence register
 
-Status as of `develop` at `9036d10` (2026-10-27). Classes follow
+Status as of `develop` at `7bf6c6e` (2026-10-28). Classes follow
 [Methodology §1](05-methodology.md#1-evidence-standard).
 
 ## 6.1 Verified facts
@@ -17,7 +17,8 @@ Status as of `develop` at `9036d10` (2026-10-27). Classes follow
 | F-08 | The installation database stores no e-mail address or password hash; sign-in is delegated to the identity provider. | Code | `CHANGELOG.md` *Unreleased*; `server/src/identity/` |
 | F-09 | Personal fields kept by the server are encrypted at rest with AES-256-GCM under keys read from a file the database never receives. | Code, test | `server/src/personal_data/` |
 | F-10 | Historical local snapshot at `78a14eb`: server 390 passed against a disposable database; vision 407 passed; gateway 179 passed and 170 integration tests skipped without a running server. Superseded as the current verification snapshot by F-11; the skipped tests were not local passes. | Test | Initial documentation in #218; [Testing §7.4](07-testing.md#74-verification-snapshot) |
-| F-11 | At `9036d10` on 2026-10-27, CI passed: server 390; vision 407; gateway and forecast 383, including required server integration; contracts 36; identity tools 17; RTSP laboratory 1. | Test | [CI run 40567080230](https://github.com/Estaciona-AI/estaciona-ai/actions/runs/40567080230); [conditions](07-testing.md#74-verification-snapshot) |
+| F-11 | At `9036d10` on 2026-10-27, CI passed: server 390; vision 407; gateway and forecast 383, including required server integration; contracts 36; identity tools 17; RTSP laboratory 1. Superseded as the current verification snapshot by F-12. | Test | [CI run 40567080230](https://github.com/Estaciona-AI/estaciona-ai/actions/runs/40567080230) |
+| F-12 | At `7bf6c6e` on 2026-10-28, CI passed: server 407; vision 407; gateway and forecast 395, including required server integration; contracts 36; identity tools 17; RTSP laboratory 1. | Test | [CI run 40738777401](https://github.com/Estaciona-AI/estaciona-ai/actions/runs/40738777401); [conditions](07-testing.md#74-verification-snapshot) |
 
 ## 6.2 Assumptions
 

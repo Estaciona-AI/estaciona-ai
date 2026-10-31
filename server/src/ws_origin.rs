@@ -108,9 +108,17 @@ fn is_canonical_http_origin(origin: &str) -> bool {
     {
         return false;
     }
-    if let Some(port) = authority.port() {
-        let port = port.as_u16();
-        if (scheme == "http" && port == 80) || (scheme == "https" && port == 443) {
+    // Credentials are refused above, so the authority is the host and an optional
+    // port. A browser writes a port without leading zeros and omits the default.
+    if let Some(port) = authority.as_str()[authority.host().len()..].strip_prefix(':') {
+        let Ok(number) = port.parse::<u16>() else {
+            return false;
+        };
+        if number == 0
+            || port != number.to_string()
+            || (scheme == "http" && number == 80)
+            || (scheme == "https" && number == 443)
+        {
             return false;
         }
     }
@@ -214,6 +222,9 @@ mod tests {
             "https://a.example:80",
             "http://a.example:443",
             "https://127.0.0.1:8443",
+            "https://[::1]:8443",
+            "http://a.example:1",
+            "http://a.example:65535",
         ] {
             assert!(is_canonical_http_origin(origin), "{origin}");
         }
@@ -229,6 +240,25 @@ mod tests {
             "https://a.example:443",
         ] {
             assert!(!is_canonical_http_origin(origin), "{origin}");
+        }
+        // A browser never sends these ports, so an entry written this way would
+        // start the server and then refuse its own app.
+        for origin in [
+            "https://a.example:08443",
+            "http://localhost:05173",
+            "https://[::1]:08443",
+            "https://a.example:",
+            "https://a.example:0",
+            "https://a.example:65536",
+            "https://a.example:99999",
+            "https://a.example:+8443",
+        ] {
+            assert!(!is_canonical_http_origin(origin), "{origin}");
+            assert_eq!(
+                WsOriginPolicy::parse(origin).unwrap_err(),
+                WsOriginConfigError::InvalidOrigin,
+                "{origin}"
+            );
         }
     }
 

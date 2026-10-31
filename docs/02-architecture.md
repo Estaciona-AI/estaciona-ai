@@ -124,8 +124,8 @@ the current design does not imply coordination between replicas (D-08).
    credential with explicit grants checked on every event.
 4. **Browser → server.** Authenticated sessions established through the identity
    provider; origins are restricted to the installation's applications.
-5. **Server → database.** A role that reads and writes rows but cannot change
-   the schema.
+5. **Server and forecast worker → database.** The server's role reads and
+   writes rows but cannot change the schema; the worker's role only reads.
 6. **Server → identity provider.** OpenID Connect with a confidential client per
    installation.
 
