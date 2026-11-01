@@ -1,6 +1,6 @@
 # 6. Evidence register
 
-Status as of `develop` at `7bf6c6e` (2026-10-28). Classes follow
+Status as of `develop` at `e8a1a7b` (2026-11-01). Classes follow
 [Methodology §1](05-methodology.md#1-evidence-standard).
 
 ## 6.1 Verified facts
@@ -9,16 +9,17 @@ Status as of `develop` at `7bf6c6e` (2026-10-28). Classes follow
 |---|---|---|---|
 | F-01 | `v0.9.0` is the first non-pre-release build, published on 2026-10-23 as a pilot release. | Code | Tag `v0.9.0`; `CHANGELOG.md` |
 | F-02 | Each installation runs its own server and PostgreSQL database, bound to explicit organization, installation and environment identifiers. | Code, test | `server/src/installation/`; isolation tests (#133–#135) |
-| F-03 | The published contract bundle on `develop` is version 2.0.0, under the HTTP prefix `/api/v1`. | Code | `shared/v1/manifest.json` |
+| F-03 | The published contract bundle in `v0.10.0` is version 2.0.0, under the HTTP prefix `/api/v1`. | Code | `shared/v1/manifest.json` |
 | F-04 | Persisted supported events keep one UUID across retries and are acknowledged only after the receiver's commit, at both delivery hops. A local persistence ACK is distinct from a server receipt. | Code, test | `vision/src/delivery.py`, `gateway/gateway.py`, `server/src/edge_delivery.rs`; [delivery semantics](02-architecture.md#22-data-flows) |
 | F-05 | In a transport-only staging test with 400 synthetic spot IDs and 20 cameras, an in-flight window of eight raised confirmation throughput from 6.1 to 15.7 events/s and lowered p95 latency from 91.9 s to 0.68 s. | Measurement | #154 |
 | F-06 | With spot-only tiles and TensorRT FP16 RT-DETR-R18, the minimum per-input rate at 10 inputs rose from 0.53 to 2.48 FPS on a desktop RTX 5060 Ti used as a proxy; resident memory per process fell from 3.7 GB to 1.35 GB. | Measurement | #152, #153, #155, #156 |
 | F-07 | On the laboratory corpus, detections agreed with a larger reference detector in 924 of 924 comparisons. | Measurement | `CHANGELOG.md` `v0.9.0` |
-| F-08 | The installation database stores no e-mail address or password hash; sign-in is delegated to the identity provider. | Code | `CHANGELOG.md` *Unreleased*; `server/src/identity/` |
+| F-08 | The installation database stores no e-mail address or password hash; sign-in is delegated to the identity provider. | Code | `CHANGELOG.md` `v0.10.0`; `server/src/identity/` |
 | F-09 | Personal fields kept by the server are encrypted at rest with AES-256-GCM under keys read from a file the database never receives. | Code, test | `server/src/personal_data/` |
 | F-10 | Historical local snapshot at `78a14eb`: server 390 passed against a disposable database; vision 407 passed; gateway 179 passed and 170 integration tests skipped without a running server. Superseded as the current verification snapshot by F-11; the skipped tests were not local passes. | Test | Initial documentation in #218; [Testing §7.4](07-testing.md#74-verification-snapshot) |
 | F-11 | At `9036d10` on 2026-10-27, CI passed: server 390; vision 407; gateway and forecast 383, including required server integration; contracts 36; identity tools 17; RTSP laboratory 1. Superseded as the current verification snapshot by F-12. | Test | [CI run 40567080230](https://github.com/Estaciona-AI/estaciona-ai/actions/runs/40567080230) |
 | F-12 | At `7bf6c6e` on 2026-10-28, CI passed: server 407; vision 407; gateway and forecast 395, including required server integration; contracts 36; identity tools 17; RTSP laboratory 1. | Test | [CI run 40738777401](https://github.com/Estaciona-AI/estaciona-ai/actions/runs/40738777401); [conditions](07-testing.md#74-verification-snapshot) |
+| F-13 | `v0.10.0` was published on 2026-11-01 as a pilot release, with a signed tag on `c25db55`. CI passed at that commit; since F-12 the code changed only in component version fields, so F-12 remains the current verification snapshot. | Code, test | Tag `v0.10.0`; #229, #230; [CI run 41262972618](https://github.com/Estaciona-AI/estaciona-ai/actions/runs/41262972618) |
 
 ## 6.2 Assumptions
 

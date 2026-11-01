@@ -8,7 +8,7 @@ the site to a backend, and serves current state, reservations, in-lot routing
 and short-term occupancy forecasts to client applications. This repository
 contains the *core*: the backend server, the edge gateway, the vision service,
 the forecast worker, the wire contracts, the infrastructure definitions and
-supporting tools. Release `v0.9.0` (2026-10-23) is the first pilot release:
+supporting tools. Release `v0.10.0` (2026-11-01) is the current pilot release:
 it is intended for supervised pilot installations and has not yet been
 validated at its target capacity or with a full set of real cameras
 ([Evidence register](06-evidence-register.md)).
