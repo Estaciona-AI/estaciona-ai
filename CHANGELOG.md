@@ -12,6 +12,18 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-31
+
+**Release stage: pilot.** This release protects personal data and moves sign-in
+to a central identity provider. Plates are no longer collected, birth date and
+disability status are encrypted per field, the server runs with a database role
+that cannot change the schema, and accounts live in Keycloak with TOTP for
+administrators. The forecast runs as its own worker on a LightGBM model, and the
+wire contract is published as 2.0.0. The upgrade is not compatible with `0.9.0`
+apps or databases: read the upgrade notes before upgrading an installation.
+Capacity on the target hardware and field validation with real cameras are
+still pending.
+
 ### Upgrade notes
 
 - **Vehicle plates are no longer collected.** The migration drops
@@ -584,7 +596,8 @@ First prototype, published as a pre-release.
   model.
 - Web app with role-based registration and an admin dashboard.
 
-[Unreleased]: https://github.com/Estaciona-AI/estaciona-ai/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/Estaciona-AI/estaciona-ai/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/Estaciona-AI/estaciona-ai/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/Estaciona-AI/estaciona-ai/compare/beta-1.0...v0.9.0
 [beta-1.0]: https://github.com/Estaciona-AI/estaciona-ai/compare/alpha-0.1...beta-1.0
 [alpha-0.1]: https://github.com/Estaciona-AI/estaciona-ai/releases/tag/alpha-0.1

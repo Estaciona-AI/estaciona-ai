@@ -7,7 +7,7 @@ forecasting, contracts and repository automation. Customer deployments and the
 web hub have separate configurations and must be assessed independently.
 
 Security fixes target the current `main` release line and `develop`. The current
-release line is `0.9.x` (pilot); earlier `alpha-*` and `beta-*` releases are not
+release line is `0.10.x` (pilot); earlier `alpha-*` and `beta-*` releases are not
 maintained. A pilot release does not certify an installation as production ready.
 
 ## Report a vulnerability privately
