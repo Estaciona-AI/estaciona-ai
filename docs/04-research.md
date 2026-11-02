@@ -47,8 +47,8 @@ exposes interpretable, calibratable parameters per detector profile.
 
 ### D-04 Forecast model: calendar-aware gradient boosting with a simulated prior
 
-*Alternatives.* An attention-based sequence model (removed in the unreleased
-changes, together with `torch` in the forecast); naive seasonal baselines only.
+*Alternatives.* An attention-based sequence model (removed in `v0.10.0`,
+together with `torch` in the forecast); naive seasonal baselines only.
 *Decision.* LightGBM [2] on calendar and lag features, trained on simulated
 campuses around the site profile pooled with real history (real hours weighted
 more). An evaluated rolling backtest selects the lowest-error method among the
@@ -76,7 +76,7 @@ misleading coordinates do not change the route (`server/src/pathfinding.rs`).
 ### D-07 Identity: central provider instead of local accounts
 
 *Alternatives.* Local registration and password login in each installation
-(removed in the unreleased changes).
+(removed in `v0.10.0`).
 *Decision.* Keycloak as a central OpenID Connect provider [4]; each installation
 is a confidential client using the authorization code flow with PKCE [5]. The
 installation database keeps no e-mail address or password.

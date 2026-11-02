@@ -75,7 +75,7 @@ ownership; lifetimes come from the installation's reservation policy
 
 The JSON Schemas are generated from the server's Rust types and exported with
 `--export-contracts`. The schema bundle is versioned independently of the
-release (2.0.0 on `develop`); continuous integration refuses an incompatible
+release (2.0.0 in `v0.10.0`); continuous integration refuses an incompatible
 change published under the same major version.
 
 Three version identifiers have different scopes: the release tag identifies the
