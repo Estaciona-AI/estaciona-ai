@@ -354,11 +354,20 @@ def require_second_factor(kc: Keycloak, user_id: str, role: str) -> None:
     the first sign-in asks them to set the code up."""
     if role != "admin":
         return
-    kc.call(
-        "POST",
-        f"/users/{user_id}/role-mappings/realm",
-        body=[kc.call("GET", f"/roles/{MFA_ROLE}")],
-    )
+    mappings = f"/users/{user_id}/role-mappings/realm"
+    # The provisioner holds no view-realm, so it cannot read a realm role by name;
+    # it can list the realm roles this account may still receive.
+    missing = [
+        found
+        for found in kc.call("GET", f"{mappings}/available")
+        if found["name"] == MFA_ROLE
+    ]
+    if missing:
+        kc.call("POST", mappings, body=missing)
+    elif not any(
+        r["name"] == MFA_ROLE for r in kc.call("GET", f"{mappings}/composite")
+    ):
+        raise ProvisionError(f"realm role {MFA_ROLE} cannot be given to this account")
 
 
 def grant_access(kc: Keycloak, args) -> dict:

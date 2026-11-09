@@ -29,6 +29,8 @@ class FakeKeycloak:
         self.requests = []
         self.clients = {"hub-uuid": {"clientId": "hub"}}
         self.users = {}
+        self.user_realm_roles = {}
+        self.mappable_realm_roles = {"estaciona-mfa", "offline_access"}
         self.username_conflicts = 0
         self.fail = set()
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), self.handler())
@@ -105,9 +107,14 @@ class FakeKeycloak:
                 [{"id": u} for u, c in self.clients.items() if c["clientId"] == wanted],
                 None,
             )
-        match = re.fullmatch(r"/roles/([^/]+)", path)
-        if method == "GET" and match:
-            return 200, {"id": f"realm-role-{match[1]}", "name": match[1]}, None
+        if method == "GET" and re.fullmatch(r"/roles/[^/]+", path):
+            # As on the real server: the provisioner holds no view-realm.
+            return 403, {"error": "HTTP 403 Forbidden"}, None
+        match = re.fullmatch(
+            r"/users/([^/]+)/role-mappings/realm(/available|/composite)?", path
+        )
+        if match:
+            return self.realm_mappings(method, match[1], match[2], body)
         match = re.fullmatch(r"/clients/([^/]+)/roles/([^/]+)", path)
         if method == "GET" and match:
             return 200, {"id": f"role-{match[2]}", "name": match[2]}, None
@@ -142,6 +149,14 @@ class FakeKeycloak:
         if method == "POST" and path.endswith("/roles"):
             return 201, None, f"{self.url}{ADMIN}{path}/{body['name']}"
         return 204, None, None
+
+    def realm_mappings(self, method, user, listing, body):
+        held = self.user_realm_roles.setdefault(user, set())
+        if method == "POST" and listing is None:
+            held.update(role["name"] for role in body)
+            return 204, None, None
+        names = self.mappable_realm_roles - held if listing == "/available" else held
+        return 200, [{"id": f"realm-{n}", "name": n} for n in sorted(names)], None
 
 
 def private(directory, name, text, mode=0o600):
@@ -305,6 +320,34 @@ class ProvisionTest(unittest.TestCase):
         )
         self.assertEqual(code, 0)
         self.assertEqual(self.realm_roles(), [["estaciona-mfa"]])
+
+    def test_granting_admin_again_keeps_the_second_factor(self):
+        self.create(Path(self.directory) / "client.secret")
+        self.assertEqual(self.invite("--role", "admin", "--no-email")[0], 0)
+        code, _, _ = self.run_tool(
+            "user-grant",
+            "--email",
+            "pessoa@example.invalid",
+            "--installation",
+            "uniube-centro",
+            "--role",
+            "admin",
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(self.realm_roles(), [["estaciona-mfa"]])
+
+    def test_only_the_second_factor_role_is_mapped(self):
+        self.create(Path(self.directory) / "client.secret")
+        self.assertEqual(self.invite("--role", "admin", "--no-email")[0], 0)
+        self.assertEqual(self.fake.user_realm_roles["user-0"], {"estaciona-mfa"})
+
+    def test_an_admin_without_a_second_factor_is_not_created(self):
+        self.create(Path(self.directory) / "client.secret")
+        self.fake.mappable_realm_roles.discard("estaciona-mfa")
+        code, _, errors = self.invite("--role", "admin", "--no-email")
+        self.assertEqual(code, 1)
+        self.assertIn("estaciona-mfa", errors)
+        self.assertEqual(self.fake.users, {})
 
     def test_a_known_email_is_not_invited_twice(self):
         self.create(Path(self.directory) / "client.secret")
