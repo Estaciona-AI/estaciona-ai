@@ -5,8 +5,9 @@
 **/*.so
 __pycache__/
 .venv/
-*.pyc   
-**/pytest_cache
+*.pyc
+**/.pytest_cache/
+**/.ruff_cache/
 
 # Rust
 target/
@@ -37,6 +38,12 @@ reconstruction/colmap/
 *.pt
 *.pkl
 *.db
+*.onnx
+*.engine
+
+# Local logs and reports
+*.log
+test-results/
 
 # Experiments
 **/experiments/
