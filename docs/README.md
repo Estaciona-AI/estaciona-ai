@@ -10,14 +10,13 @@ authoritative operational sources listed below.
 | Field | Value |
 |---|---|
 | Scope | Core repository: server, gateway, vision, forecast worker, contracts, infrastructure and tools |
-| Release baseline | `v0.9.0` (pilot, 2026-10-23) plus the unreleased changes on `develop` |
-| Reviewed against | `develop` at `7bf6c6e` on 2026-10-28 |
+| Release baseline | `v0.10.0` (pilot, 2026-11-01) |
+| Reviewed against | `develop` at `e8a1a7b` on 2026-11-01 |
 | Language and style | English; concise academic register; claims carry evidence or are marked as assumptions |
 | Audience | Engineers, reviewers and partners evaluating the core; public repository |
 
-The reviewed `develop` includes changes not present in `v0.9.0`. Descriptions of
-the current code do not imply that those changes were included in that release.
-The dated [verification snapshot](07-testing.md#74-verification-snapshot)
+The reviewed `develop` matches the `v0.10.0` release commit except for merge
+metadata. The dated [verification snapshot](07-testing.md#74-verification-snapshot)
 identifies the executions checked for this revision.
 
 ## Contents
