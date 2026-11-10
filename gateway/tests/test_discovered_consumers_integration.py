@@ -4,6 +4,7 @@
 """Synthetic consumers discover a real core; no customer panel or ML is mocked in."""
 
 import asyncio
+from contextlib import suppress
 import datetime
 import json
 import os
@@ -18,7 +19,8 @@ from websockets.exceptions import InvalidStatus
 
 from contract_validation import ContractValidator
 
-from test_delivery_integration import KEY, server as delivery_server
+import gateway
+from test_delivery_integration import KEY, server as delivery_server, until
 from test_rest_contract_integration import call
 from test_session_integration import insert_user, token
 
@@ -420,6 +422,79 @@ def test_edge_and_dashboard_consumers_observe_committed_occupancy_and_forecast(
                 await receive(dashboard, "TREND_PREDICTION_V2", consumer, "dashboard")
                 == forecast
             )
+
+    asyncio.run(run())
+
+
+def test_dashboard_is_not_shown_a_drained_backlog_as_current_occupancy(
+    consumer, tmp_path
+):
+    """What a gateway held through an outage is history when it finally arrives."""
+    server = consumer.server
+    admin_id = insert_user(server, role="admin")
+    bearer = token(server, admin_id, "admin", int(time.time()) + 120)
+    now = datetime.datetime.now(datetime.UTC)
+    outbox, metrics = str(tmp_path / "outbox.db"), str(tmp_path / "metrics.db")
+    gateway.init_db(outbox)
+    gateway.init_metrics_db(metrics)
+
+    def seen(status, age):
+        gateway.save_event(
+            outbox,
+            json.dumps(
+                {
+                    "type": "SPOT_UPDATE",
+                    "spot_id": "R02-A",
+                    "status": status,
+                    "camera_id": "test-camera",
+                    "confidence": 0.9,
+                    "timestamp": (now - age).isoformat(),
+                }
+            ),
+        )
+
+    async def drain():
+        delivery = asyncio.create_task(
+            gateway.sync_loop(outbox, metrics, server.url, KEY, asyncio.Event())
+        )
+        try:
+            await until(lambda: not gateway.pending_deliveries(outbox))
+        finally:
+            delivery.cancel()
+            with suppress(asyncio.CancelledError):
+                await delivery
+
+    async def shown(dashboard):
+        return (await receive(dashboard, "SPOT_UPDATE", consumer, "dashboard"))[
+            "status"
+        ]
+
+    def open_dashboard():
+        return websockets.connect(
+            consumer.ticket_url("dashboard", bearer), origin="http://localhost"
+        )
+
+    async def run():
+        # The server last heard of the spot ten minutes ago.
+        server.query(
+            "UPDATE spots SET observation_timestamp = NOW() - INTERVAL '10 minutes'"
+        )
+        async with open_dashboard() as dashboard:
+            assert await shown(dashboard) == "unknown"
+            # The gateway reconnects and delivers what the camera saw five
+            # minutes ago; nothing newer exists.
+            seen("occupied", datetime.timedelta(minutes=5))
+            await drain()
+            assert server.query("SELECT status FROM spots WHERE id='R02-A'") == [
+                ("occupied",)
+            ]
+            async with open_dashboard() as opened_now:
+                assert await shown(opened_now) == "unknown"
+            # The camera reports again. The panel that stayed connected goes
+            # from unknown to this reading, never through the old one.
+            seen("free", datetime.timedelta(0))
+            await drain()
+            assert await shown(dashboard) == "free"
 
     asyncio.run(run())
 
