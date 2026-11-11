@@ -1291,9 +1291,10 @@ async fn a_quiet_spot_given_a_status_again_is_announced_unknown_again(pool: PgPo
     sweeper.sweep(&f.state).await.unwrap();
     assert_eq!(updates.recv().await.unwrap(), frame("unknown"));
 
-    // An administrator sets the status by hand while the camera stays quiet:
-    // connected clients are shown it, a client connecting now is not.
-    f.update_spot("occupied").await;
+    // A status is published while the camera stays quiet (a reading that went
+    // stale before the sweep): connected clients are shown it, a client
+    // connecting now is not.
+    f.state.installation.tx.send(frame("occupied")).unwrap();
     assert_eq!(updates.recv().await.unwrap(), frame("occupied"));
     let snapshot: Vec<(String, String)> = sqlx::query_as(crate::freshness::SNAPSHOT_SQL)
         .bind(crate::freshness::stale_after_secs())
@@ -1308,6 +1309,55 @@ async fn a_quiet_spot_given_a_status_again_is_announced_unknown_again(pool: PgPo
         std::slice::from_ref(&f.spot_id)
     );
     assert_eq!(updates.recv().await.unwrap(), frame("unknown"));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_status_set_by_hand_is_shown_as_manual_and_never_swept(pool: PgPool) {
+    let f = Fixture::new(pool).await.unwrap();
+    let mut updates = f.state.installation.tx.subscribe();
+    let mut sweeper = crate::freshness::Sweeper::starting(&f.state).await;
+    observed(&f, &f.spot_id, Some(600)).await;
+    sweeper.sweep(&f.state).await.unwrap();
+    assert!(
+        updates
+            .recv()
+            .await
+            .unwrap()
+            .contains(r#""status":"unknown""#)
+    );
+
+    f.update_spot("occupied").await;
+    assert_eq!(
+        updates.recv().await.unwrap(),
+        format!(
+            r#"{{"type":"SPOT_UPDATE","spot_id":"{}","status":"occupied","manual":true}}"#,
+            f.spot_id
+        )
+    );
+    // A client connecting now is told the same, and that it is manual.
+    let snapshot: Vec<(String, String, bool)> = sqlx::query_as(crate::freshness::SNAPSHOT_SQL)
+        .bind(crate::freshness::stale_after_secs())
+        .fetch_all(f.state.installation.pool())
+        .await
+        .unwrap();
+    assert!(snapshot.contains(&(f.spot_id.clone(), "occupied".to_owned(), true)));
+    // It is not a reading, so it does not go stale like one.
+    assert!(sweeper.sweep(&f.state).await.unwrap().is_empty());
+    assert!(updates.try_recv().is_err());
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_reservation_replaces_a_status_set_by_hand(pool: PgPool) {
+    let f = Fixture::new(pool).await.unwrap();
+    f.update_spot("free").await;
+    f.create_for_owner().await;
+    let manual: bool =
+        sqlx::query_scalar("SELECT manual_since IS NOT NULL FROM spots WHERE id = $1")
+            .bind(&f.spot_id)
+            .fetch_one(f.state.installation.pool())
+            .await
+            .unwrap();
+    assert!(!manual);
 }
 
 #[sqlx::test(migrations = "./migrations")]

@@ -146,10 +146,7 @@ pub async fn car_detected(
     // Only committed actions may publish occupancy or private navigation.
     tx.commit().await?;
     if newly_reserved {
-        let update = ServerToAppMsg::SpotUpdate {
-            spot_id: spot_id.clone(),
-            status: "reserved".into(),
-        };
+        let update = ServerToAppMsg::spot(spot_id.clone(), "reserved");
         if let Ok(json) = serde_json::to_string(&update) {
             let _ = state.installation.tx.send(json);
         }

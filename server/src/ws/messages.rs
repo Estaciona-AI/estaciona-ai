@@ -189,6 +189,10 @@ pub enum ServerToAppMsg {
         spot_id: String,
         #[schemars(schema_with = "crate::contracts::spot_status_schema")]
         status: String,
+        /// Set by an administrator and not confirmed by a newer reading.
+        /// Omitted when false.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        manual: bool,
     },
     #[serde(rename = "TREND_PREDICTION")]
     TrendPrediction {
@@ -201,6 +205,17 @@ pub enum ServerToAppMsg {
     },
     #[serde(rename = "TREND_PREDICTION_V2")]
     TrendPredictionV2(ForecastV2),
+}
+
+impl ServerToAppMsg {
+    /// A status from a reading, a reservation or the freshness rule.
+    pub fn spot(spot_id: impl Into<String>, status: impl Into<String>) -> Self {
+        Self::SpotUpdate {
+            spot_id: spot_id.into(),
+            status: status.into(),
+            manual: false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -328,13 +343,33 @@ mod tests {
 
     #[test]
     fn server_spot_update_serializes() {
+        let msg = ServerToAppMsg::spot("A-01", "reserved");
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(
+            json, r#"{"type":"SPOT_UPDATE","spot_id":"A-01","status":"reserved"}"#,
+            "a status that is not manual keeps the 2.0 shape"
+        );
+    }
+
+    #[test]
+    fn manual_spot_update_says_so() {
         let msg = ServerToAppMsg::SpotUpdate {
-            spot_id: "A-01".to_string(),
-            status: "reserved".to_string(),
+            spot_id: "A-01".into(),
+            status: "free".into(),
+            manual: true,
         };
         let json = serde_json::to_string(&msg).unwrap();
-        assert!(json.contains(r#""type":"SPOT_UPDATE""#));
-        assert!(json.contains(r#""status":"reserved""#));
+        assert_eq!(
+            json,
+            r#"{"type":"SPOT_UPDATE","spot_id":"A-01","status":"free","manual":true}"#
+        );
+        let ServerToAppMsg::SpotUpdate { manual, .. } =
+            serde_json::from_str(r#"{"type":"SPOT_UPDATE","spot_id":"A-01","status":"free"}"#)
+                .unwrap()
+        else {
+            panic!("wrong variant");
+        };
+        assert!(!manual, "absent means read, not manual");
     }
 
     #[test]

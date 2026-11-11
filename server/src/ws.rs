@@ -19,6 +19,17 @@ use crate::ws::messages::{AppToServerMsg, ServerToAppMsg};
 struct SpotRow {
     id: String,
     status: String,
+    manual: bool,
+}
+
+impl From<SpotRow> for ServerToAppMsg {
+    fn from(row: SpotRow) -> Self {
+        Self::SpotUpdate {
+            spot_id: row.id,
+            status: row.status,
+            manual: row.manual,
+        }
+    }
 }
 
 pub(crate) async fn handle_app_socket(socket: WebSocket, state: SharedState, session: AuthSession) {
@@ -50,10 +61,7 @@ pub(crate) async fn handle_app_socket(socket: WebSocket, state: SharedState, ses
             })?;
         for row in db_spots {
             session.check_expiration()?;
-            let msg = ServerToAppMsg::SpotUpdate {
-                spot_id: row.id,
-                status: row.status,
-            };
+            let msg = ServerToAppMsg::from(row);
             if let Ok(json_str) = serde_json::to_string(&msg)
                 && write_message(&mut sender, Message::Text(json_str.into()))
                     .await
@@ -111,10 +119,7 @@ pub(crate) async fn handle_app_socket(socket: WebSocket, state: SharedState, ses
                                     .expect("created reservation has expiry"),
                             };
 
-                            let update = ServerToAppMsg::SpotUpdate {
-                                spot_id: spot_id.clone(),
-                                status: "reserved".to_string(),
-                            };
+                            let update = ServerToAppMsg::spot(spot_id.clone(), "reserved");
 
                             if let Ok(json) = serde_json::to_string(&confirm) {
                                 let _ = private_tx.try_send(json);
@@ -151,10 +156,7 @@ pub(crate) async fn handle_app_socket(socket: WebSocket, state: SharedState, ses
                         {
                             Ok(Some(transition)) => {
                                 if let Some(status) = transition.spot_status {
-                                    let update = ServerToAppMsg::SpotUpdate {
-                                        spot_id: transition.spot_id,
-                                        status: status.to_string(),
-                                    };
+                                    let update = ServerToAppMsg::spot(transition.spot_id, status);
                                     if let Ok(json) = serde_json::to_string(&update) {
                                         let _ = value.installation.tx.send(json);
                                     }
@@ -217,10 +219,7 @@ pub(crate) async fn handle_dashboard_socket(
             })?;
         for row in db_spots {
             session.check_expiration()?;
-            let msg = ServerToAppMsg::SpotUpdate {
-                spot_id: row.id,
-                status: row.status,
-            };
+            let msg = ServerToAppMsg::from(row);
             if let Ok(json_str) = serde_json::to_string(&msg)
                 && write_message(&mut sender, Message::Text(json_str.into()))
                     .await

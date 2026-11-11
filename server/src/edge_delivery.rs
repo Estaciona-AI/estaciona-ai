@@ -114,11 +114,12 @@ async fn observe(
             // Effect and watermark share the same UPDATE, transaction and lock.
             // An accepted observation may still be too old to show: a backlog
             // drained after an outage. The snapshot's rule decides, on its clock.
-            let current: Option<bool> = sqlx::query_scalar("UPDATE spots SET observation_timestamp=$3,status=CASE WHEN $4 THEN status ELSE $2 END,last_updated=CASE WHEN $4 THEN last_updated ELSE NOW() END WHERE id=$1 AND (observation_timestamp IS NULL OR observation_timestamp<$3) RETURNING observation_timestamp > NOW() - make_interval(secs => $5)")
+            // A status set by hand stands until a reading newer than it.
+            let current: Option<(bool, bool)> = sqlx::query_as("UPDATE spots SET observation_timestamp=$3,status=CASE WHEN $4 OR manual_since>=$3 THEN status ELSE $2 END,last_updated=CASE WHEN $4 OR manual_since>=$3 THEN last_updated ELSE NOW() END,manual_since=CASE WHEN manual_since>=$3 THEN manual_since END WHERE id=$1 AND (observation_timestamp IS NULL OR observation_timestamp<$3) RETURNING observation_timestamp > NOW() - make_interval(secs => $5), manual_since IS NOT NULL")
                 .bind(spot_id).bind(status).bind(timestamp).bind(protected)
                 .bind(crate::freshness::stale_after_secs())
                 .fetch_optional(&mut **tx).await?;
-            let Some(current) = current else {
+            let Some((current, manual)) = current else {
                 observation.outcome = Outcome::Ignored;
                 observation.reason = Some("stale_observation".to_owned());
                 return Ok(observation);
@@ -130,6 +131,11 @@ async fn observe(
             if protected {
                 observation.outcome = Outcome::Ignored;
                 observation.reason = Some("reservation_protected".to_owned());
+                return Ok(observation);
+            }
+            if manual {
+                observation.outcome = Outcome::Ignored;
+                observation.reason = Some("manual_status_newer".to_owned());
                 return Ok(observation);
             }
             if status == "free" {
@@ -1856,6 +1862,73 @@ mod tests {
             assert_eq!(result.ack.reason.as_deref(), Some("invalid_confidence"));
             assert_eq!(status(&pool, &spot_id).await?, "free");
         }
+        Ok(())
+    }
+
+    async fn set_by_hand(
+        pool: &PgPool,
+        spot_id: &str,
+        status: &str,
+        seconds_ago: i32,
+    ) -> TestResult {
+        sqlx::query(
+            "UPDATE spots SET status = $2, \
+             manual_since = NOW() - make_interval(secs => $3) WHERE id = $1",
+        )
+        .bind(spot_id)
+        .bind(status)
+        .bind(f64::from(seconds_ago))
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn manual_since(
+        pool: &PgPool,
+        spot_id: &str,
+    ) -> Result<Option<DateTime<Utc>>, sqlx::Error> {
+        sqlx::query_scalar("SELECT manual_since FROM spots WHERE id = $1")
+            .bind(spot_id)
+            .fetch_one(pool)
+            .await
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn a_reading_newer_than_a_status_set_by_hand_replaces_it(pool: PgPool) -> TestResult {
+        let principal = principal(&pool).await?;
+        let spot_id = authorized_spot(&pool, &principal, "free").await?;
+        set_by_hand(&pool, &spot_id, "occupied", 5).await?;
+        let delivery = apply(&pool, &principal, Uuid::new_v4(), payload(&spot_id, "free")).await?;
+        assert_eq!(delivery.ack.outcome, Outcome::Applied);
+        assert_eq!(status(&pool, &spot_id).await?, "free");
+        assert_eq!(manual_since(&pool, &spot_id).await?, None);
+        assert_eq!(delivery.spot_update, Some((spot_id, "free".to_owned())));
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn a_reading_older_than_a_status_set_by_hand_does_not_replace_it(
+        pool: PgPool,
+    ) -> TestResult {
+        let principal = principal(&pool).await?;
+        let spot_id = authorized_spot(&pool, &principal, "free").await?;
+        set_by_hand(&pool, &spot_id, "occupied", 0).await?;
+        // Taken before the administrator's change, delivered after it.
+        let mut earlier = payload(&spot_id, "free");
+        earlier["timestamp"] = json!(Utc::now() - chrono::Duration::seconds(20));
+        let delivery = apply(&pool, &principal, Uuid::new_v4(), earlier).await?;
+        assert_eq!(delivery.ack.outcome, Outcome::Ignored);
+        assert_eq!(delivery.ack.reason.as_deref(), Some("manual_status_newer"));
+        assert_eq!(delivery.spot_update, None);
+        assert_eq!(status(&pool, &spot_id).await?, "occupied");
+        assert!(manual_since(&pool, &spot_id).await?.is_some());
+        // The reading is still history and still advances the watermark.
+        let watermark: Option<DateTime<Utc>> =
+            sqlx::query_scalar("SELECT observation_timestamp FROM spots WHERE id = $1")
+                .bind(&spot_id)
+                .fetch_one(&pool)
+                .await?;
+        assert!(watermark.is_some());
         Ok(())
     }
 

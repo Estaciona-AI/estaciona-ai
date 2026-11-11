@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE spots SET status = $1, last_updated = NOW(), manual_since = NOW() WHERE id = $2 AND is_active",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "57e568a2ccfb22ffcd5441dbde59ed67f061b67e9c3315a74f9ec8e6ab456bf0"
+}
