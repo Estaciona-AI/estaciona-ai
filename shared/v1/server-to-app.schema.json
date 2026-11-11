@@ -402,6 +402,19 @@
         "type"
       ],
       "type": "object"
+    },
+    {
+      "description": "Sent on `/ws/dashboard` while the connection is open, so a client can\ntell a quiet site from a dead connection.",
+      "properties": {
+        "type": {
+          "const": "HEARTBEAT",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
     }
   ],
   "title": "ServerToAppMsg",

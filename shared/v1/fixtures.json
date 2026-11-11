@@ -161,6 +161,9 @@
       "type": "SPOT_UPDATE"
     },
     {
+      "type": "HEARTBEAT"
+    },
+    {
       "route": [
         "camera-01",
         "A-01"

@@ -99,6 +99,11 @@ def test_websocket_catalog_keeps_edge_and_browser_authority_separate():
     assert sockets["edge"]["authorization"] == "explicit_gateway_grants"
     assert sockets["edge"]["receive"]["schema"] == "v1/gateway-to-server.schema.json"
     assert sockets["app"]["receive"]["schema"] == "v1/app-to-server.schema.json"
+    # Only the dashboard promises a heartbeat; the app channel is unchanged.
+    keepalive = sockets["dashboard"]["keepalive"]
+    assert keepalive["message"] == "HEARTBEAT"
+    assert keepalive["interval_seconds"] < keepalive["idle_close_seconds"]
+    assert "keepalive" not in sockets["app"]
     local = catalog()["local_transport"]
     assert local["authentication"] == "local_shared_key"
     assert local["cloud_credential_reused"] is True

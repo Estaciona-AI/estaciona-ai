@@ -205,6 +205,10 @@ pub enum ServerToAppMsg {
     },
     #[serde(rename = "TREND_PREDICTION_V2")]
     TrendPredictionV2(ForecastV2),
+    /// Sent on `/ws/dashboard` while the connection is open, so a client can
+    /// tell a quiet site from a dead connection.
+    #[serde(rename = "HEARTBEAT")]
+    Heartbeat,
 }
 
 impl ServerToAppMsg {
@@ -370,6 +374,14 @@ mod tests {
             panic!("wrong variant");
         };
         assert!(!manual, "absent means read, not manual");
+    }
+
+    #[test]
+    fn heartbeat_is_a_bare_type() {
+        assert_eq!(
+            serde_json::to_string(&ServerToAppMsg::Heartbeat).unwrap(),
+            r#"{"type":"HEARTBEAT"}"#
+        );
     }
 
     #[test]
