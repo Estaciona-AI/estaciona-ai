@@ -368,10 +368,7 @@ async fn main() {
                             let _ = user_tx.try_send(json);
                         }
                         if let Some(status) = record.spot_status {
-                            let update_msg = ServerToAppMsg::SpotUpdate {
-                                spot_id: record.spot_id,
-                                status: status.to_string(),
-                            };
+                            let update_msg = ServerToAppMsg::spot(record.spot_id, status);
                             if let Ok(json) = serde_json::to_string(&update_msg) {
                                 let _ = state_for_bg_task.installation.tx.send(json);
                             }

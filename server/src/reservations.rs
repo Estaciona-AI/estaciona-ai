@@ -88,7 +88,8 @@ pub async fn update_spot_status(
         )
     })?;
     let changed = sqlx::query!(
-        "UPDATE spots SET status = $1, last_updated = NOW() WHERE id = $2 AND is_active",
+        "UPDATE spots SET status = $1, last_updated = NOW(), manual_since = NOW() \
+         WHERE id = $2 AND is_active",
         payload.status,
         id
     )
@@ -146,6 +147,7 @@ pub async fn update_spot_status(
     let update_msg = ServerToAppMsg::SpotUpdate {
         spot_id: id,
         status: payload.status,
+        manual: true,
     };
     if let Ok(json_str) = serde_json::to_string(&update_msg) {
         let _ = state.installation.tx.send(json_str);
@@ -185,10 +187,7 @@ pub async fn create_reservation(
         }
     })?;
 
-    let update_msg = ServerToAppMsg::SpotUpdate {
-        spot_id: payload.spot_id.clone(),
-        status: "reserved".to_string(),
-    };
+    let update_msg = ServerToAppMsg::spot(payload.spot_id.clone(), "reserved");
     if let Ok(json_str) = serde_json::to_string(&update_msg) {
         let _ = state.installation.tx.send(json_str);
     }
@@ -280,10 +279,7 @@ pub async fn cancel_reservation(
     match transition {
         Some(transition) => {
             if let Some(status) = transition.spot_status {
-                let update_msg = ServerToAppMsg::SpotUpdate {
-                    spot_id: transition.spot_id,
-                    status: status.to_string(),
-                };
+                let update_msg = ServerToAppMsg::spot(transition.spot_id, status);
                 if let Ok(json) = serde_json::to_string(&update_msg) {
                     let _ = state.installation.tx.send(json);
                 }
@@ -355,7 +351,7 @@ pub async fn extend_reservation(
     })?;
     match result {
         Some((spot_id, status)) => {
-            let update_msg = ServerToAppMsg::SpotUpdate { spot_id, status };
+            let update_msg = ServerToAppMsg::spot(spot_id, status);
             if let Ok(json) = serde_json::to_string(&update_msg) {
                 let _ = state.installation.tx.send(json);
             }

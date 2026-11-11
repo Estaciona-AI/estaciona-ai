@@ -24,7 +24,7 @@ mod catalog;
 /// version (shared/contract_compat.py enforces it in CI). The HTTP prefix
 /// stays `/api/v1`: each installation serves one generation of its apps,
 /// deployed together with the server.
-pub const VERSION: &str = "2.0.0";
+pub const VERSION: &str = "2.1.0";
 
 pub fn physical_state_schema(_: &mut SchemaGenerator) -> Schema {
     json_schema!({"type":"string","enum":["free","occupied"]})
@@ -271,7 +271,7 @@ pub fn fixtures() -> Value {
         "server-to-gateway":[fixture(ServerToEdgeMsg::Ready{delivery_version:1,durable_events:vec!["SPOT_UPDATE","PATH_UPDATE","TREND_PREDICTION","TREND_PREDICTION_V2","CAR_DETECTED"]}),fixture(ServerToEdgeMsg::Ack{version:1,event_id,outcome:"applied".into(),reason:None,duplicate:false})],
         "vision-to-gateway":[fixture(VisionToGateway::Event{version:1,event_id,payload:edge})],
         "gateway-to-vision":[fixture(GatewayToVision::Ready{delivery_version:1}),fixture(GatewayToVision::Ack{version:1,event_id,outcome:LocalOutcome::Persisted}),fixture(GatewayToVision::Ack{version:1,event_id,outcome:LocalOutcome::Duplicate}),fixture(GatewayToVision::Ack{version:1,event_id,outcome:LocalOutcome::Rejected})],
-        "server-to-app":[fixture(ServerToAppMsg::SpotUpdate{spot_id:"A-01".into(),status:"reserved".into()}),fixture(ServerToAppMsg::NavigationStart{spot_id:"A-01".into(),route:vec!["camera-01".into(),"A-01".into()]}),fixture(ServerToAppMsg::NavigationUnavailable{spot_id:"A-01".into(),reason:"no_route".into()}),fixture(ServerToAppMsg::ReservationConfirmed{reservation_id:event_id,spot_id:"A-01".into(),expires_at:timestamp}),fixture(ServerToAppMsg::ReservationExpired{spot_id:"A-01".into()}),fixture(ServerToAppMsg::ReservationRejected{spot_id:"A-01".into(),reason:"active_reservation_limit".into()}),fixture(public)]
+        "server-to-app":[fixture(ServerToAppMsg::spot("A-01","reserved")),fixture(ServerToAppMsg::SpotUpdate{spot_id:"A-01".into(),status:"free".into(),manual:true}),fixture(ServerToAppMsg::Heartbeat),fixture(ServerToAppMsg::NavigationStart{spot_id:"A-01".into(),route:vec!["camera-01".into(),"A-01".into()]}),fixture(ServerToAppMsg::NavigationUnavailable{spot_id:"A-01".into(),reason:"no_route".into()}),fixture(ServerToAppMsg::ReservationConfirmed{reservation_id:event_id,spot_id:"A-01".into(),expires_at:timestamp}),fixture(ServerToAppMsg::ReservationExpired{spot_id:"A-01".into()}),fixture(ServerToAppMsg::ReservationRejected{spot_id:"A-01".into(),reason:"active_reservation_limit".into()}),fixture(public)]
     });
     for evaluation in [
         json!({"status":"available","r2_score":-0.5,"mae":2.0,"rmse":3.0,"inference_time_ms":1.0}),

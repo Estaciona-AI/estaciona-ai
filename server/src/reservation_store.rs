@@ -87,7 +87,7 @@ pub async fn create_in_transaction(
         return Err(CreateError::UserLimit);
     }
     let claimed = sqlx::query(
-        "UPDATE spots SET status = 'reserved', last_updated = NOW() \
+        "UPDATE spots SET status = 'reserved', last_updated = NOW(), manual_since = NULL \
          WHERE id = $1 AND status = 'free' AND is_active \
          AND observation_timestamp > NOW() - make_interval(secs => $2)",
     )
@@ -186,7 +186,7 @@ pub async fn finish(
     let mut changed_status = None;
     if !matches!(reason, FinishReason::UnconfirmedOccupancy) {
         let released = sqlx::query(
-            "UPDATE spots SET status = 'free', last_updated = NOW() \
+            "UPDATE spots SET status = 'free', last_updated = NOW(), manual_since = NULL \
              WHERE id = $1 AND status = 'reserved'",
         )
         .bind(&spot_id)

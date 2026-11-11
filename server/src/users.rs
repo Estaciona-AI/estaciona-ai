@@ -325,7 +325,8 @@ pub async fn delete_account(
         .await
         .map_err(storage_error)?;
     let released: Vec<String> = sqlx::query_scalar(
-        "UPDATE spots SET status = 'free', last_updated = NOW() WHERE status = 'reserved' \
+        "UPDATE spots SET status = 'free', last_updated = NOW(), manual_since = NULL \
+         WHERE status = 'reserved' \
          AND id IN (SELECT spot_id FROM reservations WHERE user_id = $1 AND status = 'active') \
          RETURNING id",
     )
@@ -341,10 +342,7 @@ pub async fn delete_account(
         .map_err(storage_error)?;
     tx.commit().await.map_err(storage_error)?;
     for spot_id in released {
-        let update = crate::ws::messages::ServerToAppMsg::SpotUpdate {
-            spot_id,
-            status: "free".to_owned(),
-        };
+        let update = crate::ws::messages::ServerToAppMsg::spot(spot_id, "free");
         if let Ok(json) = serde_json::to_string(&update) {
             let _ = state.installation.tx.send(json);
         }
