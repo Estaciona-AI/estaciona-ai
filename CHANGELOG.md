@@ -12,6 +12,20 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
 
 ## [Unreleased]
 
+### Fixed
+
+- Live updates no longer show an outdated status as current. An observation
+  that arrives already older than `OBSERVATION_STALE_AFTER_SECS`, as when a
+  gateway sends what it held during an outage, is still recorded with its
+  history but is no longer broadcast; before, connected clients showed it
+  while a snapshot said `unknown`. A spot that stays quiet after a status was
+  published for it (by an administrator, a reservation or an observation that
+  went stale) is announced as `unknown` again at the next sweep instead of
+  keeping that status on connected clients.
+- `user-invite --role admin` and `user-grant --role admin` no longer fail with
+  a Keycloak 403 and roll the account back; the provisioner needs no new
+  permission.
+
 ## [0.10.0] - 2026-10-31
 
 **Release stage: pilot.** This release protects personal data and moves sign-in

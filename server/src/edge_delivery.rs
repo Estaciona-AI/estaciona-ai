@@ -112,14 +112,17 @@ async fn observe(
                     .bind(spot_id).fetch_one(&mut **tx).await?;
             // Compare in PostgreSQL, which normalizes to microsecond precision.
             // Effect and watermark share the same UPDATE, transaction and lock.
-            let updated = sqlx::query("UPDATE spots SET observation_timestamp=$3,status=CASE WHEN $4 THEN status ELSE $2 END,last_updated=CASE WHEN $4 THEN last_updated ELSE NOW() END WHERE id=$1 AND (observation_timestamp IS NULL OR observation_timestamp<$3)")
+            // An accepted observation may still be too old to show: a backlog
+            // drained after an outage. The snapshot's rule decides, on its clock.
+            let current: Option<bool> = sqlx::query_scalar("UPDATE spots SET observation_timestamp=$3,status=CASE WHEN $4 THEN status ELSE $2 END,last_updated=CASE WHEN $4 THEN last_updated ELSE NOW() END WHERE id=$1 AND (observation_timestamp IS NULL OR observation_timestamp<$3) RETURNING observation_timestamp > NOW() - make_interval(secs => $5)")
                 .bind(spot_id).bind(status).bind(timestamp).bind(protected)
-                .execute(&mut **tx).await?;
-            if updated.rows_affected() == 0 {
+                .bind(crate::freshness::stale_after_secs())
+                .fetch_optional(&mut **tx).await?;
+            let Some(current) = current else {
                 observation.outcome = Outcome::Ignored;
                 observation.reason = Some("stale_observation".to_owned());
                 return Ok(observation);
-            }
+            };
             // Keep physical free/occupied separate from reservation protection.
             // Only accepted, newer observations reach this transactional upsert.
             sqlx::query("INSERT INTO physical_occupancy_hourly (spot_id,hour_start,status,observed_at) VALUES ($1,date_trunc('hour',$3::timestamptz AT TIME ZONE 'UTC') AT TIME ZONE 'UTC',$2,$3) ON CONFLICT (hour_start,spot_id) DO UPDATE SET status=EXCLUDED.status,observed_at=EXCLUDED.observed_at WHERE physical_occupancy_hourly.observed_at<EXCLUDED.observed_at")
@@ -147,7 +150,8 @@ async fn observe(
             }
             observation.outcome = Outcome::Applied;
             observation.reason = None;
-            observation.spot_update = Some((spot_id.to_owned(), status.to_owned()));
+            // Recorded either way; published only while a snapshot would show it.
+            observation.spot_update = current.then(|| (spot_id.to_owned(), status.to_owned()));
         }
     }
     Ok(observation)
@@ -1852,6 +1856,30 @@ mod tests {
             assert_eq!(result.ack.reason.as_deref(), Some("invalid_confidence"));
             assert_eq!(status(&pool, &spot_id).await?, "free");
         }
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn late_observation_is_recorded_but_not_published_as_current(pool: PgPool) -> TestResult {
+        let principal = principal(&pool).await?;
+        let spot_id = authorized_spot(&pool, &principal, "free").await?;
+        // Drained from a gateway backlog long after the camera saw it.
+        let mut late = payload(&spot_id, "occupied");
+        late["timestamp"] = json!(Utc::now() - chrono::Duration::minutes(10));
+        let delivery = apply(&pool, &principal, Uuid::new_v4(), late).await?;
+        assert_eq!(delivery.ack.outcome, Outcome::Applied);
+        assert_eq!(status(&pool, &spot_id).await?, "occupied");
+        // A client connecting now is told the spot is unknown; a connected
+        // client must not be told otherwise.
+        let snapshot: Vec<(String, String)> = sqlx::query_as(crate::freshness::SNAPSHOT_SQL)
+            .bind(crate::freshness::stale_after_secs())
+            .fetch_all(&pool)
+            .await?;
+        assert!(snapshot.contains(&(spot_id.clone(), "unknown".to_owned())));
+        assert_eq!(delivery.spot_update, None);
+
+        let current = apply(&pool, &principal, Uuid::new_v4(), payload(&spot_id, "free")).await?;
+        assert_eq!(current.spot_update, Some((spot_id, "free".to_owned())));
         Ok(())
     }
 }

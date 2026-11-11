@@ -1246,52 +1246,93 @@ async fn recommendation_skips_a_nearer_spot_whose_camera_went_quiet(pool: PgPool
 async fn a_spot_going_quiet_is_announced_unknown_once(pool: PgPool) {
     let f = Fixture::new(pool).await.unwrap();
     let mut updates = f.state.installation.tx.subscribe();
-    let mut announced = std::collections::HashSet::new();
+    let mut sweeper = crate::freshness::Sweeper::starting(&f.state).await;
     let unknown = format!(
         r#"{{"type":"SPOT_UPDATE","spot_id":"{}","status":"unknown"}}"#,
         f.spot_id
     );
 
     observed(&f, &f.spot_id, Some(5)).await;
-    assert!(
-        crate::freshness::sweep(&f.state, &mut announced)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(sweeper.sweep(&f.state).await.unwrap().is_empty());
 
     observed(&f, &f.spot_id, Some(600)).await;
     assert_eq!(
-        crate::freshness::sweep(&f.state, &mut announced)
-            .await
-            .unwrap(),
+        sweeper.sweep(&f.state).await.unwrap(),
         std::slice::from_ref(&f.spot_id)
     );
     assert_eq!(updates.recv().await.unwrap(), unknown);
     // Still quiet: nothing new to say.
-    assert!(
-        crate::freshness::sweep(&f.state, &mut announced)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(sweeper.sweep(&f.state).await.unwrap().is_empty());
 
     // The camera returns, then goes quiet again: announced again.
     observed(&f, &f.spot_id, Some(5)).await;
-    assert!(
-        crate::freshness::sweep(&f.state, &mut announced)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(sweeper.sweep(&f.state).await.unwrap().is_empty());
     observed(&f, &f.spot_id, Some(600)).await;
     assert_eq!(
-        crate::freshness::sweep(&f.state, &mut announced)
-            .await
-            .unwrap(),
+        sweeper.sweep(&f.state).await.unwrap(),
         std::slice::from_ref(&f.spot_id)
     );
     assert_eq!(updates.recv().await.unwrap(), unknown);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_quiet_spot_given_a_status_again_is_announced_unknown_again(pool: PgPool) {
+    let f = Fixture::new(pool).await.unwrap();
+    let mut updates = f.state.installation.tx.subscribe();
+    let mut sweeper = crate::freshness::Sweeper::starting(&f.state).await;
+    let frame = |status: &str| {
+        format!(
+            r#"{{"type":"SPOT_UPDATE","spot_id":"{}","status":"{status}"}}"#,
+            f.spot_id
+        )
+    };
+
+    observed(&f, &f.spot_id, Some(600)).await;
+    sweeper.sweep(&f.state).await.unwrap();
+    assert_eq!(updates.recv().await.unwrap(), frame("unknown"));
+
+    // An administrator sets the status by hand while the camera stays quiet:
+    // connected clients are shown it, a client connecting now is not.
+    f.update_spot("occupied").await;
+    assert_eq!(updates.recv().await.unwrap(), frame("occupied"));
+    let snapshot: Vec<(String, String)> = sqlx::query_as(crate::freshness::SNAPSHOT_SQL)
+        .bind(crate::freshness::stale_after_secs())
+        .fetch_all(f.state.installation.pool())
+        .await
+        .unwrap();
+    assert!(snapshot.contains(&(f.spot_id.clone(), "unknown".to_owned())));
+
+    // The next sweep brings connected clients back to what the snapshot says.
+    assert_eq!(
+        sweeper.sweep(&f.state).await.unwrap(),
+        std::slice::from_ref(&f.spot_id)
+    );
+    assert_eq!(updates.recv().await.unwrap(), frame("unknown"));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_sweeper_that_missed_statuses_announces_a_quiet_spot_again(pool: PgPool) {
+    let f = Fixture::new(pool).await.unwrap();
+    let mut sweeper = crate::freshness::Sweeper::starting(&f.state).await;
+    observed(&f, &f.spot_id, Some(600)).await;
+    assert_eq!(
+        sweeper.sweep(&f.state).await.unwrap(),
+        std::slice::from_ref(&f.spot_id)
+    );
+
+    // A status for the quiet spot, then more traffic than the channel keeps:
+    // the sweeper can no longer tell what clients were last shown.
+    let frame = |spot_id: &str| {
+        format!(r#"{{"type":"SPOT_UPDATE","spot_id":"{spot_id}","status":"occupied"}}"#)
+    };
+    f.state.installation.tx.send(frame(&f.spot_id)).unwrap();
+    for _ in 0..1000 {
+        f.state.installation.tx.send(frame("R08-BUSY")).unwrap();
+    }
+    assert_eq!(
+        sweeper.sweep(&f.state).await.unwrap(),
+        std::slice::from_ref(&f.spot_id)
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]

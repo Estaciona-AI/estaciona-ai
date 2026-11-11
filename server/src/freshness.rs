@@ -7,6 +7,11 @@
 //! free nor reservable nor recommended. Reservations stay server-managed.
 use std::{collections::HashSet, sync::OnceLock, time::Duration};
 
+use tokio::sync::broadcast::{
+    Receiver,
+    error::{RecvError, TryRecvError},
+};
+
 use crate::{state::SharedState, ws::messages::ServerToAppMsg};
 
 /// Four missed 30-second heartbeats.
@@ -41,40 +46,87 @@ async fn stale_spots(state: &SharedState) -> Result<HashSet<String>, sqlx::Error
     Ok(ids.into_iter().collect())
 }
 
-/// Announces spots that became unknown since the last sweep, and returns them.
-/// A spot that recovers is announced by the observation that refreshes it.
-pub async fn sweep(
-    state: &SharedState,
-    announced: &mut HashSet<String>,
-) -> Result<Vec<String>, sqlx::Error> {
-    let stale = stale_spots(state).await?;
-    let mut newly: Vec<String> = stale.difference(announced).cloned().collect();
-    newly.sort();
-    for spot_id in &newly {
-        let update = ServerToAppMsg::SpotUpdate {
-            spot_id: spot_id.clone(),
-            status: "unknown".to_owned(),
-        };
-        if let Ok(json) = serde_json::to_string(&update) {
-            let _ = state.installation.tx.send(json);
-        }
-    }
-    *announced = stale;
-    Ok(newly)
+/// Keeps connected clients at what a snapshot would show them: `announced`
+/// holds the spots whose last published status is `unknown`.
+pub struct Sweeper {
+    updates: Receiver<String>,
+    announced: HashSet<String>,
 }
 
-/// Runs for the life of the server. Spots already unknown at startup reach
-/// clients through the snapshot, so they are not announced again.
-pub fn spawn_sweeper(state: SharedState) {
-    tokio::spawn(async move {
-        let mut announced = stale_spots(&state).await.unwrap_or_default();
+impl Sweeper {
+    /// Spots already unknown reach clients through the snapshot, so they are
+    /// not announced again.
+    pub async fn starting(state: &SharedState) -> Self {
+        // Subscribed before the first read: no later status goes unheard.
+        let updates = state.installation.tx.subscribe();
+        let announced = stale_spots(state).await.unwrap_or_default();
+        Self { updates, announced }
+    }
+
+    /// A status published for a spot replaces `unknown` on connected clients,
+    /// whatever its source: an observation, an administrator, a reservation.
+    fn heard(&mut self, frame: &str) {
+        if let Ok(ServerToAppMsg::SpotUpdate { spot_id, status }) = serde_json::from_str(frame)
+            && status != "unknown"
+        {
+            self.announced.remove(&spot_id);
+        }
+    }
+
+    /// Statuses went unheard: every quiet spot is announced again.
+    fn missed(&mut self) {
+        self.announced.clear();
+    }
+
+    /// Announces the spots that are unknown and not shown as such, and returns
+    /// them. A spot that recovers is announced by the observation that
+    /// refreshes it.
+    pub async fn sweep(&mut self, state: &SharedState) -> Result<Vec<String>, sqlx::Error> {
+        loop {
+            match self.updates.try_recv() {
+                Ok(frame) => self.heard(&frame),
+                Err(TryRecvError::Lagged(_)) => self.missed(),
+                Err(TryRecvError::Empty | TryRecvError::Closed) => break,
+            }
+        }
+        let stale = stale_spots(state).await?;
+        let mut newly: Vec<String> = stale.difference(&self.announced).cloned().collect();
+        newly.sort();
+        for spot_id in &newly {
+            let update = ServerToAppMsg::SpotUpdate {
+                spot_id: spot_id.clone(),
+                status: "unknown".to_owned(),
+            };
+            if let Ok(json) = serde_json::to_string(&update) {
+                let _ = state.installation.tx.send(json);
+            }
+        }
+        self.announced = stale;
+        Ok(newly)
+    }
+
+    async fn run(mut self, state: SharedState) {
         let mut interval = tokio::time::interval(SWEEP_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            interval.tick().await;
-            if let Err(error) = sweep(&state, &mut announced).await {
-                tracing::error!(%error, "Occupancy freshness sweep failed");
+            tokio::select! {
+                _ = interval.tick() => {
+                    if let Err(error) = self.sweep(&state).await {
+                        tracing::error!(%error, "Occupancy freshness sweep failed");
+                    }
+                }
+                // Heard between sweeps too, so a busy channel never lags here.
+                received = self.updates.recv() => match received {
+                    Ok(frame) => self.heard(&frame),
+                    Err(RecvError::Lagged(_)) => self.missed(),
+                    Err(RecvError::Closed) => return,
+                },
             }
         }
-    });
+    }
+}
+
+/// Runs for the life of the server.
+pub fn spawn_sweeper(state: SharedState) {
+    tokio::spawn(async move { Sweeper::starting(&state).await.run(state).await });
 }
