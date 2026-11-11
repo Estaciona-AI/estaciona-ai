@@ -12,6 +12,31 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- **Run `--migrate` before starting this release.** It adds
+  `spots.manual_since`; the down migration drops it.
+- **Deploy the server before the panels.** The wire contract is now 2.1.0,
+  which only adds to 2.0.0: clients that ignore unknown message types and
+  fields keep working.
+
+### Added
+
+- `/ws/dashboard` sends `{"type":"HEARTBEAT"}` every 15 seconds and a
+  protocol ping with it, and closes a connection that sends nothing back for
+  60 seconds. A panel can now tell a quiet site from a dead connection. The
+  catalog states both values under the channel's `keepalive`.
+
+### Changed
+
+- A status set by an administrator is marked `"manual": true` in
+  `SPOT_UPDATE`, live and in the snapshot, and is no longer turned into
+  `unknown` by the freshness sweep. It stays until a reading taken after it,
+  a reservation or the release of one replaces it; a reading taken before it
+  is recorded but does not replace it (`manual_status_newer`). Before, it was
+  shown like a reading and replaced by `unknown` within 15 seconds on a spot
+  without a recent reading.
+
 ### Fixed
 
 - Live updates no longer show an outdated status as current. An observation
@@ -19,9 +44,9 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
   gateway sends what it held during an outage, is still recorded with its
   history but is no longer broadcast; before, connected clients showed it
   while a snapshot said `unknown`. A spot that stays quiet after a status was
-  published for it (by an administrator, a reservation or an observation that
-  went stale) is announced as `unknown` again at the next sweep instead of
-  keeping that status on connected clients.
+  published for it (by a reservation or an observation that went stale) is
+  announced as `unknown` again at the next sweep instead of keeping that
+  status on connected clients.
 - `user-invite --role admin` and `user-grant --role admin` no longer fail with
   a Keycloak 403 and roll the account back; the provisioner needs no new
   permission.
