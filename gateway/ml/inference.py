@@ -87,39 +87,98 @@ class StaleArtifact(ValueError):
     capacity: retrain instead of serving it."""
 
 
+# A year of issued forecasts: long enough for prospective scores to span the
+# seasons the calendar describes. Each origin takes a few kilobytes.
+LEDGER_RETENTION = timedelta(days=366)
+
+
+def _encode(rates):
+    # A baseline cannot forecast every hour; JSON has no NaN.
+    return json.dumps([float(rate) if np.isfinite(rate) else None for rate in rates])
+
+
+def _decode(text):
+    return np.asarray(json.loads(text), dtype=np.float64)
+
+
 class ForecastLedger:
-    """Forecasts as issued, so they are scored only against later outcomes."""
+    """Forecasts as issued, so they are scored only against later outcomes.
+
+    Next to the forecast that was served, each origin keeps what the model and
+    every baseline would have issued from the same history. Only then can a
+    later comparison give all of them the same cases.
+    """
 
     def __init__(self, path):
         self.path = str(path)
         with closing(sqlite3.connect(self.path)) as conn, conn:
+            # `forecasts` keeps the layout of earlier ledgers, which a worker
+            # of either version reads and writes; the rest lives beside it.
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS forecasts "
                 "(origin TEXT PRIMARY KEY, issued_at TEXT NOT NULL, rates TEXT NOT NULL)"
             )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS served_by "
+                "(origin TEXT PRIMARY KEY, method TEXT NOT NULL)"
+            )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS alternatives "
+                "(origin TEXT NOT NULL, method TEXT NOT NULL, rates TEXT NOT NULL, "
+                "PRIMARY KEY (origin, method))"
+            )
 
-    def record(self, origin, rates, issued_at):
+    def record(self, origin, rates, issued_at, serving=None, alternatives=None):
         # The first forecast of an origin stands; a restart cannot revise it.
+        key = origin.isoformat()
         with closing(sqlite3.connect(self.path)) as conn, conn:
-            conn.execute(
+            first = conn.execute(
                 "INSERT OR IGNORE INTO forecasts VALUES (?, ?, ?)",
-                (
-                    origin.isoformat(),
-                    issued_at.isoformat(),
-                    json.dumps([float(rate) for rate in rates]),
-                ),
-            )
-            conn.execute(
-                "DELETE FROM forecasts WHERE origin < ?",
-                ((origin - timedelta(days=7)).isoformat(),),
-            )
+                (key, issued_at.isoformat(), _encode(rates)),
+            ).rowcount
+            if first and serving is not None:
+                conn.execute("INSERT INTO served_by VALUES (?, ?)", (key, serving))
+            if first:
+                conn.executemany(
+                    "INSERT INTO alternatives VALUES (?, ?, ?)",
+                    [
+                        (key, method, _encode(values))
+                        for method, values in (alternatives or {}).items()
+                    ],
+                )
+            expired = ((origin - LEDGER_RETENTION).isoformat(),)
+            for table in ("forecasts", "served_by", "alternatives"):
+                conn.execute(f"DELETE FROM {table} WHERE origin < ?", expired)
 
     def issued(self, origin):
         with closing(sqlite3.connect(self.path)) as conn:
             row = conn.execute(
                 "SELECT rates FROM forecasts WHERE origin = ?", (origin.isoformat(),)
             ).fetchone()
-        return None if row is None else np.asarray(json.loads(row[0]), np.float64)
+        return None if row is None else _decode(row[0])
+
+    def entries(self):
+        """Every kept origin, oldest first, with what each method issued."""
+        with closing(sqlite3.connect(self.path)) as conn:
+            forecasts = conn.execute(
+                "SELECT origin, issued_at, rates FROM forecasts ORDER BY origin"
+            ).fetchall()
+            serving = dict(conn.execute("SELECT origin, method FROM served_by"))
+            alternatives = conn.execute(
+                "SELECT origin, method, rates FROM alternatives"
+            ).fetchall()
+        methods = {}
+        for origin, method, rates in alternatives:
+            methods.setdefault(origin, {})[method] = _decode(rates)
+        return [
+            {
+                "origin": datetime.fromisoformat(origin),
+                "issued_at": datetime.fromisoformat(issued_at),
+                "serving": serving.get(origin),
+                "rates": {"served": _decode(rates), **methods.get(origin, {})},
+            }
+            for origin, issued_at, rates in forecasts
+        ]
 
 
 def load_occupancy_model(models_dir, context=None):
@@ -162,12 +221,19 @@ class PredictiveEngine:
                 ).scalar_one()
             )
 
-    def _rates(self, rate, calendar, origin):
-        predicted = predict_rates(self.model, rate, calendar, [origin])[0]
+    def _candidates(self, rate, calendar, origin):
+        """What the model and each baseline forecast from the same history."""
+        candidates = {"model": predict_rates(self.model, rate, calendar, [origin])[0]}
+        for name in BASELINES:
+            candidates[name] = baseline_rates(name, rate, [origin])[0]
+        return candidates
+
+    def _served(self, candidates):
+        predicted = candidates["model"]
         serving = self.manifest["serving"]
         if serving != "model":
             # The model fills hours the baseline cannot cover after gaps.
-            baseline = baseline_rates(serving, rate, [origin])[0]
+            baseline = candidates[serving]
             predicted = np.where(np.isfinite(baseline), baseline, predicted)
         return predicted
 
@@ -198,7 +264,8 @@ class PredictiveEngine:
         calendar = calendar_for(profile_from_env(capacity), index)
 
         t_start = time.perf_counter()
-        predicted = self._rates(rate, calendar, forecast_origin)
+        candidates = self._candidates(rate, calendar, forecast_origin)
+        predicted = self._served(candidates)
         inference_time_ms = (time.perf_counter() - t_start) * 1000
         if np.shape(predicted) != (HORIZON,) or not np.isfinite(predicted).all():
             raise ValueError("Forecast inference returned invalid values")
@@ -207,7 +274,9 @@ class PredictiveEngine:
             rate[backtest_origin:forecast_origin], origin, capacity, inference_time_ms
         )
         if self.ledger is not None:
-            self.ledger.record(origin, predicted, now)
+            self.ledger.record(
+                origin, predicted, now, self.manifest["serving"], candidates
+            )
         return self._payload(now, origin, counts, evaluation, capacity)
 
     def _prospective_evaluation(self, observed, origin, capacity, inference_time_ms):

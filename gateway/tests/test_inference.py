@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import sqlite3
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import mkdtemp
@@ -424,9 +426,28 @@ def test_each_forecast_is_recorded_once_and_survives_a_restart(tmp_path):
         inference.ForecastLedger(path).issued(origin), np.full(HORIZON, 0.3)
     )
     assert inference.ForecastLedger(path).issued(origin + timedelta(hours=1)) is None
-    # Forecasts older than a week are dropped as new ones arrive.
-    first.record(origin + timedelta(days=8), np.full(HORIZON, 0.1), origin)
-    assert first.issued(origin) is None
+
+
+def test_issued_forecasts_are_kept_long_enough_to_be_compared(tmp_path):
+    """Scores need many issued days; a week of them cannot show whether the
+    model beats a baseline. Only forecasts past the retention are dropped."""
+    ledger = inference.ForecastLedger(tmp_path / "ledger.db")
+    origin = datetime(2026, 10, 24, 12, tzinfo=timezone.utc)
+    held = {"persistence": np.full(HORIZON, 0.3)}
+    ledger.record(origin, np.full(HORIZON, 0.3), origin, "model", held)
+    kept = origin + inference.LEDGER_RETENTION
+    ledger.record(kept, np.full(HORIZON, 0.1), kept, "model", held)
+    assert [entry["origin"] for entry in ledger.entries()] == [origin, kept]
+    late = kept + timedelta(hours=1)
+    ledger.record(late, np.full(HORIZON, 0.1), late, "model", held)
+    assert ledger.issued(origin) is None
+    entries = ledger.entries()
+    assert [entry["origin"] for entry in entries] == [kept, late]
+    assert all(set(entry["rates"]) == {"served", "persistence"} for entry in entries)
+    with closing(sqlite3.connect(ledger.path)) as conn:
+        for table in ("alternatives", "served_by"):
+            stored = conn.execute(f"SELECT origin FROM {table}").fetchall()
+            assert sorted(stored) == [(kept.isoformat(),), (late.isoformat(),)]
 
 
 def test_a_prediction_is_recorded_for_tomorrows_evaluation(tmp_path):
@@ -437,3 +458,83 @@ def test_a_prediction_is_recorded_for_tomorrows_evaluation(tmp_path):
     np.testing.assert_array_equal(
         predictor.ledger.issued(origin.to_pydatetime()), np.full(HORIZON, 0.4)
     )
+
+
+def test_every_method_is_recorded_from_the_history_the_forecast_was_issued_on(
+    tmp_path,
+):
+    rates = np.linspace(0.1, 0.9, WINDOW)
+    rates[-1] = np.nan  # the last hour was not observed
+    predictor = forecast_predictor(rates, model=FixedRate(0.4))
+    predictor.manifest["serving"] = "seasonal_naive"
+    predictor.ledger = inference.ForecastLedger(tmp_path / "ledger.db")
+    payload = predict(predictor)
+
+    (entry,) = predictor.ledger.entries()
+    assert entry["serving"] == "seasonal_naive"
+    assert entry["origin"] == pd.Timestamp(
+        payload["next_24h_occupancy"][0]["timestamp"]
+    )
+    issued = entry["rates"]
+    assert set(issued) == {"served", "model", *inference.BASELINES}
+    np.testing.assert_array_equal(issued["model"], np.full(HORIZON, 0.4))
+    # The same hours one week earlier, and the last hour that was observed.
+    np.testing.assert_allclose(issued["seasonal_naive"], rates[-168 : -168 + HORIZON])
+    np.testing.assert_allclose(issued["persistence"], np.full(HORIZON, rates[-2]))
+    np.testing.assert_allclose(issued["served"], issued["seasonal_naive"])
+
+
+def test_a_baseline_that_cannot_forecast_an_hour_records_no_value_for_it(tmp_path):
+    rates = np.full(WINDOW, 0.25)
+    rates[-168] = np.nan  # the first forecast hour was not observed last week
+    predictor = forecast_predictor(rates, model=FixedRate(0.4))
+    predictor.ledger = inference.ForecastLedger(tmp_path / "ledger.db")
+    predict(predictor)
+    (entry,) = predictor.ledger.entries()
+    seasonal = entry["rates"]["seasonal_naive"]
+    assert np.isnan(seasonal[0]) and np.isfinite(seasonal[1:]).all()
+
+
+def test_a_restart_cannot_revise_what_any_method_issued(tmp_path):
+    path = tmp_path / "ledger.db"
+    origin = datetime(2026, 10, 24, 12, tzinfo=timezone.utc)
+    first = {"model": np.full(HORIZON, 0.3), "persistence": np.full(HORIZON, 0.2)}
+    inference.ForecastLedger(path).record(
+        origin, first["model"], origin, "model", first
+    )
+    later = {"model": np.full(HORIZON, 0.9), "persistence": np.full(HORIZON, 0.8)}
+    inference.ForecastLedger(path).record(
+        origin, later["model"], origin, "persistence", later
+    )
+    (entry,) = inference.ForecastLedger(path).entries()
+    assert entry["serving"] == "model"
+    np.testing.assert_array_equal(entry["rates"]["persistence"], first["persistence"])
+
+
+def test_a_ledger_from_before_the_baselines_keeps_its_forecasts(tmp_path):
+    path = tmp_path / "ledger.db"
+    origin = datetime(2026, 10, 24, 12, tzinfo=timezone.utc)
+    with closing(sqlite3.connect(path)) as conn, conn:
+        conn.execute(
+            "CREATE TABLE forecasts "
+            "(origin TEXT PRIMARY KEY, issued_at TEXT NOT NULL, rates TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO forecasts VALUES (?, ?, ?)",
+            (origin.isoformat(), origin.isoformat(), json.dumps([0.3] * HORIZON)),
+        )
+    ledger = inference.ForecastLedger(path)
+    np.testing.assert_array_equal(ledger.issued(origin), np.full(HORIZON, 0.3))
+    (entry,) = ledger.entries()
+    # What was not recorded then is absent, not reconstructed.
+    assert entry["serving"] is None
+    assert set(entry["rates"]) == {"served"}
+    ledger.record(origin + timedelta(hours=1), np.full(HORIZON, 0.5), origin, "model")
+    assert len(inference.ForecastLedger(path).entries()) == 2
+    # The earlier worker still reads and writes it, should it be put back.
+    with closing(sqlite3.connect(path)) as conn, conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO forecasts VALUES (?, ?, ?)",
+            ((origin + timedelta(hours=2)).isoformat(), origin.isoformat(), "[0.1]"),
+        )
+        assert conn.execute("SELECT COUNT(*) FROM forecasts").fetchone() == (3,)

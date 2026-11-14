@@ -19,8 +19,24 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
 - **Deploy the server before the panels.** The wire contract is now 2.1.0,
   which only adds to 2.0.0: clients that ignore unknown message types and
   fields keep working.
+- **The forecast ledger keeps a year of forecasts instead of a week**, with
+  what the model and each baseline issued. `forecast_ledger.db` gains two
+  tables on the worker's first start and needs no action. An earlier worker
+  still reads and writes it, and retrains when the artifact names
+  `persistence` as the method to serve.
 
 ### Added
+
+- `python -m ml.prospective`, run in `gateway/` with the forecast worker's
+  read-only role, compares the served forecast, the model and each baseline
+  as they were issued with what was observed later, on the same points. It
+  counts what it leaves out (recorded after the hour closed, pending,
+  unobserved), states the installation environment and reports on how many
+  days the served forecast had the lower error.
+- The forecast manifest records where its history may have come from:
+  `history.environment` and `history.recorded_sources_allowed`, which is
+  false only in a production installation. Elsewhere vision accepts a
+  recorded file, and hours of a looped recording are not field evidence.
 
 - `/ws/dashboard` sends `{"type":"HEARTBEAT"}` every 15 seconds and a
   protocol ping with it, and closes a connection that sends nothing back for
@@ -29,6 +45,13 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
 
 ### Changed
 
+- The forecast gate compares the model with persistence (the last observed
+  rate, held for the 24 hours) as well as with the two weekly baselines, and
+  serves it when it has the lowest error. Before, a lot whose level holds
+  without a weekly rhythm, as with a looped recording, was served by the
+  model although repeating the last value was closer. The evaluation in the
+  manifest also gives each method's error per horizon, the points each
+  method covers, the origins and the distinct target hours.
 - A status set by an administrator is marked `"manual": true` in
   `SPOT_UPDATE`, live and in the snapshot, and is no longer turned into
   `unknown` by the freshness sweep. It stays until a reading taken after it,

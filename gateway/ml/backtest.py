@@ -11,7 +11,7 @@ import pandas as pd
 
 HORIZON = 24
 WEEK = 168
-BASELINES = ("seasonal_naive", "weekly_profile")
+BASELINES = ("seasonal_naive", "weekly_profile", "persistence")
 
 
 def seasonal_naive(rate, origins):
@@ -35,24 +35,70 @@ def weekly_profile(rate, origins, weeks=4):
         return np.nanmean(windows, axis=1)
 
 
+def persistence(rate, origins):
+    """The last valid rate of the 24 h before each origin, held for every hour.
+
+    A site whose occupancy does not move, such as a looped recording, is
+    forecast best this way; a method that cannot beat it adds nothing there.
+    """
+    held = np.full((len(origins), HORIZON), np.nan)
+    for row, origin in enumerate(origins):
+        recent = rate[max(origin - HORIZON, 0) : origin]
+        valid = recent[np.isfinite(recent)]
+        if len(valid):
+            held[row] = valid[-1]
+    return held
+
+
 def actual_windows(rate, origins):
     return np.stack([rate[o : o + HORIZON] for o in origins])
 
 
-def compare(actual, predictions):
-    """Error of each method on the points every method could forecast."""
-    mask = np.isfinite(actual)
+def _pct(values):
+    return round(float(values) * 100, 3)
+
+
+def compare(actual, predictions, origins=None):
+    """Error of each method on the points every method could forecast.
+
+    Rows are origins and columns horizons. Forecasts issued at neighbouring
+    origins score the same target hours again, so `points` counts comparisons,
+    not independent samples: `origins` and `target_hours` say how many of each
+    lie behind them. `covered_points` shows what each method could forecast
+    among the observed points, and so what the common set leaves out.
+    """
+    observed = np.isfinite(actual)
+    mask = observed.copy()
     for values in predictions.values():
         mask &= np.isfinite(values)
-    scores = {"points": int(mask.sum())}
+    scores = {
+        "points": int(mask.sum()),
+        "observed_points": int(observed.sum()),
+        "covered_points": {
+            name: int((observed & np.isfinite(values)).sum())
+            for name, values in predictions.items()
+        },
+        "origins": int(mask.any(axis=1).sum()),
+    }
+    if origins is not None:
+        targets = np.asarray(origins)[:, None] + np.arange(actual.shape[1])
+        scores["target_hours"] = int(np.unique(targets[mask]).size)
     if not mask.any():
         return scores
+    per_horizon = mask.sum(axis=0)
+    scores["points_by_horizon"] = per_horizon.tolist()
     for name, values in predictions.items():
         error = values[mask] - actual[mask]
+        absolute = np.where(mask, np.abs(values - actual), 0.0).sum(axis=0)
         scores[name] = {
-            "nmae_pct": round(float(np.abs(error).mean() * 100), 3),
-            "rmse_pct": round(float(np.sqrt((error**2).mean()) * 100), 3),
-            "bias_pct": round(float(error.mean() * 100), 3),
+            "nmae_pct": _pct(np.abs(error).mean()),
+            "rmse_pct": _pct(np.sqrt((error**2).mean())),
+            "bias_pct": _pct(error.mean()),
+            # None where no origin had a comparable point at that horizon.
+            "nmae_pct_by_horizon": [
+                _pct(total / count) if count else None
+                for total, count in zip(absolute, per_horizon)
+            ],
         }
     return scores
 
@@ -73,6 +119,27 @@ def origins_between(index, start, end, step=1):
     mask = (index >= start) & (index < end)
     origins = positions[mask][::step]
     return origins[(origins >= 4 * WEEK) & (origins + HORIZON <= len(index))]
+
+
+def walk_forward(rate, origins, fit, predict, refit_every=HORIZON):
+    """Forecasts for `origins`, each from a model that saw only earlier hours.
+
+    Origins are grouped into blocks of `refit_every` hours, as the worker
+    retrains once a day. `fit(known)` receives the rates with every hour from
+    the block's first origin on hidden; `predict(model, origins)` returns one
+    row of HORIZON rates per origin, in the order given.
+    """
+    origins = np.asarray(origins, dtype=int)
+    forecasts = np.full((len(origins), HORIZON), np.nan)
+    if not len(origins):
+        return forecasts
+    blocks = (origins - origins.min()) // refit_every
+    for block in np.unique(blocks):
+        rows = np.flatnonzero(blocks == block)
+        known = np.array(rate, dtype=np.float64)
+        known[origins[rows].min() :] = np.nan
+        forecasts[rows] = predict(fit(known), origins[rows])
+    return forecasts
 
 
 def acceptance(seed=11, variants=16):
@@ -113,7 +180,9 @@ def acceptance(seed=11, variants=16):
                 "model": predicted,
                 "seasonal_naive": seasonal_naive(rate, test),
                 "weekly_profile": weekly_profile(rate, test),
+                "persistence": persistence(rate, test),
             },
+            test,
         )
         scores["missing_hours_pct"] = round(float(np.isnan(rate).mean() * 100), 1)
         served = [train.has_recent_history(rate, origin) for origin in test]

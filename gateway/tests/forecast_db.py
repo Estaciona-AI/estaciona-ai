@@ -12,7 +12,12 @@ INSTALLATION = "6f1c2a8e-4b5d-4e7f-9a10-3c2b1d0e9f87"
 
 
 def history_engine(
-    active=(), retired=(), rows=(), revisions=(), installation=INSTALLATION
+    active=(),
+    retired=(),
+    rows=(),
+    revisions=(),
+    installation=INSTALLATION,
+    environment="production",
 ):
     """`rows` are (spot, hour, status); `revisions` are (applied_at, spot ids)."""
     engine = create_engine("sqlite://")
@@ -33,11 +38,14 @@ def history_engine(
             )
         )
         connection.execute(
-            text("CREATE TABLE installation_binding (installation_id TEXT)")
+            text(
+                "CREATE TABLE installation_binding "
+                "(installation_id TEXT,environment TEXT)"
+            )
         )
         connection.execute(
-            text("INSERT INTO installation_binding VALUES (:id)"),
-            {"id": installation},
+            text("INSERT INTO installation_binding VALUES (:id,:environment)"),
+            {"id": installation, "environment": environment},
         )
         for spot, is_active in [(s, True) for s in active] + [
             (s, False) for s in retired

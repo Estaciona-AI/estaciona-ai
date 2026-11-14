@@ -21,6 +21,9 @@ from sqlalchemy import create_engine
 
 import gateway
 from ml import history, worker
+from ml.backtest import BASELINES
+from ml.inference import ForecastLedger
+from ml.prospective import prospective_report
 from test_delivery_integration import server as delivery_server, until
 from test_forecast_model import small_training
 from test_forecast_worker import trainings
@@ -175,6 +178,25 @@ def test_worker_publishes_through_its_own_edge_credential(
 
     assert hours(stored[0]) == hours(published)
     assert len(trainings) == 1
+
+    # The read-only role is enough to compare what was issued with what was
+    # observed, and to say where that history comes from.
+    ledger = ForecastLedger(tmp_path / "forecast_ledger.db")
+    (entry,) = ledger.entries()
+    assert set(entry["rates"]) == {"served", "model", *BASELINES}
+    report = prospective_report(ledger, reader)
+    ((environment,),) = server.query("SELECT environment FROM installation_binding")
+    assert report["history"] == {
+        "environment": environment,
+        "recorded_sources_allowed": environment != "production",
+    }
+    # Issued this hour: every hour it forecasts is still to come.
+    assert report["status"] == "unavailable"
+    assert report["excluded"] == {
+        "issued_after_target": 0,
+        "pending": 24,
+        "unobserved": 0,
+    }
 
 
 def test_history_uses_the_map_revision_in_force_on_postgres(server, reader):
