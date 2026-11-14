@@ -11,7 +11,7 @@ evidence of the class stated; partial progress is reported as such.
 | G-02 | Size one installation at 400 spots | 20 inputs × 20 spots at a minimum of 2.5 FPS per input on the target GPU (RQ-1) | Measurement on target hardware | Open: 10 inputs at a minimum of 2.48 FPS on a desktop proxy |
 | G-03 | Validate end to end with real cameras | 20 real cameras and 400 spots delivering confirmed observations to the server | Field measurement | Open |
 | G-04 | Quantify occupancy accuracy | An agreed metric on labelled ground truth meets an agreed threshold (Q-03) | Measurement | Open: only reference-detector agreement exists |
-| G-05 | Serve forecasts better than naive baselines | An evaluated backtest and prospective scores on observed history establish improvement over the baselines (RQ-3) | Measurement | Open: needs eligible real history, pre-holdout training data and issued forecasts with later outcomes |
+| G-05 | Serve forecasts better than naive baselines | An evaluated backtest and prospective scores on observed history establish improvement over the baselines (RQ-3) | Measurement | Open: needs eligible field history (a replayed recording does not count), pre-holdout training data and issued forecasts with later outcomes |
 | G-06 | Move consumers to contract 2.0.0 | The hub and installation panels pass the consumer tests against 2.0.0 | Test | Open (outside this repository) |
 | G-07 | Define production readiness | Written criteria covering G-02 to G-05, security review and operations (Q-04) | Review | Open |
 | G-08 | Rewrite operator documentation | Installation, operation and upgrade procedures documented and kept current | Review | In progress: source review recorded; field execution is separate evidence |

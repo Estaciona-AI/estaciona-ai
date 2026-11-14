@@ -20,6 +20,7 @@ Status as of `develop` at `e8a1a7b` (2026-11-01). Classes follow
 | F-11 | At `9036d10` on 2026-10-27, CI passed: server 390; vision 407; gateway and forecast 383, including required server integration; contracts 36; identity tools 17; RTSP laboratory 1. Superseded as the current verification snapshot by F-12. | Test | [CI run 40567080230](https://github.com/Estaciona-AI/estaciona-ai/actions/runs/40567080230) |
 | F-12 | At `7bf6c6e` on 2026-10-28, CI passed: server 407; vision 407; gateway and forecast 395, including required server integration; contracts 36; identity tools 17; RTSP laboratory 1. | Test | [CI run 40738777401](https://github.com/Estaciona-AI/estaciona-ai/actions/runs/40738777401); [conditions](07-testing.md#74-verification-snapshot) |
 | F-13 | `v0.10.0` was published on 2026-11-01 as a pilot release, with a signed tag on `c25db55`. CI passed at that commit; since F-12 the code changed only in component version fields, so F-12 remains the current verification snapshot. | Code, test | Tag `v0.10.0`; #229, #230; [CI run 41262972618](https://github.com/Estaciona-AI/estaciona-ai/actions/runs/41262972618) |
+| F-14 | On 2026-11-14, at the revision of #242, a walk-forward comparison with the production training configuration (35 days, hourly origins admitted by the 84-hour rule, daily refits, 733 origins) gave, in points of the rate: on a 44-spot history built from the two states (43 and 44 occupied) that a 69-second demonstration recording yields when replayed in a loop, 2.6 to 3.0 normalized MAE for the model against 1.1 for persistence and 1.1 for the mean of the history; on a simulated campus of the family of the training prior, 6.9 for the model against 28.6 for persistence and, where every baseline was available, 6.3 against 8.8 for the best baseline. Per day of origin, the model's error exceeded that of persistence by 1.4 to 1.8 points on the replayed history and was lower on 31 of 32 days on the simulated campus. Both histories were constructed; neither is a field observation. | Measurement on constructed histories | #242; scripts, recording and results are kept outside the repository; [method](05-methodology.md#3-forecast-evaluation) |
 
 ## 6.2 Assumptions
 
@@ -29,7 +30,7 @@ Status as of `develop` at `e8a1a7b` (2026-11-01). Classes follow
 | A-02 | The target datacenter GPU sustains at least the throughput measured on the desktop proxy. | RQ-1 not met; more hosts per site. | 20-input capacity ramp on the target GPU (G-02). |
 | A-03 | Agreement with the reference detector approximates spot-occupancy accuracy. | Unknown error rate in production. | Labelled ground truth and an accuracy metric (G-04). |
 | A-04 | Cameras are fixed, so spot polygons remain valid after calibration. | Silent misattribution of occupancy. | Periodic inspection with the local inspector; recalibration procedure. |
-| A-05 | The simulated campus prior improves early forecasts once recent observed history permits inference. This remains unverified at a real site. | Poor early forecasts despite a valid artifact. | Prospective scoring and a backtest with sufficient pre-holdout history and comparable points (G-05); simulation alone does not validate this assumption. |
+| A-05 | The simulated campus prior improves early forecasts once recent observed history permits inference. This remains unverified at a real site. | Poor early forecasts despite a valid artifact. | Prospective scoring and a backtest with sufficient pre-holdout history and comparable points (G-05); simulation alone does not validate this assumption. It did not hold on a history shaped like a looped recording (F-14). |
 | A-06 | Outbox bounds and retention defaults absorb the longest expected link outage at a site. | Producers pause capture during long outages. | Outage drills during the pilot. |
 
 ## 6.3 Open questions
@@ -40,6 +41,7 @@ Status as of `develop` at `e8a1a7b` (2026-11-01). Classes follow
 | Q-02 | How long does TensorRT engine generation take on the target host? | Measurement on the target hardware |
 | Q-03 | Which occupancy accuracy metric and labelling protocol define acceptance for production? | Pilot planning (G-04) |
 | Q-04 | Which criteria move an installation from pilot to production? | Goals review after the pilot (G-07) |
+| Q-05 | Which method should be served before the gate can evaluate the model at a site? The model remains the default: persistence would have been better on a looped recording and far worse on a simulated campus (F-14). | Prospective comparison at the first site with field history (G-05) |
 
 ## 6.4 Known limitations
 
