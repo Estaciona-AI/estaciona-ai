@@ -91,7 +91,9 @@ referenced file.
    it.
 9. **Forecast worker.** Create its read-only role with
    `infra/forecast-reader.sql` and run `uv run --locked python -m ml.worker`
-   in `gateway/`.
+   in `gateway/`. With the same role, `uv run --locked python -m ml.prospective`
+   compares the forecasts it issued with what was observed later
+   ([Methodology §3](05-methodology.md#3-forecast-evaluation)).
 
 ### Administrative commands and first start
 

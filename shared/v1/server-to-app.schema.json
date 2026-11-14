@@ -316,6 +316,10 @@
     },
     {
       "properties": {
+        "manual": {
+          "description": "Set by an administrator and not confirmed by a newer reading.\nOmitted when false.",
+          "type": "boolean"
+        },
         "spot_id": {
           "type": "string"
         },
@@ -398,8 +402,21 @@
         "type"
       ],
       "type": "object"
+    },
+    {
+      "description": "Sent on `/ws/dashboard` while the connection is open, so a client can\ntell a quiet site from a dead connection.",
+      "properties": {
+        "type": {
+          "const": "HEARTBEAT",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
     }
   ],
   "title": "ServerToAppMsg",
-  "x-contract-version": "2.0.0"
+  "x-contract-version": "2.1.0"
 }

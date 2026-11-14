@@ -179,7 +179,7 @@ async fn run_edge_socket(
                         }
                     };
                     if let Some((spot_id, status)) = delivery.spot_update {
-                        let update = ServerToAppMsg::SpotUpdate { spot_id, status };
+                        let update = ServerToAppMsg::spot(spot_id, status);
                         if let Ok(json) = serde_json::to_string(&update) {
                             let _ = state.installation.tx.send(json);
                         }
@@ -272,7 +272,7 @@ async fn run_edge_socket(
                             return false;
                         }
                         if let Some((spot_id, status)) = observation.spot_update {
-                            let update = ServerToAppMsg::SpotUpdate { spot_id, status };
+                            let update = ServerToAppMsg::spot(spot_id, status);
                             if let Ok(json) = serde_json::to_string(&update) {
                                 let _ = state.installation.tx.send(json);
                             }

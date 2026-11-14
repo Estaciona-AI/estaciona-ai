@@ -155,6 +155,15 @@
       "type": "SPOT_UPDATE"
     },
     {
+      "manual": true,
+      "spot_id": "A-01",
+      "status": "free",
+      "type": "SPOT_UPDATE"
+    },
+    {
+      "type": "HEARTBEAT"
+    },
+    {
       "route": [
         "camera-01",
         "A-01"

@@ -12,6 +12,66 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-14
+
+**Release stage: pilot.** This release keeps what a panel shows closer to what
+the cameras last confirmed and makes the forecast evaluation harder to satisfy.
+Dashboards receive a heartbeat and silent connections are closed, a status set
+by an administrator is marked and survives the freshness sweep, and an outdated
+observation is no longer broadcast as current. The forecast gate compares the
+model with persistence, the ledger records what every method issued, and the
+manifest states whether the history may be a recording. The wire contract is
+2.1.0, which only adds to 2.0.0, and one migration must be run before the
+server starts. Capacity on the target hardware and field validation with real
+cameras, including of the forecast, are still pending.
+
+### Upgrade notes
+
+- **Run `--migrate` before starting this release.** It adds
+  `spots.manual_since`; the down migration drops it.
+- **Deploy the server before the panels.** The wire contract is now 2.1.0,
+  which only adds to 2.0.0: clients that ignore unknown message types and
+  fields keep working.
+- **The forecast ledger keeps a year of forecasts instead of a week**, with
+  what the model and each baseline issued. `forecast_ledger.db` gains two
+  tables on the worker's first start and needs no action. An earlier worker
+  still reads and writes it, and retrains when the artifact names
+  `persistence` as the method to serve.
+
+### Added
+
+- `python -m ml.prospective`, run in `gateway/` with the forecast worker's
+  read-only role, compares the served forecast, the model and each baseline
+  as they were issued with what was observed later, on the same points. It
+  counts what it leaves out (recorded after the hour closed, pending,
+  unobserved), states the installation environment and reports on how many
+  days the served forecast had the lower error.
+- The forecast manifest records where its history may have come from:
+  `history.environment` and `history.recorded_sources_allowed`, which is
+  false only in a production installation. Elsewhere vision accepts a
+  recorded file, and hours of a looped recording are not field evidence.
+- `/ws/dashboard` sends `{"type":"HEARTBEAT"}` every 15 seconds and a
+  protocol ping with it, and closes a connection that sends nothing back for
+  60 seconds. A panel can now tell a quiet site from a dead connection. The
+  catalog states both values under the channel's `keepalive`.
+
+### Changed
+
+- The forecast gate compares the model with persistence (the last observed
+  rate, held for the 24 hours) as well as with the two weekly baselines, and
+  serves it when it has the lowest error. Before, a lot whose level holds
+  without a weekly rhythm, as with a looped recording, was served by the
+  model although repeating the last value was closer. The evaluation in the
+  manifest also gives each method's error per horizon, the points each
+  method covers, the origins and the distinct target hours.
+- A status set by an administrator is marked `"manual": true` in
+  `SPOT_UPDATE`, live and in the snapshot, and is no longer turned into
+  `unknown` by the freshness sweep. It stays until a reading taken after it,
+  a reservation or the release of one replaces it; a reading taken before it
+  is recorded but does not replace it (`manual_status_newer`). Before, it was
+  shown like a reading and replaced by `unknown` within 15 seconds on a spot
+  without a recent reading.
+
 ### Fixed
 
 - Live updates no longer show an outdated status as current. An observation
@@ -19,9 +79,9 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
   gateway sends what it held during an outage, is still recorded with its
   history but is no longer broadcast; before, connected clients showed it
   while a snapshot said `unknown`. A spot that stays quiet after a status was
-  published for it (by an administrator, a reservation or an observation that
-  went stale) is announced as `unknown` again at the next sweep instead of
-  keeping that status on connected clients.
+  published for it (by a reservation or an observation that went stale) is
+  announced as `unknown` again at the next sweep instead of keeping that
+  status on connected clients.
 - `user-invite --role admin` and `user-grant --role admin` no longer fail with
   a Keycloak 403 and roll the account back; the provisioner needs no new
   permission.
@@ -610,7 +670,8 @@ First prototype, published as a pre-release.
   model.
 - Web app with role-based registration and an admin dashboard.
 
-[Unreleased]: https://github.com/Estaciona-AI/estaciona-ai/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/Estaciona-AI/estaciona-ai/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/Estaciona-AI/estaciona-ai/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/Estaciona-AI/estaciona-ai/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/Estaciona-AI/estaciona-ai/compare/beta-1.0...v0.9.0
 [beta-1.0]: https://github.com/Estaciona-AI/estaciona-ai/compare/alpha-0.1...beta-1.0

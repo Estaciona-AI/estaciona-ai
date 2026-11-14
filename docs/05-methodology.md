@@ -103,11 +103,30 @@ At this revision, inference requires at least one valid hour in the previous
 24 hours and at least 84 in the previous 168; it does not require a contiguous
 week. Insufficient recent history prevents inference. A simulated training
 prior therefore does not make an unobserved site eligible for a forecast
-([admission](../gateway/ml/train.py)).
+([admission](../gateway/ml/train.py)). A valid hour holds the last accepted
+reading of each spot in that hour: one sample, not an hour of observation. The
+84-hour condition admits inference; it is not evidence that a forecast is
+accurate.
 
-**Baselines.** A seasonal naive forecast (the same hours one week earlier) and a
-weekly profile (the mean of the same hours over the previous four weeks)
-[[6]](references.md).
+**Provenance of the history.** An observation carries the time at which the
+vision process received the frame, not the time at which the scene was recorded
+([capture](../vision/src/capture.py)). A recording replayed in a loop therefore
+produces hours that look new and repeat the same content: their calendar
+features are artefacts of the playback, and more hours of it are not more
+evidence. Vision refuses a file source only when the installation environment
+is `production` ([configuration](../vision/src/configuration.py)). The stored
+hours carry no source of their own, so the training manifest and the
+prospective report state the installation environment and whether recorded
+sources were allowed (`history`). A result from an installation outside
+`production` is not field evidence. A recording published as a network stream
+is not distinguishable from a camera by this record.
+
+**Baselines.** A seasonal naive forecast (the same hours one week earlier), a
+weekly profile (the mean of the same hours over the previous four weeks) and
+persistence (the last valid rate of the 24 hours before the origin, held for
+every horizon) [[6]](references.md). Persistence is the reference where
+occupancy barely changes; the two weekly baselines cannot represent a level
+that holds without a weekly rhythm.
 
 **Acceptance gate.** Training attempts the gate after at least 672 valid real
 hours have accrued. Evaluation also needs at least 168 valid training hours
@@ -117,22 +136,48 @@ candidate is refitted excluding holdout targets and evaluated at six-hour
 rolling origins [[7]](references.md). Normalized mean absolute error, root mean
 squared error and bias, in percentage points of the rate, use the common finite
 points forecast by every method. Report that point count as well as the scores.
+The comparison also gives each method's error per horizon, the points each
+method covers, the number of origins and the number of distinct target hours.
+Forecasts from neighbouring origins overlap on the same target hours, so the
+points are not independent samples and no interval is derived from them.
 
 The serving choice minimizes the reported normalized MAE among the model and
 baselines; a tie can retain the model. If evaluation is unavailable, the
 manifest records `not_evaluated` and the model remains the default serving
-choice, subject to inference admission. The final model is fitted using the
-available training history. The gate is a selection rule on a historical
-sample, not proof of future superiority
+choice, subject to inference admission. That default rests on the simulated
+prior, not on evidence from the site: on a history shaped like a looped
+recording the model was worse than persistence (F-14, Q-05). The final model is
+fitted using the available training history. The gate is a selection rule on a
+historical sample, not proof of future superiority
 ([training](../gateway/ml/train.py), [backtest](../gateway/ml/backtest.py)).
 
 **Prospective scoring.** The worker records the first forecast issued for an
-origin in a local ledger; a restart cannot rewrite that forecast. After its
-24-hour horizon, it is scored against the later observations. A missing issued
-forecast or invalid observation window yields unavailable evaluation, not zero
-error. Reconstructing a past forecast with today's model is not prospective
-evidence. Record the artifact digest, serving method, history coverage and
-evaluation status alongside each result ([ledger and scoring](../gateway/ml/inference.py)).
+origin in a local ledger, with the method served and what the model and each
+baseline forecast from the same history; a restart cannot rewrite them. Entries
+are kept for 366 days. After its 24-hour horizon, the served forecast is scored
+against the later observations and published; that evaluation carries no
+baseline comparison. A missing issued forecast or invalid observation window
+yields unavailable evaluation, not zero error. Reconstructing a past forecast
+with today's model is not prospective evidence. Record the artifact digest,
+serving method, history coverage and evaluation status alongside each result
+([ledger and scoring](../gateway/ml/inference.py)).
+
+**Prospective comparison.** `uv run --locked python -m ml.prospective`, run in
+`gateway/` with the worker's read-only database role, scores every recorded
+method on the same points: target hours that have closed, were observed, were
+still open when the forecast was recorded and were forecast by every method. It
+counts the excluded points by reason (recorded after the target hour closed,
+pending, unobserved) and reports, per day of origin, on how many days the
+served forecast had the lower error. Origins recorded before the ledger held
+the baselines are left out of the comparison. Count days, not points, as the
+units of evidence ([prospective comparison](../gateway/ml/prospective.py)).
+
+**Walk-forward check.** For an offline comparison longer than one holdout,
+`walk_forward` refits the model for each block of origins on the hours before
+that block and forecasts the block ([backtest](../gateway/ml/backtest.py)).
+State the history's provenance, the code revision, configuration, period and
+seed with every result, and report a result on a replayed or simulated history
+as such.
 
 **Simulation.** The campus simulator samples plausible sites around the
 configured profile, censors demand at capacity and adds detection noise and

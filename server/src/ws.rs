@@ -7,6 +7,8 @@ pub mod ws_edge;
 
 pub use ws_edge::ws_edge_handler;
 
+use std::time::Duration;
+
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
 
@@ -19,6 +21,17 @@ use crate::ws::messages::{AppToServerMsg, ServerToAppMsg};
 struct SpotRow {
     id: String,
     status: String,
+    manual: bool,
+}
+
+impl From<SpotRow> for ServerToAppMsg {
+    fn from(row: SpotRow) -> Self {
+        Self::SpotUpdate {
+            spot_id: row.id,
+            status: row.status,
+            manual: row.manual,
+        }
+    }
 }
 
 pub(crate) async fn handle_app_socket(socket: WebSocket, state: SharedState, session: AuthSession) {
@@ -50,10 +63,7 @@ pub(crate) async fn handle_app_socket(socket: WebSocket, state: SharedState, ses
             })?;
         for row in db_spots {
             session.check_expiration()?;
-            let msg = ServerToAppMsg::SpotUpdate {
-                spot_id: row.id,
-                status: row.status,
-            };
+            let msg = ServerToAppMsg::from(row);
             if let Ok(json_str) = serde_json::to_string(&msg)
                 && write_message(&mut sender, Message::Text(json_str.into()))
                     .await
@@ -111,10 +121,7 @@ pub(crate) async fn handle_app_socket(socket: WebSocket, state: SharedState, ses
                                     .expect("created reservation has expiry"),
                             };
 
-                            let update = ServerToAppMsg::SpotUpdate {
-                                spot_id: spot_id.clone(),
-                                status: "reserved".to_string(),
-                            };
+                            let update = ServerToAppMsg::spot(spot_id.clone(), "reserved");
 
                             if let Ok(json) = serde_json::to_string(&confirm) {
                                 let _ = private_tx.try_send(json);
@@ -151,10 +158,7 @@ pub(crate) async fn handle_app_socket(socket: WebSocket, state: SharedState, ses
                         {
                             Ok(Some(transition)) => {
                                 if let Some(status) = transition.spot_status {
-                                    let update = ServerToAppMsg::SpotUpdate {
-                                        spot_id: transition.spot_id,
-                                        status: status.to_string(),
-                                    };
+                                    let update = ServerToAppMsg::spot(transition.spot_id, status);
                                     if let Ok(json) = serde_json::to_string(&update) {
                                         let _ = value.installation.tx.send(json);
                                     }
@@ -217,10 +221,7 @@ pub(crate) async fn handle_dashboard_socket(
             })?;
         for row in db_spots {
             session.check_expiration()?;
-            let msg = ServerToAppMsg::SpotUpdate {
-                spot_id: row.id,
-                status: row.status,
-            };
+            let msg = ServerToAppMsg::from(row);
             if let Ok(json_str) = serde_json::to_string(&msg)
                 && write_message(&mut sender, Message::Text(json_str.into()))
                     .await
@@ -246,23 +247,28 @@ pub(crate) async fn handle_dashboard_socket(
             }
         }
 
+        let mut heartbeat = heartbeat_interval(HEARTBEAT_INTERVAL);
         loop {
-            let received = broadcast_rx.recv().await;
-            session.check_expiration()?;
-            if write_broadcast(&mut sender, received).await.is_err() {
-                break;
+            tokio::select! {
+                received = broadcast_rx.recv() => {
+                    session.check_expiration()?;
+                    if write_broadcast(&mut sender, received).await.is_err() {
+                        break;
+                    }
+                }
+                _ = heartbeat.tick() => {
+                    session.check_expiration()?;
+                    if write_heartbeat(&mut sender).await.is_err() {
+                        break;
+                    }
+                }
             }
         }
         Ok::<(), AuthError>(())
     };
-    // Poll incoming frames too, so a quiet dashboard observes client closure.
-    let recv_task = async {
-        while let Some(Ok(message)) = receiver.next().await {
-            if matches!(message, Message::Close(_)) {
-                break;
-            }
-        }
-    };
+    // Poll incoming frames too, so a quiet dashboard observes client closure,
+    // and a client that answers nothing, not even the pings, is dropped.
+    let recv_task = watch_client(&mut receiver, CLIENT_IDLE_LIMIT);
     let invalidation = tokio::select! {
         biased;
         _ = tokio::time::sleep_until(session.deadline) => true,
@@ -274,6 +280,48 @@ pub(crate) async fn handle_dashboard_socket(
         tracing::debug!(user_id = %session.user_id, "Closing invalid dashboard WebSocket session");
     }
     // Never flush an interrupted data send while invalidating authentication.
+}
+
+/// How often `/ws/dashboard` tells a client the connection is alive.
+pub(crate) const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
+/// A dashboard that sends nothing for this long, not even a pong, is gone.
+pub(crate) const CLIENT_IDLE_LIMIT: Duration = Duration::from_secs(60);
+
+/// Ticks every `period`, the first one a period from now: the snapshot that
+/// opens the connection already shows it is alive.
+fn heartbeat_interval(period: Duration) -> tokio::time::Interval {
+    let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    interval
+}
+
+/// A `HEARTBEAT` for the page, which cannot see protocol pings, and a ping
+/// whose pong the browser sends by itself and `watch_client` observes.
+async fn write_heartbeat<S>(sink: &mut S) -> Result<(), WriteError>
+where
+    S: futures_util::Sink<Message> + Unpin,
+{
+    let heartbeat =
+        serde_json::to_string(&ServerToAppMsg::Heartbeat).expect("heartbeat serializes");
+    write_message(sink, Message::Text(heartbeat.into())).await?;
+    write_message(sink, Message::Ping(Default::default())).await
+}
+
+/// Returns when the client closes, fails or stays silent for `limit`.
+async fn watch_client<R, E>(receiver: &mut R, limit: Duration)
+where
+    R: futures_util::Stream<Item = Result<Message, E>> + Unpin,
+{
+    loop {
+        match tokio::time::timeout(limit, receiver.next()).await {
+            Ok(Some(Ok(Message::Close(_)) | Err(_)) | None) => return,
+            Ok(Some(Ok(_))) => {}
+            Err(_) => {
+                tracing::debug!("Closing silent dashboard WebSocket");
+                return;
+            }
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -451,5 +499,95 @@ mod delivery_tests {
             .await
             .unwrap();
         assert_eq!(sink.messages, [Message::Text("delivered".into())]);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_waits_a_period_then_repeats() {
+        let period = Duration::from_millis(60);
+        let start = Instant::now();
+        let mut heartbeat = heartbeat_interval(period);
+        heartbeat.tick().await;
+        assert!(
+            start.elapsed() >= period,
+            "the snapshot is the first sign of life"
+        );
+        heartbeat.tick().await;
+        assert!(start.elapsed() >= period * 2);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_reaches_the_page_and_the_protocol() {
+        let mut sink = TestSink {
+            blocked_before_send: false,
+            blocked_on_flush: false,
+            messages: vec![],
+        };
+        write_heartbeat(&mut sink).await.unwrap();
+        assert_eq!(
+            sink.messages,
+            [
+                Message::Text(r#"{"type":"HEARTBEAT"}"#.into()),
+                Message::Ping(Default::default())
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn silent_client_is_dropped_after_the_limit() {
+        let mut silent = futures_util::stream::pending::<Result<Message, ()>>();
+        let limit = Duration::from_millis(80);
+        let start = Instant::now();
+        watch_client(&mut silent, limit).await;
+        assert!(start.elapsed() >= limit);
+    }
+
+    #[tokio::test]
+    async fn pongs_keep_a_quiet_client_connected() {
+        let limit = Duration::from_millis(120);
+        // A pong every 40 ms for 400 ms: never silent for the limit.
+        let pongs = futures_util::stream::unfold(0, |sent| async move {
+            if sent == 10 {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            Some((Ok::<_, ()>(Message::Pong(Default::default())), sent + 1))
+        })
+        .chain(futures_util::stream::pending());
+        let mut pongs = Box::pin(pongs);
+        let start = Instant::now();
+        watch_client(&mut pongs, limit).await;
+        assert!(
+            start.elapsed() >= Duration::from_millis(400) + limit,
+            "dropped while the client still answered"
+        );
+    }
+
+    #[tokio::test]
+    async fn closing_client_ends_the_watch_at_once() {
+        let mut closing = futures_util::stream::iter([Ok::<_, ()>(Message::Close(None))]);
+        let start = Instant::now();
+        watch_client(&mut closing, Duration::from_secs(60)).await;
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn catalog_states_the_keepalive_the_server_keeps() {
+        let artifacts = crate::contracts::artifacts();
+        let channels = artifacts["v1/catalog.json"]["websockets"]
+            .as_array()
+            .cloned();
+        let dashboard = channels
+            .into_iter()
+            .flatten()
+            .find(|channel| channel["id"] == "dashboard")
+            .expect("dashboard channel in the catalog");
+        assert_eq!(
+            dashboard["keepalive"]["interval_seconds"],
+            HEARTBEAT_INTERVAL.as_secs()
+        );
+        assert_eq!(
+            dashboard["keepalive"]["idle_close_seconds"],
+            CLIENT_IDLE_LIMIT.as_secs()
+        );
     }
 }

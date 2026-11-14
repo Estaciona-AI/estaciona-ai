@@ -30,12 +30,18 @@ pub fn stale_after_secs() -> f64 {
 }
 
 /// Active spots with the status apps see; binds the threshold as `$1`.
-pub const SNAPSHOT_SQL: &str = "SELECT id, CASE WHEN status = 'reserved' THEN status \
+/// A status set by hand is shown as it is, marked manual, until a newer
+/// reading or a reservation replaces it: it is not a reading, so it does not
+/// go stale like one.
+pub const SNAPSHOT_SQL: &str = "SELECT id, CASE WHEN status = 'reserved' \
+       OR manual_since IS NOT NULL THEN status \
      WHEN observation_timestamp IS NULL \
        OR observation_timestamp <= NOW() - make_interval(secs => $1) THEN 'unknown' \
-     ELSE status END AS status FROM spots WHERE is_active";
+     ELSE status END AS status, manual_since IS NOT NULL AS manual \
+     FROM spots WHERE is_active";
 
 const STALE_SQL: &str = "SELECT id FROM spots WHERE is_active AND status <> 'reserved' \
+     AND manual_since IS NULL \
      AND NOT COALESCE(observation_timestamp > NOW() - make_interval(secs => $1), FALSE)";
 
 async fn stale_spots(state: &SharedState) -> Result<HashSet<String>, sqlx::Error> {
@@ -66,7 +72,9 @@ impl Sweeper {
     /// A status published for a spot replaces `unknown` on connected clients,
     /// whatever its source: an observation, an administrator, a reservation.
     fn heard(&mut self, frame: &str) {
-        if let Ok(ServerToAppMsg::SpotUpdate { spot_id, status }) = serde_json::from_str(frame)
+        if let Ok(ServerToAppMsg::SpotUpdate {
+            spot_id, status, ..
+        }) = serde_json::from_str(frame)
             && status != "unknown"
         {
             self.announced.remove(&spot_id);
@@ -93,10 +101,7 @@ impl Sweeper {
         let mut newly: Vec<String> = stale.difference(&self.announced).cloned().collect();
         newly.sort();
         for spot_id in &newly {
-            let update = ServerToAppMsg::SpotUpdate {
-                spot_id: spot_id.clone(),
-                status: "unknown".to_owned(),
-            };
+            let update = ServerToAppMsg::spot(spot_id.clone(), "unknown");
             if let Ok(json) = serde_json::to_string(&update) {
                 let _ = state.installation.tx.send(json);
             }
