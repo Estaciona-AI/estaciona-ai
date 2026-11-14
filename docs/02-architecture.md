@@ -75,8 +75,14 @@ ownership; lifetimes come from the installation's reservation policy
 
 The JSON Schemas are generated from the server's Rust types and exported with
 `--export-contracts`. The schema bundle is versioned independently of the
-release (2.0.0 in `v0.10.0`); continuous integration refuses an incompatible
-change published under the same major version.
+release (2.0.0 in `v0.10.0`, 2.1.0 in `v0.11.0`, which only adds to it);
+continuous integration refuses an incompatible change published under the same
+major version.
+
+The dashboard channel sends a heartbeat message with a protocol ping and closes
+a connection that stays silent, so a client can tell a quiet site from a dead
+connection. The [catalog](../shared/v1/catalog.json) states both intervals
+under the channel's `keepalive`.
 
 Three version identifiers have different scopes: the release tag identifies the
 software; the manifest's version identifies the schema bundle; and an envelope's
@@ -105,7 +111,10 @@ ahead of its release.
 
 Physical observations, reservations and forecasts have different authority.
 Vision supplies physical occupancy; the server applies reservation rules and
-freshness to the status it serves. The forecast reads aggregated physical
+freshness to the status it serves. A status set by an administrator is
+published as manual and is not aged by the freshness sweep; a reading taken
+after it, a reservation or its release replaces it, and a reading taken before
+it is recorded without replacing it. The forecast reads aggregated physical
 history rather than treating a reservation as a parked vehicle. A forecast
 never writes current spot occupancy. See [edge application](../server/src/edge_delivery.rs)
 and [forecast history](../gateway/ml/history.py).

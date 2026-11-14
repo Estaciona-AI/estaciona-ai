@@ -9,7 +9,7 @@ Status as of `develop` at `e8a1a7b` (2026-11-01). Classes follow
 |---|---|---|---|
 | F-01 | `v0.9.0` is the first non-pre-release build, published on 2026-10-23 as a pilot release. | Code | Tag `v0.9.0`; `CHANGELOG.md` |
 | F-02 | Each installation runs its own server and PostgreSQL database, bound to explicit organization, installation and environment identifiers. | Code, test | `server/src/installation/`; isolation tests (#133–#135) |
-| F-03 | The published contract bundle in `v0.10.0` is version 2.0.0, under the HTTP prefix `/api/v1`. | Code | `shared/v1/manifest.json` |
+| F-03 | The published contract bundle in `v0.10.0` is version 2.0.0, under the HTTP prefix `/api/v1`; `v0.11.0` publishes 2.1.0, which only adds to it. | Code | `shared/v1/manifest.json` |
 | F-04 | Persisted supported events keep one UUID across retries and are acknowledged only after the receiver's commit, at both delivery hops. A local persistence ACK is distinct from a server receipt. | Code, test | `vision/src/delivery.py`, `gateway/gateway.py`, `server/src/edge_delivery.rs`; [delivery semantics](02-architecture.md#22-data-flows) |
 | F-05 | In a transport-only staging test with 400 synthetic spot IDs and 20 cameras, an in-flight window of eight raised confirmation throughput from 6.1 to 15.7 events/s and lowered p95 latency from 91.9 s to 0.68 s. | Measurement | #154 |
 | F-06 | With spot-only tiles and TensorRT FP16 RT-DETR-R18, the minimum per-input rate at 10 inputs rose from 0.53 to 2.48 FPS on a desktop RTX 5060 Ti used as a proxy; resident memory per process fell from 3.7 GB to 1.35 GB. | Measurement | #152, #153, #155, #156 |

@@ -12,6 +12,19 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-14
+
+**Release stage: pilot.** This release keeps what a panel shows closer to what
+the cameras last confirmed and makes the forecast evaluation harder to satisfy.
+Dashboards receive a heartbeat and silent connections are closed, a status set
+by an administrator is marked and survives the freshness sweep, and an outdated
+observation is no longer broadcast as current. The forecast gate compares the
+model with persistence, the ledger records what every method issued, and the
+manifest states whether the history may be a recording. The wire contract is
+2.1.0, which only adds to 2.0.0, and one migration must be run before the
+server starts. Capacity on the target hardware and field validation with real
+cameras, including of the forecast, are still pending.
+
 ### Upgrade notes
 
 - **Run `--migrate` before starting this release.** It adds
@@ -37,7 +50,6 @@ Semantic Versioning was adopted. Those tags are kept unchanged.
   `history.environment` and `history.recorded_sources_allowed`, which is
   false only in a production installation. Elsewhere vision accepts a
   recorded file, and hours of a looped recording are not field evidence.
-
 - `/ws/dashboard` sends `{"type":"HEARTBEAT"}` every 15 seconds and a
   protocol ping with it, and closes a connection that sends nothing back for
   60 seconds. A panel can now tell a quiet site from a dead connection. The
@@ -658,7 +670,8 @@ First prototype, published as a pre-release.
   model.
 - Web app with role-based registration and an admin dashboard.
 
-[Unreleased]: https://github.com/Estaciona-AI/estaciona-ai/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/Estaciona-AI/estaciona-ai/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/Estaciona-AI/estaciona-ai/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/Estaciona-AI/estaciona-ai/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/Estaciona-AI/estaciona-ai/compare/beta-1.0...v0.9.0
 [beta-1.0]: https://github.com/Estaciona-AI/estaciona-ai/compare/alpha-0.1...beta-1.0
