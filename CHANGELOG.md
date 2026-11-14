@@ -50,7 +50,6 @@ cameras, including of the forecast, are still pending.
   `history.environment` and `history.recorded_sources_allowed`, which is
   false only in a production installation. Elsewhere vision accepts a
   recorded file, and hours of a looped recording are not field evidence.
-
 - `/ws/dashboard` sends `{"type":"HEARTBEAT"}` every 15 seconds and a
   protocol ping with it, and closes a connection that sends nothing back for
   60 seconds. A panel can now tell a quiet site from a dead connection. The
