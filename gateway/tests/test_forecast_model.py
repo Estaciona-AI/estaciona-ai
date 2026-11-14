@@ -146,7 +146,7 @@ def test_comparison_scores_only_points_every_method_covers():
     assert scores["model"]["nmae_pct"] == pytest.approx(10.0)
 
 
-def campus_engine(days, capacity=6):
+def campus_engine(days, capacity=6, environment="production"):
     """A small lot with a weekday class pattern ending at the current hour."""
     end = pd.Timestamp.now(tz="UTC").floor("h")
     hours = pd.date_range(end - timedelta(days=days), end, freq="h", inclusive="left")
@@ -158,7 +158,7 @@ def campus_engine(days, capacity=6):
         for hour, is_busy in zip(hours, busy)
         for index, spot in enumerate(spots)
     ]
-    return history_engine(spots, rows=rows)
+    return history_engine(spots, rows=rows, environment=environment)
 
 
 @pytest.fixture
@@ -179,6 +179,10 @@ def test_training_publishes_a_verifiable_artifact_and_serves_v2(
     assert manifest["evaluation"]["status"] == "evaluated"
     assert manifest["serving"] in ("model",) + backtest.BASELINES
     assert manifest["profile"]["specified"] is False
+    assert manifest["history"] == {
+        "environment": "production",
+        "recorded_sources_allowed": False,
+    }
 
     payload = PredictiveEngine(str(tmp_path), engine).predict_trends()
     forecast = payload["next_24h_occupancy"]
@@ -198,6 +202,35 @@ def test_training_publishes_a_verifiable_artifact_and_serves_v2(
         "payload": json.loads(json.dumps(payload, allow_nan=False)),
     }
     jsonschema.Draft202012Validator(schema).validate(envelope)
+    engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "environment, recorded_sources_allowed",
+    [("production", False), ("demo", True), ("test", True)],
+)
+def test_history_outside_production_is_not_labelled_as_field_evidence(
+    tmp_path, small_training, environment, recorded_sources_allowed
+):
+    # Vision accepts a recorded file, looped or not, everywhere but production.
+    engine = campus_engine(days=10, environment=environment)
+    manifest = train.train_occupancy_model(engine, str(tmp_path), variants=2)
+    assert manifest["real_hours"] == 10 * 24
+    assert manifest["history"] == {
+        "environment": environment,
+        "recorded_sources_allowed": recorded_sources_allowed,
+    }
+    engine.dispose()
+
+
+def test_an_unbound_installation_cannot_vouch_for_its_history():
+    engine = history_engine(["a"])
+    with engine.begin() as connection:
+        connection.execute(text("DELETE FROM installation_binding"))
+    assert train.history_provenance(engine) == {
+        "environment": None,
+        "recorded_sources_allowed": True,
+    }
     engine.dispose()
 
 

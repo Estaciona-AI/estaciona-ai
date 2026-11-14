@@ -103,6 +103,24 @@ def get_db_engine():
     return create_engine(db_url)
 
 
+def history_provenance(engine):
+    """What is known about where the stored hours came from.
+
+    They carry no source of their own; the environment the installation was
+    bound as is all there is. Only a production installation refuses recorded
+    files as vision sources, so anywhere else the history may be a recording
+    played in a loop: more hours of it are not more evidence.
+    """
+    with engine.connect() as connection:
+        environment = connection.execute(
+            text("SELECT environment FROM installation_binding")
+        ).scalar_one_or_none()
+    return {
+        "environment": environment,
+        "recorded_sources_allowed": environment != "production",
+    }
+
+
 def deployment_context(engine, capacity):
     """What an artifact must match to be served: the installation whose
     database it read and the site profile (which depends on capacity)."""
@@ -331,6 +349,7 @@ def train_occupancy_model(engine=None, models_dir=None, variants=SIM_VARIANTS):
         "capacity_at_training": capacity,
         "real_hours": real_hours,
         "source": "blended" if real_hours else "synthetic_prior",
+        "history": history_provenance(engine),
         "profile": {"specified": profile.specified, "sha256": profile.digest()},
         "context": deployment_context(engine, capacity),
         "simulator": {"variants": variants, "days": SIM_DAYS, "seed": SIM_SEED},
