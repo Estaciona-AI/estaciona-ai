@@ -124,16 +124,98 @@ def test_recent_history_rule():
 
 
 @pytest.mark.parametrize(
-    "model, expected",
-    [(1.0, "model"), (2.5, "seasonal_naive"), (3.5, "seasonal_naive")],
+    "model, persistence, expected",
+    [
+        (1.0, 9.0, "model"),
+        (2.5, 9.0, "seasonal_naive"),
+        (3.5, 9.0, "seasonal_naive"),
+        # Holding the last observation is a baseline too: a model that loses
+        # to it has not beaten every baseline.
+        (1.0, 0.5, "persistence"),
+    ],
 )
-def test_serving_requires_beating_every_baseline(model, expected):
+def test_serving_requires_beating_every_baseline(model, persistence, expected):
     scores = {
         "model": {"nmae_pct": model},
         "seasonal_naive": {"nmae_pct": 2.0},
         "weekly_profile": {"nmae_pct": 3.0},
+        "persistence": {"nmae_pct": persistence},
     }
     assert backtest.choose_serving(scores) == expected
+
+
+def test_persistence_holds_the_last_valid_rate_of_the_previous_day():
+    rate = np.full(120, np.nan)
+    rate[40], rate[49] = 0.3, 0.7
+    held = backtest.persistence(rate, [50, 65, 74])
+    assert held.shape == (3, backtest.HORIZON)
+    # Hour 49 is the last one observed before origins 50 and 65.
+    np.testing.assert_array_equal(held[:2], np.full((2, backtest.HORIZON), 0.7))
+    # At origin 74 it is 25 hours old: too stale to stand for the present.
+    assert np.isnan(held[2]).all()
+
+
+def test_persistence_never_reads_rates_at_or_after_the_origin():
+    rng = np.random.default_rng(1)
+    rate = rng.random(120)
+    before = backtest.persistence(rate, [50])
+    rate[50:] = rng.random(70)
+    np.testing.assert_array_equal(backtest.persistence(rate, [50]), before)
+
+
+def test_comparison_reports_each_horizon_and_what_the_common_set_leaves_out():
+    # Three origins, two horizons; the second and third origins overlap.
+    actual = np.array([[0.5, 0.5], [0.5, np.nan], [0.5, 0.5]])
+    # The model misses the second origin's first hour, which `other` cannot
+    # forecast: that point is in neither method's score.
+    exact_then_far = np.array([[0.5, 0.9], [0.9, 0.9], [0.5, 0.9]])
+    always_near = np.array([[0.6, 0.6], [np.nan, 0.6], [0.6, 0.6]])
+    scores = backtest.compare(
+        actual, {"model": exact_then_far, "other": always_near}, origins=[10, 50, 11]
+    )
+    assert scores["observed_points"] == 5
+    assert scores["covered_points"] == {"model": 5, "other": 4}
+    assert scores["points"] == 4
+    assert scores["origins"] == 2
+    # Origins 10 and 11 score hours 10, 11 and 11, 12: three hours, four points.
+    assert scores["target_hours"] == 3
+    assert scores["points_by_horizon"] == [2, 2]
+    # One average would hide that the model is exact now and far off later.
+    assert scores["model"]["nmae_pct_by_horizon"] == pytest.approx([0.0, 40.0])
+    assert scores["other"]["nmae_pct_by_horizon"] == pytest.approx([10.0, 10.0])
+    assert scores["model"]["nmae_pct"] == pytest.approx(20.0)
+
+
+def test_a_horizon_without_comparable_points_has_no_score():
+    actual = np.array([[0.5, np.nan]])
+    scores = backtest.compare(actual, {"model": np.array([[0.4, 0.4]])})
+    assert scores["points_by_horizon"] == [1, 0]
+    assert scores["model"]["nmae_pct_by_horizon"] == [pytest.approx(10.0), None]
+    assert "target_hours" not in scores
+
+
+def test_walk_forward_fits_each_block_without_its_own_or_later_hours():
+    rate = np.arange(200.0)
+    seen = []
+
+    def fit(known):
+        seen.append(known.copy())
+        return len(seen)
+
+    def predict(model, origins):
+        return np.full((len(origins), backtest.HORIZON), float(model))
+
+    origins = np.arange(100, 160, 6)
+    forecasts = backtest.walk_forward(rate, origins, fit, predict, refit_every=24)
+
+    assert len(seen) == 3
+    for known, cutoff in zip(seen, (100, 124, 148)):
+        np.testing.assert_array_equal(known[:cutoff], rate[:cutoff])
+        assert np.isnan(known[cutoff:]).all()
+    # Each origin is forecast by the model fitted for its own block.
+    assert forecasts[:, 0].tolist() == [1, 1, 1, 1, 2, 2, 2, 2, 3, 3]
+    assert np.isfinite(rate).all()  # the caller's history is left untouched
+    assert backtest.walk_forward(rate, [], fit, predict).shape == (0, backtest.HORIZON)
 
 
 def test_comparison_scores_only_points_every_method_covers():
@@ -161,6 +243,22 @@ def campus_engine(days, capacity=6, environment="production"):
     return history_engine(spots, rows=rows, environment=environment)
 
 
+def regime_engine(days, capacity=6, regime_days=9):
+    """A lot whose level holds for days and then moves, with no weekly rhythm:
+    what a recording swapped now and then, or a change of term, looks like."""
+    end = pd.Timestamp.now(tz="UTC").floor("h")
+    hours = pd.date_range(end - timedelta(days=days), end, freq="h", inclusive="left")
+    spots = [f"s{index}" for index in range(capacity)]
+    levels = (5, 1, 4, 0, 3, 6, 2)
+    rows = [
+        (spot, hour, "occupied" if index < level else "free")
+        for position, hour in enumerate(hours)
+        for level in [levels[(position // (regime_days * 24)) % len(levels)]]
+        for index, spot in enumerate(spots)
+    ]
+    return history_engine(spots, rows=rows, environment="demo")
+
+
 @pytest.fixture
 def small_training(monkeypatch):
     monkeypatch.setattr(train, "SIM_DAYS", 63)
@@ -183,6 +281,12 @@ def test_training_publishes_a_verifiable_artifact_and_serves_v2(
         "environment": "production",
         "recorded_sources_allowed": False,
     }
+    # Every baseline is scored on the same points as the model, hour by hour.
+    scores = manifest["evaluation"]["scores"]
+    for name in ("model",) + backtest.BASELINES:
+        assert len(scores[name]["nmae_pct_by_horizon"]) == backtest.HORIZON
+    assert sum(scores["points_by_horizon"]) == scores["points"]
+    assert scores["target_hours"] < scores["points"]
 
     payload = PredictiveEngine(str(tmp_path), engine).predict_trends()
     forecast = payload["next_24h_occupancy"]
@@ -202,6 +306,30 @@ def test_training_publishes_a_verifiable_artifact_and_serves_v2(
         "payload": json.loads(json.dumps(payload, allow_nan=False)),
     }
     jsonschema.Draft202012Validator(schema).validate(envelope)
+    engine.dispose()
+
+
+def test_a_level_that_holds_is_served_by_persistence_not_by_weekly_patterns(
+    tmp_path, small_training
+):
+    engine = regime_engine(days=49)
+    manifest = train.train_occupancy_model(engine, str(tmp_path), variants=2)
+    scores = manifest["evaluation"]["scores"]
+    assert manifest["serving"] == "persistence"
+    assert scores["persistence"]["nmae_pct"] < min(
+        scores[name]["nmae_pct"]
+        for name in ("model", "seasonal_naive", "weekly_profile")
+    )
+    # What is served is then the level of the last observed hour, held.
+    payload = PredictiveEngine(str(tmp_path), engine).predict_trends()
+    with engine.connect() as connection:
+        last = connection.execute(
+            text(
+                "SELECT COUNT(*) FROM physical_occupancy_hourly WHERE status='occupied' "
+                "AND hour_start=(SELECT MAX(hour_start) FROM physical_occupancy_hourly)"
+            )
+        ).scalar_one()
+    assert {item["occupancy"] for item in payload["next_24h_occupancy"]} == {last}
     engine.dispose()
 
 

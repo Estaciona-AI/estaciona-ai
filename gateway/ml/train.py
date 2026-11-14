@@ -24,6 +24,7 @@ if __package__:
         choose_serving,
         compare,
         origins_between,
+        persistence,
         seasonal_naive,
         weekly_profile,
     )
@@ -39,6 +40,7 @@ else:
         choose_serving,
         compare,
         origins_between,
+        persistence,
         seasonal_naive,
         weekly_profile,
     )
@@ -269,7 +271,11 @@ def predict_rates(model, rate, calendar, origins):
 
 
 def baseline_rates(name, rate, origins):
-    method = {"seasonal_naive": seasonal_naive, "weekly_profile": weekly_profile}[name]
+    method = {
+        "seasonal_naive": seasonal_naive,
+        "weekly_profile": weekly_profile,
+        "persistence": persistence,
+    }[name]
     return method(rate, origins)
 
 
@@ -286,7 +292,7 @@ def gate(profile, index, real_rate, sims):
     predictions = {"model": predict_rates(candidate, real_rate, calendar, holdout)}
     for name in BASELINES:
         predictions[name] = baseline_rates(name, real_rate, holdout)
-    scores = compare(actual_windows(real_rate, holdout), predictions)
+    scores = compare(actual_windows(real_rate, holdout), predictions, holdout)
     if scores["points"] == 0:
         return {"status": "not_evaluated", "reason": "no_comparable_points"}
     return {"status": "evaluated", "holdout_days": GATE_DAYS, "scores": scores}
