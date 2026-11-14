@@ -53,27 +53,27 @@ at a commit, not exhaustive coverage or an absence of defects.
 
 ## 7.4 Verification snapshot
 
-The following executions were verified on GitHub Actions on 2026-10-28 at
-`develop` `7bf6c6e` ([CI run 40738777401](https://github.com/Estaciona-AI/estaciona-ai/actions/runs/40738777401)).
+The following executions were verified on GitHub Actions on 2026-11-14 at
+`main` `b96e3cc`, the commit tagged `v0.11.0` ([CI run 43600512869](https://github.com/Estaciona-AI/estaciona-ai/actions/runs/43600512869)).
 They are CI results, not a new local execution or a capacity benchmark.
 
 | Suite and package directory | Command | Result | Conditions |
 |---|---|---|---|
-| Server (`server/`) | `cargo test --locked --all-features` | 407 passed | PostgreSQL service; isolated test databases |
+| Server (`server/`) | `cargo test --locked --all-features` | 422 passed | PostgreSQL service; isolated test databases |
 | Vision (`vision/`) | `uv run --locked pytest --ignore=tests/test_rtsp_lab_integration.py` | 407 passed | Dedicated RTSP case executed separately |
-| Gateway and forecast (`gateway/`) | `uv run --locked pytest --junitxml=test-results/gateway.xml` | 395 passed | Server binary and PostgreSQL available; integration required |
+| Gateway and forecast (`gateway/`) | `uv run --locked pytest --junitxml=test-results/gateway.xml` | 422 passed | Server binary and PostgreSQL available; integration required |
 | Contracts (`shared/`) | `uv run --locked pytest --junitxml=test-results/contracts.xml` | 36 passed | Exported schemas and compatibility checks |
-| Identity tools (`tools/identity/`) | `python3 -m unittest -v test_realm test_provision` | 17 passed | Synthetic provisioning and realm fixtures |
+| Identity tools (`tools/identity/`) | `python3 -m unittest -v test_realm test_provision` | 20 passed | Synthetic provisioning and realm fixtures |
 | RTSP laboratory (`vision/`) | `uv run --locked pytest -q tests/test_rtsp_lab_integration.py` | 1 passed | Docker, pinned publishers and recovery scenario |
 
 The main run also passed its formatting, lint, build, license and contract
 compatibility gates. The separate
-[Rust dependency security run](https://github.com/Estaciona-AI/estaciona-ai/actions/runs/40738777927)
-and [Python dependency security run](https://github.com/Estaciona-AI/estaciona-ai/actions/runs/40738777549)
+[Rust dependency security run](https://github.com/Estaciona-AI/estaciona-ai/actions/runs/43600512802)
+and [Python dependency security run](https://github.com/Estaciona-AI/estaciona-ai/actions/runs/43600512810)
 passed at the same commit. These results concern the committed dependencies
 and checked paths; they do not certify an installation.
 
-F-11 retains the previous CI snapshot at `9036d10`, and F-10 the earlier local
-snapshot at `78a14eb`, including its integration skips. Neither is the current
-suite count. Update this section before a release,
+F-12 retains the previous CI snapshot at `7bf6c6e`, F-11 the one at `9036d10`,
+and F-10 the earlier local snapshot at `78a14eb`, including its integration
+skips. None of them is the current suite count. Update this section before a release,
 and whenever a changed verification result is used to support a claim.

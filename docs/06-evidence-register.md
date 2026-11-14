@@ -1,6 +1,6 @@
 # 6. Evidence register
 
-Status as of `develop` at `e8a1a7b` (2026-11-01). Classes follow
+Status as of `develop` at `933fbc3` (2026-11-14). Classes follow
 [Methodology §1](05-methodology.md#1-evidence-standard).
 
 ## 6.1 Verified facts
@@ -18,9 +18,10 @@ Status as of `develop` at `e8a1a7b` (2026-11-01). Classes follow
 | F-09 | Personal fields kept by the server are encrypted at rest with AES-256-GCM under keys read from a file the database never receives. | Code, test | `server/src/personal_data/` |
 | F-10 | Historical local snapshot at `78a14eb`: server 390 passed against a disposable database; vision 407 passed; gateway 179 passed and 170 integration tests skipped without a running server. Superseded as the current verification snapshot by F-11; the skipped tests were not local passes. | Test | Initial documentation in #218; [Testing §7.4](07-testing.md#74-verification-snapshot) |
 | F-11 | At `9036d10` on 2026-10-27, CI passed: server 390; vision 407; gateway and forecast 383, including required server integration; contracts 36; identity tools 17; RTSP laboratory 1. Superseded as the current verification snapshot by F-12. | Test | [CI run 40567080230](https://github.com/Estaciona-AI/estaciona-ai/actions/runs/40567080230) |
-| F-12 | At `7bf6c6e` on 2026-10-28, CI passed: server 407; vision 407; gateway and forecast 395, including required server integration; contracts 36; identity tools 17; RTSP laboratory 1. | Test | [CI run 40738777401](https://github.com/Estaciona-AI/estaciona-ai/actions/runs/40738777401); [conditions](07-testing.md#74-verification-snapshot) |
+| F-12 | At `7bf6c6e` on 2026-10-28, CI passed: server 407; vision 407; gateway and forecast 395, including required server integration; contracts 36; identity tools 17; RTSP laboratory 1. Superseded as the current verification snapshot by F-15. | Test | [CI run 40738777401](https://github.com/Estaciona-AI/estaciona-ai/actions/runs/40738777401); [conditions](07-testing.md#74-verification-snapshot) |
 | F-13 | `v0.10.0` was published on 2026-11-01 as a pilot release, with a signed tag on `c25db55`. CI passed at that commit; since F-12 the code changed only in component version fields, so F-12 remains the current verification snapshot. | Code, test | Tag `v0.10.0`; #229, #230; [CI run 41262972618](https://github.com/Estaciona-AI/estaciona-ai/actions/runs/41262972618) |
 | F-14 | On 2026-11-14, at the revision of #242, a walk-forward comparison with the production training configuration (35 days, hourly origins admitted by the 84-hour rule, daily refits, 733 origins) gave, in points of the rate: on a 44-spot history built from the two states (43 and 44 occupied) that a 69-second demonstration recording yields when replayed in a loop, 2.6 to 3.0 normalized MAE for the model against 1.1 for persistence and 1.1 for the mean of the history; on a simulated campus of the family of the training prior, 6.9 for the model against 28.6 for persistence and, where every baseline was available, 6.3 against 8.8 for the best baseline. Per day of origin, the model's error exceeded that of persistence by 1.4 to 1.8 points on the replayed history and was lower on 31 of 32 days on the simulated campus. Both histories were constructed; neither is a field observation. | Measurement on constructed histories | #242; scripts, recording and results are kept outside the repository; [method](05-methodology.md#3-forecast-evaluation) |
+| F-15 | `v0.11.0` was published on 2026-11-14 as a pilot release, with a signed tag on `b96e3cc`. CI passed at that commit: server 422; vision 407; gateway and forecast 422, including required server integration; contracts 36; identity tools 20; RTSP laboratory 1. | Code, test | Tag `v0.11.0`; #243, #244; [CI run 43600512869](https://github.com/Estaciona-AI/estaciona-ai/actions/runs/43600512869); [conditions](07-testing.md#74-verification-snapshot) |
 
 ## 6.2 Assumptions
 

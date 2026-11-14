@@ -47,6 +47,9 @@ changed a spot. The system does not claim exactly-once delivery.
 **Freshness.** A spot whose latest observation is older than
 `OBSERVATION_STALE_AFTER_SECS` (default 120 s), or that no camera has reported,
 is `unknown`: it is neither reservable nor recommended until observed again.
+An observation that arrives already older than that limit, as after a link
+outage, is recorded with its history but is not broadcast as the current
+status.
 
 **Forecasting.** The forecast worker reads the per-spot hourly occupancy history
 through a read-only database role, forecasts the next 24 hours of occupancy rate
