@@ -1,6 +1,6 @@
 # 8. Goals and roadmap
 
-Status as of 2026-11-01. A goal is *met* only when its criterion is satisfied by
+Status as of 2026-11-14. A goal is *met* only when its criterion is satisfied by
 evidence of the class stated; partial progress is reported as such.
 
 ## 8.1 Goals
